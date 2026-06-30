@@ -178,6 +178,48 @@ def test_id_encoding_roundtrip():
     np.testing.assert_array_equal(decoded, labels['top'].astype(np.uint32))
 
 
+def test_render_writes_mips_and_tiles(tmp_path):
+    from pcbnets.mips import make_mips
+    from pcbnets.tiles import make_tiles
+
+    build = tmp_path / 'build'
+    build.mkdir()
+    Image.new('L', (8, 8), 255).save(build / 'grid.png')
+    Image.new('RGB', (8, 8), (1, 2, 3)).save(build / 'idmap.png')
+
+    make_mips(build)
+    make_tiles(build)
+
+    assert (build / 'mips' / '2' / 'grid.png').is_file()
+    assert (build / 'mips' / '16' / 'idmap.png').is_file()
+    assert Image.open(build / 'mips' / '2' / 'grid.png').size == (4, 4)
+    assert Image.open(build / 'mips' / '16' / 'idmap.png').size == (1, 1)
+    assert (build / 'mips' / '1' / 'tiles' / 'grid_3_3.png').is_file()
+    assert (build / 'mips' / '2' / 'tiles' / 'idmap_1_1.png').is_file()
+
+
+def test_export_copies_mips_and_tiles(tmp_path):
+    from pcbnets.cli import cmd_export
+    import argparse
+    import json
+
+    build = tmp_path / 'build'
+    build.mkdir()
+    Image.new('L', (2, 2), 0).save(build / 'grid.png')
+    Image.new('RGB', (2, 2), 0).save(build / 'idmap.png')
+    (build / 'meta.json').write_text(json.dumps({}))
+    mip_tile = build / 'mips' / '1' / 'tiles'
+    mip_tile.mkdir(parents=True)
+    Image.new('L', (1, 1), 0).save(mip_tile / 'grid_0_0.png')
+
+    out = tmp_path / 'static'
+    args = argparse.Namespace(
+        build_dir=str(build), output=str(out), title=None, description=None,
+    )
+    assert cmd_export(args) == 0
+    assert (out / 'mips' / '1' / 'tiles' / 'grid_0_0.png').is_file()
+
+
 def test_deploy_zip_contains_static_bundle(tmp_path):
     from zipfile import ZipFile
     from pcbnets.cli import cmd_deploy
@@ -195,6 +237,9 @@ def test_deploy_zip_contains_static_bundle(tmp_path):
     }))
     Image.new('L', (2, 2), 0).save(build / 'F_Silkscreen.png')
     Image.new('L', (2, 2), 0).save(build / 'F_Mask.png')
+    mip_tile = build / 'mips' / '1' / 'tiles'
+    mip_tile.mkdir(parents=True)
+    Image.new('L', (1, 1), 0).save(mip_tile / 'grid_0_0.png')
 
     out = tmp_path / 'board.zip'
     args = argparse.Namespace(
@@ -208,6 +253,7 @@ def test_deploy_zip_contains_static_bundle(tmp_path):
         assert {'index.html', 'grid.png', 'idmap.png', 'meta.json'} <= names
         assert 'F_Silkscreen.png' in names
         assert 'F_Mask.png' in names
+        assert 'mips/1/tiles/grid_0_0.png' in names
         assert 'Test Board' in zf.read('index.html').decode('utf-8')
 
 
