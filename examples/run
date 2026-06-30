@@ -1,0 +1,8 @@
+rm -rf pngs web gerbers/layers.json
+pcbnets gerber ./gerbers -o ./pngs --dpi 1000 
+pcbnets render ./pngs -o web --scale 1.0  --no-invert In1_Cu  --no-invert In3_Cu --no-invert In2_Cu  --no-invert In4_Cu
+
+./make_mips
+./make_tiles
+pcbnets deploy ./web -o tonner_viewer.zip --prefix tonner
+pcbnets serve ./web

@@ -1,0 +1,50 @@
+#!/bin/sh
+set -eu
+
+make_tiles_for_dir() {
+  srcdir="$1"
+  outdir="$2"
+  grid="$3"   # 2 means 2x2, 4 means 4x4
+
+  mkdir -p "$outdir"
+
+  for png in "$srcdir"/*.png; do
+    [ -f "$png" ] || continue
+
+    file=$(basename "$png")
+    base=${file%.png}
+
+    set -- $(identify -format "%w %h" "$png")
+    w="$1"
+    h="$2"
+
+    ty=0
+    while [ "$ty" -lt "$grid" ]; do
+      y0=$(( ty * h / grid ))
+      y1=$(( (ty + 1) * h / grid ))
+      th=$(( y1 - y0 ))
+
+      tx=0
+      while [ "$tx" -lt "$grid" ]; do
+        x0=$(( tx * w / grid ))
+        x1=$(( (tx + 1) * w / grid ))
+        tw=$(( x1 - x0 ))
+
+        convert "$png" \
+          -crop "${tw}x${th}+${x0}+${y0}" \
+          +repage \
+          "$outdir/${base}_${tx}_${ty}.png"
+
+        tx=$((tx + 1))
+      done
+
+      ty=$((ty + 1))
+    done
+  done
+}
+
+# 1x: original PNGs -> 4x4 tiles
+make_tiles_for_dir "web" "web/mips/1/tiles" 4
+
+# 2x: mip level 2 PNGs -> 2x2 tiles
+make_tiles_for_dir "web/mips/2" "web/mips/2/tiles" 2

@@ -1,0 +1,96 @@
+"""Loading PCB layer masks from PNG files on disk."""
+
+from __future__ import annotations
+
+import pathlib
+from typing import Iterable
+
+from PIL import Image
+
+
+# Optional silkscreen layer filenames, looked up alongside the copper layers.
+# Canonical KiCad-style names only.
+SILK_LAYERS = ('F_Silkscreen', 'B_Silkscreen')
+
+# Map any recognised silk filename → canonical side. The viewer uses these
+# positions to decide which silk to show in front view vs back view.
+SILK_POSITION = {
+    'F_Silkscreen': 'front',
+    'B_Silkscreen': 'back',
+}
+
+# Optional solder-mask artwork. In KiCad these Gerbers normally describe
+# mask *openings* rather than a complete green board shape, but they are
+# still useful in the viewer for showing exposed pads/windows.
+MASK_LAYERS = ('F_Mask', 'B_Mask')
+MASK_POSITION = {
+    'F_Mask': 'front',
+    'B_Mask': 'back',
+}
+
+
+def threshold_mask(img: Image.Image, threshold: int = 0) -> Image.Image:
+    """Convert an arbitrary image to a clean 1-bit mask.
+
+    Avoids ``convert('1')``'s dithering — anything above ``threshold`` becomes
+    white, everything else black. The result is mode ``'1'`` and safe to feed
+    to ``ImageChops.logical_*`` and ``scipy.ndimage.label`` (after going via
+    numpy).
+    """
+    return img.convert('L').point(lambda p: p > threshold, mode='1')
+
+
+def load_masks(
+    directory: pathlib.Path,
+    layer_names: Iterable[str],
+    drill_name: str = 'drill',
+    threshold: int = 0,
+    silk: bool = True,
+    extra_names: Iterable[str] = (),
+) -> dict[str, Image.Image]:
+    """Load each named layer + drill from ``directory`` as a mode-'1' mask.
+
+    Filenames are ``{name}.png`` inside ``directory``. All masks must have
+    identical dimensions or a ``ValueError`` is raised — alignment mismatch
+    is the single most common cause of bad net extraction.
+
+    If ``silk`` is True (default), optional silkscreen and solder-mask PNGs
+    are loaded when present. They are not part of the connectivity analysis
+    but are useful in the viewer.
+    """
+    directory = pathlib.Path(directory)
+    if not directory.is_dir():
+        raise FileNotFoundError(f"{directory} is not a directory")
+
+    # Preserve order but avoid loading the same mask twice.  ``extra_names``
+    # is useful when the build has both a physical drill-hole mask and a
+    # separate electrical via/PTH connectivity mask.
+    names = []
+    for name in [*layer_names, drill_name, *extra_names]:
+        if name and name not in names:
+            names.append(name)
+
+    masks: dict[str, Image.Image] = {}
+    for name in names:
+        path = directory / f'{name}.png'
+        if not path.is_file():
+            raise FileNotFoundError(f'expected mask file not found: {path}')
+        masks[name] = threshold_mask(Image.open(path), threshold)
+
+    if silk:
+        for name in (*SILK_LAYERS, *MASK_LAYERS):
+            path = directory / f'{name}.png'
+            if path.is_file():
+                masks[name] = threshold_mask(Image.open(path), threshold)
+
+    # Sanity-check: every mask must have the same dimensions.
+    sizes = {n: m.size for n, m in masks.items()}
+    unique_sizes = set(sizes.values())
+    if len(unique_sizes) > 1:
+        details = '\n  '.join(f'{n}: {s}' for n, s in sizes.items())
+        raise ValueError(
+            f'mask dimensions differ — re-render with a common bounding box.\n'
+            f'  {details}'
+        )
+
+    return masks

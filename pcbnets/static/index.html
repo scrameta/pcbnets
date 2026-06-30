@@ -1,0 +1,1795 @@
+<!DOCTYPE html>
+
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1" name="viewport"/>
+<title>pcbnets viewer</title>
+<style>
+  :root {
+    --bg: #1a1a1a;
+    --panel: #242424;
+    --fg: #e0e0e0;
+    --muted: #888;
+    --accent: #4ac;
+    --highlight: rgba(255, 80, 80, 0.7);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg); color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    height: 100%;
+  }
+  body { display: flex; flex-direction: row; }
+  #sidebar {
+    width: 280px; flex-shrink: 0;
+    padding: 16px; background: var(--panel);
+    border-right: 1px solid #333;
+    overflow-y: auto;
+  }
+  #sidebar h1 { font-size: 16px; margin: 0 0 12px; }
+  #sidebar p { font-size: 12px; color: var(--muted); margin: 4px 0; }
+  #sidebar input[type=number], #sidebar input[type=text] {
+    width: 100%; padding: 6px; background: #111; color: var(--fg);
+    border: 1px solid #333; border-radius: 3px; font-family: inherit;
+  }
+  #sidebar label.section { font-size: 11px; color: var(--muted);
+                   text-transform: uppercase; display: block; margin-top: 12px; }
+  #sidebar button {
+    margin-top: 6px; padding: 6px 10px;
+    background: #333; color: var(--fg);
+    border: 1px solid #444; border-radius: 3px; cursor: pointer;
+    font-family: inherit; font-size: 12px;
+  }
+  #sidebar button:hover { background: #444; }
+  #sidebar button.active { background: #2a5a7a; border-color: #4ac; }
+  .toggle-row { display: flex; gap: 6px; flex-wrap: wrap; }
+  #net-info { margin-top: 16px; font-size: 13px; }
+  #net-info .layer-list { color: var(--muted); margin-top: 4px; }
+  #viewport {
+    flex: 1; overflow: hidden;
+    position: relative;
+    padding: 0;
+    cursor: crosshair;
+    touch-action: none;
+  }
+  #viewport.dragging { cursor: move; }
+  .stack {
+    position: absolute; left: 0; top: 0;
+    width: 100%; height: 100%;
+    display: block;
+    transform-origin: 0 0;
+  }
+  .stack canvas {
+    position: absolute; left: 0; top: 0;
+    width: 100%; height: 100%;
+    display: block;
+  }
+  #display { background: #000; }
+  #highlight, #silk {
+    position: absolute; left: 0; top: 0;
+    width: 100%; height: 100%;
+    pointer-events: none;
+  }
+  #highlight.drag-follow { will-change: transform; }
+  #labels {
+    position: absolute; left: 0; top: 0;
+    width: 100%; height: 100%;
+    pointer-events: none;
+  }
+  #labels .tag {
+    position: absolute;
+    background: rgba(0, 0, 0, 0.75);
+    color: #fff;
+    padding: 2px 6px;
+    font-size: 11px;
+    border-radius: 2px;
+  }
+  #labels .tag.flipped { background: rgba(120, 60, 0, 0.85); }
+  /* The panel grid itself is fitted with a CSS transform.  Mouse-wheel
+     zooming/panning changes the board crop drawn *inside* every panel, so
+     all layer windows stay fixed while their contents move in sync. */
+</style>
+</head>
+<body>
+<div id="sidebar">
+<h1>pcbnets viewer</h1>
+<p id="loading">Loading…</p>
+<div id="controls" style="display:none">
+<label class="section">View</label>
+<div class="toggle-row">
+<button id="toggle-fit">Fit screen</button>
+<button id="toggle-flip">View from back</button>
+<button id="toggle-silk" style="display:none">Show silk</button>
+</div>
+<label class="section">Find net</label>
+<input id="net-search" min="1" placeholder="net id" type="number"/>
+<label class="section">Layers</label>
+<p id="tile-list"></p>
+<div id="net-info"></div>
+</div>
+</div>
+<div id="viewport">
+<div class="stack">
+<canvas id="display"></canvas>
+<canvas id="silk"></canvas>
+<canvas id="highlight"></canvas>
+<div id="labels"></div>
+</div>
+</div>
+<canvas id="idmap" style="display:none"></canvas>
+<script>
+const display   = document.getElementById('display');
+const highlight = document.getElementById('highlight');
+const silkCanvas = document.getElementById('silk');
+const idmap     = document.getElementById('idmap');
+const labelsDiv = document.getElementById('labels');
+const viewport  = document.getElementById('viewport');
+const stack     = document.querySelector('.stack');
+
+let idData = null;
+let netToPixels = null;
+let meta = null;
+let currentNet = null;
+let topSilkImg = null;
+let bottomSilkImg = null;
+let frontMaskImg = null;
+let backMaskImg = null;
+let flipped = false;
+let silkOn = true;
+
+// Panel transform: fits/positions the fixed grid of layer windows.
+let panelScale = 1.0;
+let panelX = 16;
+let panelY = 16;
+
+// Shared board viewport drawn inside every panel.
+// contentZoom=1 shows the whole board in each tile.  Larger values crop into
+// the same board coordinate window on all layers.
+let contentZoom = 1.0;
+let contentPanX = 0;
+let contentPanY = 0;
+
+let isPanning = false;
+let panStartX = 0;
+let panStartY = 0;
+let panOrigX = 0;
+let panOrigY = 0;
+let suppressNextClick = false;
+let panMoved = false;
+let currentHighlightPixels = null;
+let netBreakdownCache = new Map();
+let highlightDragDx = 0;
+let highlightDragDy = 0;
+
+// The source atlas remains full-resolution, but the visible canvases are only
+// viewport-sized. This keeps pan/zoom work proportional to the browser window
+// rather than to huge PNG dimensions.
+let gridW = 0;
+let gridH = 0;
+let renderDpr = 1;
+let redrawPending = false;
+const MAX_DEVICE_PIXEL_RATIO = 2;
+
+// Server/preprocessor-generated mip levels. By default the viewer looks for:
+//   ./mips/<level>/<name>.png
+// where name is grid, idmap, F_Mask, B_Mask, F_Silkscreen, B_Silkscreen, etc.
+// meta.json may override with:
+//   "mip_levels": [1,2,4,8,16],
+//   "mip_path": "mips/{level}/{name}.png"
+let mipLevels = [1, 2, 4, 8, 16];
+let mipPathTemplate = 'mips/{level}/{name}.png';
+
+// Huge high-resolution atlas PNGs are slow to download, decode, and sample
+// from. Use single-image mips for zoomed-out views and tiled mips for the
+// large levels. This version uses a fixed tile *grid* per mip level, not
+// fixed-size 1024px tiles. That matches generators that split level 1 into
+// e.g. 4x4 tiles and level 2 into 2x2 tiles, with edge tiles allowed to be
+// one pixel wider/taller because of rounding. meta.json may override with:
+//   "tiled_levels": [1,2],
+//   "tile_grids": {"1": [4,4], "2": [2,2]},
+//   "tile_path": "mips/{level}/tiles/{name}_{tx}_{ty}.png",
+//   "image_dims": {"F_Mask": [10166, 5747]} // optional; otherwise boardDims()
+let tiledLevels = [1, 2];
+let tileGrids = new Map([[1, [4, 4]], [2, [2, 2]]]);
+let tilePathTemplate = 'mips/{level}/tiles/{name}_{tx}_{ty}.png';
+
+const imageMipCache = new Map();       // key: name:level -> HTMLImageElement | Promise | null
+const idmapMipCache = new Map();       // level -> {level, width, height, data} | {promise}
+const tileImageCache = new Map();      // key: name:level:tx:ty -> HTMLImageElement | Promise | null
+const processedTileCache = new Map();  // key: mode:name:level:tx:ty:colour:alpha -> canvas
+const idmapTileCache = new Map();      // key: level:tx:ty -> {level, tx, ty, width, height, data} | {promise}
+const INITIAL_MIP_LEVEL = 16;
+const PROGRESSIVE_MIP_ORDER = [16, 8, 4, 2, 1];
+
+
+function loadImage(src) {
+  return new Promise((res, rej) => {
+    const i = new Image();
+    i.onload = () => res(i);
+    i.onerror = () => rej(new Error('failed to load ' + src));
+    i.src = src;
+  });
+}
+
+async function loadOptional(src) {
+  try { return await loadImage(src); } catch { return null; }
+}
+
+async function loadOptionalLayer(available, candidates) {
+  for (const name of candidates) {
+    if (!available.includes(name)) continue;
+    const img = await loadOptional('./' + name + '.png');
+    if (img) {
+      img._pcbnetsName = name;
+      return img;
+    }
+  }
+  return null;
+}
+
+async function loadMeta() {
+  const r = await fetch('./meta.json');
+  if (!r.ok) throw new Error('meta.json missing');
+  return r.json();
+}
+
+function configureMipsFromMeta() {
+  if (meta && Array.isArray(meta.mip_levels) && meta.mip_levels.length) {
+    mipLevels = [...new Set(meta.mip_levels.map(Number).filter(n => Number.isFinite(n) && n >= 1))]
+      .sort((a, b) => a - b);
+    if (!mipLevels.includes(1)) mipLevels.unshift(1);
+  }
+  if (meta && typeof meta.mip_path === 'string' && meta.mip_path.length) {
+    mipPathTemplate = meta.mip_path;
+  }
+  if (meta && Array.isArray(meta.tiled_levels)) {
+    tiledLevels = [...new Set(meta.tiled_levels.map(Number).filter(n => Number.isFinite(n) && n >= 1))]
+      .sort((a, b) => a - b);
+  }
+  if (meta && meta.tile_grids && typeof meta.tile_grids === 'object') {
+    const next = new Map();
+    for (const [levelKey, grid] of Object.entries(meta.tile_grids)) {
+      const level = Number(levelKey);
+      if (!Number.isFinite(level) || level < 1) continue;
+      if (!Array.isArray(grid) || grid.length < 2) continue;
+      const gx = Math.max(1, Math.floor(Number(grid[0])));
+      const gy = Math.max(1, Math.floor(Number(grid[1])));
+      if (Number.isFinite(gx) && Number.isFinite(gy)) next.set(level, [gx, gy]);
+    }
+    if (next.size) tileGrids = next;
+  }
+  if (meta && typeof meta.tile_path === 'string' && meta.tile_path.length) {
+    tilePathTemplate = meta.tile_path;
+  }
+}
+
+function mipPath(name, level) {
+  if (level === 1) return './' + name + '.png';
+  const path = mipPathTemplate
+    .replaceAll('{level}', String(level))
+    .replaceAll('{name}', name);
+  return path.startsWith('./') || path.startsWith('/') ? path : './' + path;
+}
+
+function isTiledLevel(level) {
+  return tiledLevels.includes(level);
+}
+
+function sourceFullDims(name) {
+  // grid/idmap are the full panel atlas. Per-layer overlays such as
+  // F_Mask, B_Mask, silkscreen, and drill are single-board images. Their
+  // tiled mips therefore have different dimensions from the grid atlas.
+  if (name === 'grid' || name === 'idmap') {
+    return {w: gridW || 1, h: gridH || 1};
+  }
+
+  if (meta && meta.image_dims && meta.image_dims[name]) {
+    const d = meta.image_dims[name];
+    const w = Number(d[0] ?? d.w);
+    const h = Number(d[1] ?? d.h);
+    if (Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) {
+      return {w, h};
+    }
+  }
+
+  return boardDims();
+}
+
+function mipPixelDimsForName(name, level) {
+  const d = sourceFullDims(name);
+  return {
+    w: Math.max(1, Math.ceil(d.w / level)),
+    h: Math.max(1, Math.ceil(d.h / level)),
+  };
+}
+
+function mipPixelDims(level) {
+  return mipPixelDimsForName('grid', level);
+}
+
+function tileGridForLevel(level) {
+  return tileGrids.get(level) || [1, 1];
+}
+
+function tileBoundsForName(name, level, tx, ty) {
+  const dims = mipPixelDimsForName(name, level);
+  const [gx, gy] = tileGridForLevel(level);
+  if (tx < 0 || ty < 0 || tx >= gx || ty >= gy) return null;
+  const x0 = Math.floor(dims.w * tx / gx);
+  const x1 = Math.floor(dims.w * (tx + 1) / gx);
+  const y0 = Math.floor(dims.h * ty / gy);
+  const y1 = Math.floor(dims.h * (ty + 1) / gy);
+  return {x: x0, y: y0, w: x1 - x0, h: y1 - y0};
+}
+
+function tileBounds(level, tx, ty) {
+  return tileBoundsForName('grid', level, tx, ty);
+}
+
+function tileIndexForMipCoordForName(name, level, mx, my) {
+  const dims = mipPixelDimsForName(name, level);
+  const [gx, gy] = tileGridForLevel(level);
+  const tx = clamp(Math.floor(mx * gx / Math.max(1, dims.w)), 0, gx - 1);
+  const ty = clamp(Math.floor(my * gy / Math.max(1, dims.h)), 0, gy - 1);
+  return {tx, ty};
+}
+
+function tileIndexForMipCoord(level, mx, my) {
+  return tileIndexForMipCoordForName('grid', level, mx, my);
+}
+
+function tilePath(name, level, tx, ty) {
+  const path = tilePathTemplate
+    .replaceAll('{level}', String(level))
+    .replaceAll('{name}', name)
+    .replaceAll('{tx}', String(tx))
+    .replaceAll('{ty}', String(ty));
+  return path.startsWith('./') || path.startsWith('/') ? path : './' + path;
+}
+
+function fullAtlasDimsFromMeta() {
+  if (meta) {
+    const w = meta.full_width || meta.grid_width || meta.atlas_width || meta.width;
+    const h = meta.full_height || meta.grid_height || meta.atlas_height || meta.height;
+    if (Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) {
+      return {w, h};
+    }
+    if (meta.placements) {
+      let maxX = 0;
+      let maxY = 0;
+      for (const p of Object.values(meta.placements)) {
+        if (!p) continue;
+        maxX = Math.max(maxX, (p.x || 0) + (p.w || 0));
+        maxY = Math.max(maxY, (p.y || 0) + (p.h || 0));
+      }
+      if (maxX > 0 && maxY > 0) return {w: maxX, h: maxY};
+    }
+  }
+  return {w: gridW || idmap.width || 1, h: gridH || idmap.height || 1};
+}
+
+function coarsestMipLevel() {
+  return mipLevels.reduce((a, b) => Math.max(a, b), 1);
+}
+
+function initialMipLevel() {
+  const preferred = meta && Number(meta.initial_mip_level);
+  if (Number.isFinite(preferred) && mipLevels.includes(preferred)) return preferred;
+  if (mipLevels.includes(INITIAL_MIP_LEVEL)) return INITIAL_MIP_LEVEL;
+  return coarsestMipLevel();
+}
+
+function layerRef(name) {
+  return {_pcbnetsName: name, _pcbnetsPlaceholder: true};
+}
+
+function loadedImageMip(name, level) {
+  const cached = imageMipCache.get(name + ':' + level);
+  return cached instanceof HTMLImageElement ? cached : null;
+}
+
+function chooseLoadedImageMip(name, desiredLevel, baseImg) {
+  const baseIsImage = baseImg instanceof HTMLImageElement;
+  if (desiredLevel === 1 && baseIsImage) return {img: baseImg, level: 1};
+
+  const exact = loadedImageMip(name, desiredLevel);
+  if (exact) return {img: exact, level: desiredLevel};
+
+  // Prefer an already-loaded coarser image while the ideal one is loading.
+  // This is what lets the viewer show quickly from mips/16 and sharpen later.
+  for (let i = mipLevels.length - 1; i >= 0; i--) {
+    const level = mipLevels[i];
+    if (level >= desiredLevel) {
+      const img = level === 1 && baseIsImage ? baseImg : loadedImageMip(name, level);
+      if (img) return {img, level};
+    }
+  }
+
+  // If no coarser level is loaded, use the sharpest already-loaded one.
+  for (const level of mipLevels) {
+    const img = level === 1 && baseIsImage ? baseImg : loadedImageMip(name, level);
+    if (img) return {img, level};
+  }
+
+  return {img: null, level: desiredLevel};
+}
+
+function optionalLayerRef(available, candidates) {
+  for (const name of candidates) {
+    if (!available.includes(name)) continue;
+    return layerRef(name);
+  }
+  return null;
+}
+
+function chooseMipLevel(effectiveScale) {
+  // effectiveScale is screen pixels per full-resolution source pixel.
+  // Pick the largest precomputed downsample that does not look obviously blurry.
+  if (!Number.isFinite(effectiveScale) || effectiveScale <= 0) return mipLevels[mipLevels.length - 1] || 1;
+  const target = 1 / effectiveScale;
+  let best = 1;
+  for (const level of mipLevels) {
+    if (level <= target * 1.25) best = level;
+  }
+  return best;
+}
+
+function currentMipLevel() {
+  return chooseMipLevel(panelScale * contentZoom);
+}
+
+function requestImageMip(name, level) {
+  if (!name) return null;
+  if (isTiledLevel(level)) return null;
+  const key = name + ':' + level;
+  const cached = imageMipCache.get(key);
+  if (cached instanceof HTMLImageElement || cached === null) return cached;
+  if (cached) return null;
+
+  const promise = loadImage(mipPath(name, level))
+    .then(img => {
+      img._pcbnetsName = name;
+      img._pcbnetsMipLevel = level;
+      imageMipCache.set(key, img);
+      if (name === 'grid' && level === 1) {
+        gridSrcCache = img;
+        gridW = img.width;
+        gridH = img.height;
+      }
+      redraw();
+      return img;
+    })
+    .catch(() => {
+      imageMipCache.set(key, null);
+      return null;
+    });
+  imageMipCache.set(key, promise);
+  return null;
+}
+
+async function loadImageMipNow(name, level) {
+  const existing = loadedImageMip(name, level);
+  if (existing) return existing;
+  const img = await loadImage(mipPath(name, level));
+  img._pcbnetsName = name;
+  img._pcbnetsMipLevel = level;
+  imageMipCache.set(name + ':' + level, img);
+  if (name === 'grid' && level === 1) {
+    gridSrcCache = img;
+    gridW = img.width;
+    gridH = img.height;
+  }
+  return img;
+}
+
+function resolveImageMip(baseImg, name, desiredLevel) {
+  if (!name && baseImg && baseImg._pcbnetsName) name = baseImg._pcbnetsName;
+  if (!name) return {img: baseImg instanceof HTMLImageElement ? baseImg : null, level: 1};
+  if (!isTiledLevel(desiredLevel)) requestImageMip(name, desiredLevel);
+  return chooseLoadedImageMip(name, desiredLevel, baseImg);
+}
+
+function installIdmapMip(level, img) {
+  const c = document.createElement('canvas');
+  c.width = img.width;
+  c.height = img.height;
+  const ctx = c.getContext('2d');
+  ctx.drawImage(img, 0, 0);
+  const data = ctx.getImageData(0, 0, c.width, c.height).data;
+  const result = {level, width: c.width, height: c.height, data};
+  idmapMipCache.set(level, result);
+
+  if (level === 1) {
+    idmap.width = c.width;
+    idmap.height = c.height;
+    idData = {data};
+    buildNetIndex();
+    if (currentNet) {
+      currentHighlightPixels = netToPixels && netToPixels.get(currentNet) || null;
+      updateNetInfo(currentNet);
+    }
+  }
+
+  drawHighlight();
+  return result;
+}
+
+function requestIdmapMip(level) {
+  if (isTiledLevel(level)) return null;
+  const cached = idmapMipCache.get(level);
+  if (cached && cached.data) return cached;
+  if (cached && cached.promise) return null;
+
+  const promise = loadImage(mipPath('idmap', level))
+    .then(img => installIdmapMip(level, img))
+    .catch(() => {
+      idmapMipCache.delete(level);
+      return null;
+    });
+  idmapMipCache.set(level, {promise});
+  return null;
+}
+
+async function loadIdmapMipNow(level) {
+  const cached = idmapMipCache.get(level);
+  if (cached && cached.data) return cached;
+  const img = await loadImage(mipPath('idmap', level));
+  return installIdmapMip(level, img);
+}
+
+function getIdmapForLevel(desiredLevel) {
+  if (!isTiledLevel(desiredLevel)) requestIdmapMip(desiredLevel);
+  const exact = idmapMipCache.get(desiredLevel);
+  if (exact && exact.data) return exact;
+
+  // Prefer an already-loaded coarser idmap while the ideal one is loading.
+  // That makes picking available immediately from mips/16/idmap.png.
+  for (let i = mipLevels.length - 1; i >= 0; i--) {
+    const level = mipLevels[i];
+    const cand = idmapMipCache.get(level);
+    if (level >= desiredLevel && cand && cand.data) return cand;
+  }
+
+  // Otherwise use the sharpest loaded idmap, if any.
+  for (const level of mipLevels) {
+    const cand = idmapMipCache.get(level);
+    if (cand && cand.data) return cand;
+  }
+
+  return null;
+}
+
+function preloadProgressiveMips() {
+  const layers = [];
+  if (meta) {
+    layers.push(...((meta.silk_layers) || []));
+    layers.push(...((meta.mask_layers) || []));
+  }
+  const names = [...new Set(['grid', ...layers])];
+  const order = PROGRESSIVE_MIP_ORDER.filter(l => mipLevels.includes(l));
+
+  let delay = 0;
+  for (const level of order) {
+    setTimeout(() => {
+      if (!isTiledLevel(level)) {
+        for (const name of names) requestImageMip(name, level);
+        requestIdmapMip(level);
+      }
+    }, delay);
+    delay += 50;
+  }
+}
+
+async function init() {
+  try {
+    meta = await loadMeta();
+  } catch (e) {
+    meta = null;
+  }
+
+  configureMipsFromMeta();
+
+  const dims = fullAtlasDimsFromMeta();
+  gridW = dims.w;
+  gridH = dims.h;
+
+  const firstLevel = initialMipLevel();
+
+  // Fast first paint: load the coarsest useful atlas and idmap first. The
+  // viewer can display and pick immediately, then progressively sharpens as
+  // finer mip levels arrive.
+  const firstLoads = [loadImageMipNow('grid', firstLevel)];
+  if (mipLevels.includes(firstLevel)) firstLoads.push(loadIdmapMipNow(firstLevel));
+
+  const loaded = await Promise.allSettled(firstLoads);
+  const firstGrid = loaded[0].status === 'fulfilled' ? loaded[0].value : null;
+  if (firstGrid) {
+    // Keep full-resolution atlas dimensions from meta/placements; the mip image
+    // itself is only a drawing source.
+    imageMipCache.set('grid:' + firstLevel, firstGrid);
+  } else {
+    // Last-resort fallback for old exports with no mips directory.
+    const gridImg = await loadImageMipNow('grid', 1);
+    gridSrcCache = gridImg;
+    gridW = gridImg.width;
+    gridH = gridImg.height;
+  }
+
+  resizeRenderCanvases();
+
+  // Optional visual overlays are referenced by name and loaded lazily at the
+  // current mip level. This avoids blocking the first display on full-res mask
+  // or silkscreen PNGs.
+  const silkLayers = (meta && meta.silk_layers) || [];
+  topSilkImg = optionalLayerRef(silkLayers, ['F_Silkscreen']);
+  bottomSilkImg = optionalLayerRef(silkLayers, ['B_Silkscreen']);
+
+  const maskLayers = (meta && meta.mask_layers) || [];
+  frontMaskImg = optionalLayerRef(maskLayers, ['F_Mask']);
+  backMaskImg = optionalLayerRef(maskLayers, ['B_Mask']);
+
+  if (topSilkImg || bottomSilkImg) {
+    document.getElementById('toggle-silk').style.display = 'inline-block';
+  }
+
+  populateSidebar();
+
+  document.getElementById('loading').style.display = 'none';
+  document.getElementById('controls').style.display = 'block';
+  applyToggleStates();
+  fitToScreen();
+
+  preloadProgressiveMips();
+}
+
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+function resizeRenderCanvases() {
+  const cssW = Math.max(1, viewport.clientWidth);
+  const cssH = Math.max(1, viewport.clientHeight);
+  renderDpr = Math.max(1, Math.min(MAX_DEVICE_PIXEL_RATIO,
+                                   window.devicePixelRatio || 1));
+  const w = Math.round(cssW * renderDpr);
+  const h = Math.round(cssH * renderDpr);
+  for (const c of [display, silkCanvas, highlight]) {
+    if (c.width !== w || c.height !== h) {
+      c.width = w;
+      c.height = h;
+    }
+    c.style.width = cssW + 'px';
+    c.style.height = cssH + 'px';
+  }
+}
+
+function beginCanvasFrame(canvas, fillStyle = null) {
+  resizeRenderCanvases();
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(renderDpr, 0, 0, renderDpr, 0, 0);
+  if (fillStyle) {
+    ctx.fillStyle = fillStyle;
+    ctx.fillRect(0, 0, viewport.clientWidth, viewport.clientHeight);
+  } else {
+    ctx.clearRect(0, 0, viewport.clientWidth, viewport.clientHeight);
+  }
+  return ctx;
+}
+
+function tileScreenRect(p) {
+  return {
+    x: panelX + p.x * panelScale,
+    y: panelY + p.y * panelScale,
+    w: p.w * panelScale,
+    h: p.h * panelScale,
+  };
+}
+
+function rectVisible(r) {
+  return r.x < viewport.clientWidth && r.y < viewport.clientHeight &&
+         r.x + r.w > 0 && r.y + r.h > 0;
+}
+
+function drawImageToTile(ctx, img, crop, p, mirror, sourceLevel = 1) {
+  const r = tileScreenRect(p);
+  if (!img || !rectVisible(r)) return;
+  const sc = {
+    x: crop.x / sourceLevel,
+    y: crop.y / sourceLevel,
+    w: crop.w / sourceLevel,
+    h: crop.h / sourceLevel,
+  };
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(r.x, r.y, r.w, r.h);
+  ctx.clip();
+  if (mirror) {
+    ctx.translate(r.x + r.w, r.y);
+    ctx.scale(-1, 1);
+    ctx.drawImage(img, sc.x, sc.y, sc.w, sc.h, 0, 0, r.w, r.h);
+  } else {
+    ctx.drawImage(img, sc.x, sc.y, sc.w, sc.h, r.x, r.y, r.w, r.h);
+  }
+  ctx.restore();
+}
+
+function requestTileImage(name, level, tx, ty) {
+  if (!tileBoundsForName(name, level, tx, ty)) return null;
+  const key = `${name}:${level}:${tx}:${ty}`;
+  const cached = tileImageCache.get(key);
+  if (cached instanceof HTMLImageElement || cached === null) return cached;
+  if (cached) return null;
+
+  const promise = loadImage(tilePath(name, level, tx, ty))
+    .then(img => {
+      img._pcbnetsName = name;
+      img._pcbnetsMipLevel = level;
+      img._pcbnetsTileX = tx;
+      img._pcbnetsTileY = ty;
+      tileImageCache.set(key, img);
+      redraw();
+      return img;
+    })
+    .catch(() => {
+      tileImageCache.set(key, null);
+      return null;
+    });
+  tileImageCache.set(key, promise);
+  return null;
+}
+
+function processTile(img, name, level, tx, ty, mode, colour, alpha) {
+  if (!img || mode === 'raw') return img;
+  const key = `${mode}:${name}:${level}:${tx}:${ty}:${colour}:${alpha}`;
+  if (processedTileCache.has(key)) return processedTileCache.get(key);
+
+  const off = document.createElement('canvas');
+  off.width = img.width;
+  off.height = img.height;
+  const octx = off.getContext('2d');
+  octx.drawImage(img, 0, 0);
+
+  const [r, g, b] = parseHexColour(colour);
+  const id = octx.getImageData(0, 0, off.width, off.height);
+  for (let i = 0; i < id.data.length; i += 4) {
+    const v = Math.max(id.data[i], id.data[i + 1], id.data[i + 2]);
+    const a = mode === 'maskfilm' ? (255 - v) : v;
+    id.data[i]     = r;
+    id.data[i + 1] = g;
+    id.data[i + 2] = b;
+    id.data[i + 3] = Math.round(a * alpha);
+  }
+  octx.putImageData(id, 0, 0);
+  processedTileCache.set(key, off);
+  return off;
+}
+
+function drawTiledProcessed(ctx, name, level, p, localCrop, mirror, mode, colour, alpha, sourceOffsetX = 0, sourceOffsetY = 0) {
+  const r = tileScreenRect(p);
+  if (!rectVisible(r)) return;
+
+  const sx0 = (sourceOffsetX + localCrop.x) / level;
+  const sy0 = (sourceOffsetY + localCrop.y) / level;
+  const sx1 = (sourceOffsetX + localCrop.x + localCrop.w) / level;
+  const sy1 = (sourceOffsetY + localCrop.y + localCrop.h) / level;
+  const [gx, gy] = tileGridForLevel(level);
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(r.x, r.y, r.w, r.h);
+  ctx.clip();
+  if (mirror) {
+    ctx.translate(r.x + r.w, r.y);
+    ctx.scale(-1, 1);
+  }
+
+  // Tile grids are small at the levels we tile (for example 4x4 at level 1,
+  // 2x2 at level 2), so iterating the grid is simpler and safer than trying
+  // to infer fixed-size tile numbers. This also clamps requests to existing
+  // tile coordinates, preventing grid_14_8.png-style 404s.
+  for (let ty = 0; ty < gy; ty++) {
+    for (let tx = 0; tx < gx; tx++) {
+      const b = tileBoundsForName(name, level, tx, ty);
+      if (!b) continue;
+      const ix0 = Math.max(sx0, b.x);
+      const iy0 = Math.max(sy0, b.y);
+      const ix1 = Math.min(sx1, b.x + b.w);
+      const iy1 = Math.min(sy1, b.y + b.h);
+      if (ix1 <= ix0 || iy1 <= iy0) continue;
+
+      const raw = requestTileImage(name, level, tx, ty);
+      if (!(raw instanceof HTMLImageElement)) continue;
+      const img = processTile(raw, name, level, tx, ty, mode, colour, alpha);
+
+      const localX0 = ix0 * level - sourceOffsetX;
+      const localY0 = iy0 * level - sourceOffsetY;
+      const localX1 = ix1 * level - sourceOffsetX;
+      const localY1 = iy1 * level - sourceOffsetY;
+      const nx0 = (localX0 - localCrop.x) / localCrop.w;
+      const ny0 = (localY0 - localCrop.y) / localCrop.h;
+      const nx1 = (localX1 - localCrop.x) / localCrop.w;
+      const ny1 = (localY1 - localCrop.y) / localCrop.h;
+
+      const dx = mirror ? nx0 * r.w : r.x + nx0 * r.w;
+      const dy = mirror ? ny0 * r.h : r.y + ny0 * r.h;
+      const dw = (nx1 - nx0) * r.w;
+      const dh = (ny1 - ny0) * r.h;
+
+      // If the tile dimensions differ from the ideal mathematical split by a
+      // pixel, scale source coordinates into the actual image size.
+      const imgScaleX = img.width / Math.max(1, b.w);
+      const imgScaleY = img.height / Math.max(1, b.h);
+      ctx.drawImage(img,
+                    (ix0 - b.x) * imgScaleX,
+                    (iy0 - b.y) * imgScaleY,
+                    (ix1 - ix0) * imgScaleX,
+                    (iy1 - iy0) * imgScaleY,
+                    dx, dy, dw, dh);
+    }
+  }
+
+  ctx.restore();
+}
+
+function requestIdmapTile(level, tx, ty) {
+  if (!tileBoundsForName('idmap', level, tx, ty)) return null;
+  const key = `${level}:${tx}:${ty}`;
+  const cached = idmapTileCache.get(key);
+  if (cached && cached.data) return cached;
+  if (cached && cached.promise) return null;
+
+  const promise = loadImage(tilePath('idmap', level, tx, ty))
+    .then(img => {
+      const c = document.createElement('canvas');
+      c.width = img.width;
+      c.height = img.height;
+      const cctx = c.getContext('2d');
+      cctx.drawImage(img, 0, 0);
+      const result = {
+        level, tx, ty, width: c.width, height: c.height,
+        data: cctx.getImageData(0, 0, c.width, c.height).data
+      };
+      idmapTileCache.set(key, result);
+      drawHighlight();
+      return result;
+    })
+    .catch(() => {
+      idmapTileCache.set(key, null);
+      return null;
+    });
+  idmapTileCache.set(key, {promise});
+  return null;
+}
+
+
+function applyViewTransform() {
+  // The canvases are already in viewport coordinates; do not CSS-scale a huge
+  // canvas. Keep this function so the rest of the viewer can still call it.
+  stack.style.transform = 'none';
+}
+
+function boardDims() {
+  if (!meta || !meta.placements) return {w: gridW || idmap.width, h: gridH || idmap.height};
+  const names = meta.layers || Object.keys(meta.placements || {});
+  for (const name of names) {
+    const p = meta.placements[name];
+    if (p) return {w: p.w, h: p.h};
+  }
+  const first = Object.values(meta.placements)[0];
+  return first ? {w: first.w, h: first.h} : {w: gridW || idmap.width, h: gridH || idmap.height};
+}
+
+function clampContentPan() {
+  const d = boardDims();
+  const cropW = d.w / contentZoom;
+  const cropH = d.h / contentZoom;
+  contentPanX = clamp(contentPanX, 0, Math.max(0, d.w - cropW));
+  contentPanY = clamp(contentPanY, 0, Math.max(0, d.h - cropH));
+}
+
+function fitToScreen() {
+  if (!gridW || !gridH) return;
+  resizeRenderCanvases();
+  const pad = 16;
+  const vw = Math.max(1, viewport.clientWidth - 2 * pad);
+  const vh = Math.max(1, viewport.clientHeight - 2 * pad);
+  panelScale = Math.min(1.0, vw / gridW, vh / gridH);
+  if (!Number.isFinite(panelScale) || panelScale <= 0) panelScale = 1.0;
+  panelX = Math.round((viewport.clientWidth - gridW * panelScale) / 2);
+  panelY = Math.round((viewport.clientHeight - gridH * panelScale) / 2);
+  contentZoom = 1.0;
+  contentPanX = 0;
+  contentPanY = 0;
+  applyViewTransform();
+  redraw();
+}
+
+function clientToDisplay(clientX, clientY) {
+  const rect = viewport.getBoundingClientRect();
+  return {
+    x: (clientX - rect.left - panelX) / panelScale,
+    y: (clientY - rect.top  - panelY) / panelScale,
+  };
+}
+
+function tileAtDisplay(x, y) {
+  if (!meta || !meta.placements) return null;
+  for (const [name, p] of Object.entries(meta.placements)) {
+    if (x >= p.x && x < p.x + p.w && y >= p.y && y < p.y + p.h) {
+      return {name, p};
+    }
+  }
+  return null;
+}
+
+function currentCropForTile(p) {
+  const d = boardDims();
+  const cropW = d.w / contentZoom;
+  const cropH = d.h / contentZoom;
+  clampContentPan();
+  const x0 = contentPanX / d.w;
+  const y0 = contentPanY / d.h;
+  const w0 = cropW / d.w;
+  const h0 = cropH / d.h;
+  return {
+    x: p.x + x0 * p.w,
+    y: p.y + y0 * p.h,
+    w: w0 * p.w,
+    h: h0 * p.h,
+  };
+}
+
+function currentCropForImage(img) {
+  const d = boardDims();
+  const cropW = d.w / contentZoom;
+  const cropH = d.h / contentZoom;
+  clampContentPan();
+  return {
+    x: (contentPanX / d.w) * img.width,
+    y: (contentPanY / d.h) * img.height,
+    w: (cropW / d.w) * img.width,
+    h: (cropH / d.h) * img.height,
+  };
+}
+
+function setZoomAt(clientX, clientY, newZoom) {
+  const d = boardDims();
+  const oldCropW = d.w / contentZoom;
+  const oldCropH = d.h / contentZoom;
+  const pos = clientToDisplay(clientX, clientY);
+  const tile = tileAtDisplay(pos.x, pos.y);
+  let nx = 0.5, ny = 0.5;
+  if (tile) {
+    nx = clamp((pos.x - tile.p.x) / tile.p.w, 0, 1);
+    ny = clamp((pos.y - tile.p.y) / tile.p.h, 0, 1);
+  }
+
+  // Back view mirrors X visually, so the board coordinate under the cursor is
+  // measured from the opposite side of the current crop.
+  const boardX = contentPanX + (flipped ? (1 - nx) : nx) * oldCropW;
+  const boardY = contentPanY + ny * oldCropH;
+
+  contentZoom = clamp(newZoom, 1.0, 64.0);
+  const newCropW = d.w / contentZoom;
+  const newCropH = d.h / contentZoom;
+  contentPanX = boardX - (flipped ? (1 - nx) : nx) * newCropW;
+  contentPanY = boardY - ny * newCropH;
+  clampContentPan();
+  redraw();
+}
+
+function buildNetIndex() {
+  const data = idData.data;
+  const counts = new Map();
+  for (let i = 0; i < data.length; i += 4) {
+    const id = data[i] | (data[i + 1] << 8) | (data[i + 2] << 16);
+    if (id === 0) continue;
+    counts.set(id, (counts.get(id) || 0) + 1);
+  }
+  const buckets = new Map();
+  for (const [id, n] of counts) buckets.set(id, new Uint32Array(n));
+  const cursor = new Map();
+  for (let i = 0; i < data.length; i += 4) {
+    const id = data[i] | (data[i + 1] << 8) | (data[i + 2] << 16);
+    if (id === 0) continue;
+    const c = cursor.get(id) || 0;
+    buckets.get(id)[c] = i;
+    cursor.set(id, c + 1);
+  }
+  netToPixels = buckets;
+}
+
+// --- layer side helpers ---
+function frontLayerName() {
+  if (meta && meta.placements && meta.placements.F_Cu) return 'F_Cu';
+  const layers = (meta && meta.layers) || (meta && Object.keys(meta.placements || {})) || [];
+  return layers[0] || 'F_Cu';
+}
+
+function backLayerName() {
+  if (meta && meta.placements && meta.placements.B_Cu) return 'B_Cu';
+  const layers = (meta && meta.layers) || (meta && Object.keys(meta.placements || {})) || [];
+  return layers[layers.length - 1] || 'B_Cu';
+}
+
+function isFrontTile(name) {
+  return name === frontLayerName();
+}
+
+function isBottomTile(name) {
+  return name === backLayerName();
+}
+
+function isOuterTile(name) {
+  return isFrontTile(name) || isBottomTile(name);
+}
+
+function isInnerTile(name) {
+  return !isOuterTile(name);
+}
+
+// --- redraw everything, applying flip + silk state ---
+function redraw() {
+  if (redrawPending) return;
+  redrawPending = true;
+  requestAnimationFrame(() => {
+    redrawPending = false;
+    redrawNow();
+  });
+}
+
+function redrawNow() {
+  drawDisplay();
+  drawSilk();
+  drawTileLabels();
+  drawHighlight();
+}
+
+function drawDisplay() {
+  // Recompose only the visible browser viewport. The full-resolution PNGs stay
+  // as sources, so zoomed-in views remain sharp without repainting a huge atlas.
+  const ctx = beginCanvasFrame(display, '#050505');
+
+  // Fallback if meta is unavailable: draw the whole grid into the fitted rect.
+  if (!meta || !meta.placements) {
+    const p = {x: 0, y: 0, w: gridW, h: gridH};
+    const resolved = resolveImageMip(gridSrcCache, 'grid', currentMipLevel());
+    if (resolved.img) {
+      drawImageToTile(ctx, resolved.img,
+                      {x: 0, y: 0, w: gridW, h: gridH},
+                      p, false, resolved.level);
+    }
+    return;
+  }
+
+  for (const [name, p] of Object.entries(meta.placements)) {
+    const mirror = flipped;
+
+    if (isOuterTile(name)) {
+      const maskImg = isFrontTile(name) ? frontMaskImg
+                    : isBottomTile(name) ? backMaskImg
+                    : null;
+
+      if (maskImg) {
+        fillTile(ctx, p, mirror, '#050505');
+        drawTintedGridCrop(ctx, name, p, '#c79a32', 0.92, mirror); // copper: gold
+        drawSolderMaskFilm(ctx, maskImg, p, mirror, '#123d25', 0.94);
+      } else {
+        fillTile(ctx, p, mirror, '#123d25');
+        drawTintedGridCrop(ctx, name, p, '#c79a32', 0.88, mirror); // copper: gold
+      }
+    } else {
+      fillTile(ctx, p, mirror, '#050505');
+      drawTintedGridCrop(ctx, name, p, '#a9b0b8', 0.95, mirror); // inner copper: silver
+    }
+  }
+}
+
+function drawSilk() {
+  const ctx = beginCanvasFrame(silkCanvas);
+  if (!silkOn || !meta || !meta.placements) return;
+
+  // Silk is tied to the corresponding physical board side. In back view,
+  // mirror both overlays using the same transform as the copper tiles.
+  const mirror = flipped;
+  if (topSilkImg) {
+    const p = meta.placements[frontLayerName()];
+    if (p) drawAlphaTintedImage(ctx, topSilkImg, p, mirror, '#ffffff', 0.92);
+  }
+  if (bottomSilkImg) {
+    const p = meta.placements[backLayerName()];
+    if (p) drawAlphaTintedImage(ctx, bottomSilkImg, p, mirror, '#ffffff', 0.92);
+  }
+}
+
+function parseHexColour(hex) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex);
+  if (!m) return [255, 255, 255];
+  const n = parseInt(m[1], 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+function fillTile(ctx, p, mirror, colour) {
+  const r = tileScreenRect(p);
+  if (!rectVisible(r)) return;
+  ctx.save();
+  ctx.fillStyle = colour;
+  ctx.fillRect(r.x, r.y, r.w, r.h);
+  ctx.restore();
+}
+
+const tintedGridCache = new Map();
+function tintedGridTile(name, p, colour, alpha, sourceImg, sourceLevel) {
+  const key = `${name}:${colour}:${alpha}:mip${sourceLevel}`;
+  if (tintedGridCache.has(key)) return tintedGridCache.get(key);
+
+  const off = document.createElement('canvas');
+  off.width = Math.max(1, Math.round(p.w / sourceLevel));
+  off.height = Math.max(1, Math.round(p.h / sourceLevel));
+  const octx = off.getContext('2d');
+  octx.drawImage(sourceImg,
+                 p.x / sourceLevel, p.y / sourceLevel,
+                 p.w / sourceLevel, p.h / sourceLevel,
+                 0, 0, off.width, off.height);
+
+  const [r, g, b] = parseHexColour(colour);
+  const id = octx.getImageData(0, 0, off.width, off.height);
+  for (let i = 0; i < id.data.length; i += 4) {
+    const v = Math.max(id.data[i], id.data[i + 1], id.data[i + 2]);
+    id.data[i]     = r;
+    id.data[i + 1] = g;
+    id.data[i + 2] = b;
+    id.data[i + 3] = Math.round(v * alpha);
+  }
+  octx.putImageData(id, 0, 0);
+  tintedGridCache.set(key, off);
+  return off;
+}
+
+function drawTintedGridCrop(ctx, name, p, colour, alpha, mirror) {
+  const desiredLevel = currentMipLevel();
+  const crop = currentCropForTile({...p, x: 0, y: 0});
+
+  // Draw the best already-loaded single-image mip as a fallback, then overlay
+  // visible high-resolution tiles if this level is tiled. This avoids blanking
+  // while new tiles are still arriving.
+  const resolved = resolveImageMip(gridSrcCache, 'grid', desiredLevel);
+  if (resolved.img) {
+    const tile = tintedGridTile(name, p, colour, alpha, resolved.img, resolved.level);
+    drawImageToTile(ctx, tile, crop, p, mirror, resolved.level);
+  }
+
+  if (isTiledLevel(desiredLevel)) {
+    drawTiledProcessed(ctx, 'grid', desiredLevel, p, crop, mirror,
+                       'tint', colour, alpha, p.x, p.y);
+  }
+}
+
+const alphaTintedImageCache = new Map();
+function alphaTintedImage(img, colour, alpha, outW, outH, sourceLevel) {
+  const key = `${img.src || 'img'}:${colour}:${alpha}:mip${sourceLevel}:${outW}x${outH}`;
+  if (alphaTintedImageCache.has(key)) return alphaTintedImageCache.get(key);
+
+  const off = document.createElement('canvas');
+  off.width = Math.max(1, Math.round(outW / sourceLevel));
+  off.height = Math.max(1, Math.round(outH / sourceLevel));
+  const octx = off.getContext('2d');
+  octx.drawImage(img, 0, 0, img.width, img.height, 0, 0, off.width, off.height);
+
+  const [r, g, b] = parseHexColour(colour);
+  const id = octx.getImageData(0, 0, off.width, off.height);
+  for (let i = 0; i < id.data.length; i += 4) {
+    const v = Math.max(id.data[i], id.data[i + 1], id.data[i + 2]);
+    id.data[i]     = r;
+    id.data[i + 1] = g;
+    id.data[i + 2] = b;
+    id.data[i + 3] = Math.round(v * alpha);
+  }
+  octx.putImageData(id, 0, 0);
+  alphaTintedImageCache.set(key, off);
+  return off;
+}
+
+function drawAlphaTintedImage(ctx, img, p, mirror, colour, alpha) {
+  const name = img && img._pcbnetsName;
+  const desiredLevel = currentMipLevel();
+  const crop = currentCropForTile({...p, x: 0, y: 0});
+
+  const resolved = resolveImageMip(img, name, desiredLevel);
+  if (resolved.img) {
+    const off = alphaTintedImage(resolved.img, colour, alpha, p.w, p.h, resolved.level);
+    drawImageToTile(ctx, off, crop, p, mirror, resolved.level);
+  }
+
+  if (name && isTiledLevel(desiredLevel)) {
+    drawTiledProcessed(ctx, name, desiredLevel, p, crop, mirror,
+                       'alpha', colour, alpha, 0, 0);
+  }
+}
+
+const solderMaskFilmCache = new Map();
+function solderMaskFilm(openingImg, p, colour, alpha, sourceLevel) {
+  const key = `${openingImg.src || 'mask'}:${colour}:${alpha}:mip${sourceLevel}:${p.w}x${p.h}`;
+  if (solderMaskFilmCache.has(key)) return solderMaskFilmCache.get(key);
+
+  // openingImg is a solder-mask OPENING image. Convert it to a green film:
+  //   white/high pixels -> transparent opening, expose copper underneath
+  //   black/low pixels  -> green mask film
+  const off = document.createElement('canvas');
+  off.width = Math.max(1, Math.round(p.w / sourceLevel));
+  off.height = Math.max(1, Math.round(p.h / sourceLevel));
+  const octx = off.getContext('2d');
+  octx.drawImage(openingImg, 0, 0, openingImg.width, openingImg.height,
+                 0, 0, off.width, off.height);
+
+  const [r, g, b] = parseHexColour(colour);
+  const id = octx.getImageData(0, 0, off.width, off.height);
+  for (let i = 0; i < id.data.length; i += 4) {
+    const opening = Math.max(id.data[i], id.data[i + 1], id.data[i + 2]);
+    const mask = 255 - opening;
+    id.data[i]     = r;
+    id.data[i + 1] = g;
+    id.data[i + 2] = b;
+    id.data[i + 3] = Math.round(mask * alpha);
+  }
+  octx.putImageData(id, 0, 0);
+  solderMaskFilmCache.set(key, off);
+  return off;
+}
+
+function drawSolderMaskFilm(ctx, openingImg, p, mirror, colour, alpha) {
+  const name = openingImg && openingImg._pcbnetsName;
+  const desiredLevel = currentMipLevel();
+  const crop = currentCropForTile({...p, x: 0, y: 0});
+
+  const resolved = resolveImageMip(openingImg, name, desiredLevel);
+  if (resolved.img) {
+    const film = solderMaskFilm(resolved.img, p, colour, alpha, resolved.level);
+    drawImageToTile(ctx, film, crop, p, mirror, resolved.level);
+  }
+
+  if (name && isTiledLevel(desiredLevel)) {
+    drawTiledProcessed(ctx, name, desiredLevel, p, crop, mirror,
+                       'maskfilm', colour, alpha, 0, 0);
+  }
+}
+
+let gridSrcCache = null;
+async function cacheGridSrc() {
+  // No eager full-resolution load. init() starts from the coarsest server mip
+  // and preloads sharper levels progressively.
+}
+
+// --- net highlighting (crop-aware) ---
+function highlightNet(netId) {
+  if (!netId || (netToPixels && !netToPixels.has(netId))) {
+    currentNet = null;
+    currentHighlightPixels = null;
+    highlight.classList.remove('drag-follow');
+    highlight.style.transform = '';
+    drawHighlight();
+    updateNetInfo(null);
+    return;
+  }
+
+  currentNet = netId;
+
+  // Full-resolution per-net pixel lists are only available after idmap.png has
+  // loaded and been indexed. Until then, low-zoom highlighting is still handled
+  // directly from the loaded idmap mip.
+  currentHighlightPixels = netToPixels ? netToPixels.get(netId) : null;
+  drawHighlight();
+  updateNetInfo(netId);
+}
+
+function stampHighlightPixel(data, w, h, x, y, dot) {
+  const x0 = Math.floor(x);
+  const y0 = Math.floor(y);
+  for (let yy = y0; yy < y0 + dot; yy++) {
+    if (yy < 0 || yy >= h) continue;
+    for (let xx = x0; xx < x0 + dot; xx++) {
+      if (xx < 0 || xx >= w) continue;
+      const o = (yy * w + xx) * 4;
+      // Bright magenta contrasts well against green mask, gold copper, white silk,
+      // and the silver-on-black inner-layer view.
+      data[o]     = 255;
+      data[o + 1] = 32;
+      data[o + 2] = 220;
+      data[o + 3] = 220;
+    }
+  }
+}
+
+function drawHighlight() {
+  resizeRenderCanvases();
+  const ctx = highlight.getContext('2d');
+
+  // putImageData is in backing-store pixels, so use identity transform here
+  // rather than the CSS-pixel transform used by the normal layer drawing.
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+  // During a drag, do not rescan the selected net. The already-drawn highlight
+  // canvas is CSS-translated by the pointer delta so it follows the board, then
+  // rerasterised once on pointerup. This keeps pan frames cheap even for planes.
+  if (isPanning && currentNet) return;
+
+  ctx.clearRect(0, 0, highlight.width, highlight.height);
+
+  if (!currentNet || !meta || !meta.placements) return;
+
+  const desiredLevel = currentMipLevel();
+
+  if (isTiledLevel(desiredLevel)) {
+    drawHighlightFromIdmapTiles(ctx, desiredLevel);
+    return;
+  }
+
+  const mipMap = getIdmapForLevel(desiredLevel);
+
+  // When a low-resolution server idmap is available, use it directly for the
+  // visible highlight. This keeps large planes cheap when zoomed out and makes
+  // highlighting match the same LOD used for picking.
+  if (mipMap && mipMap.level > 1) {
+    drawHighlightFromIdmapMip(ctx, mipMap);
+    return;
+  }
+
+  // Full-resolution/high-zoom fallback: draw from the sparse per-net pixel list.
+  if (!currentHighlightPixels) return;
+
+  const out = ctx.createImageData(highlight.width, highlight.height);
+  const outData = out.data;
+  const srcW = idmap.width;
+  const dpr = renderDpr;
+  const mirror = flipped;
+
+  for (const p of Object.values(meta.placements)) {
+    const r = tileScreenRect(p);
+    if (!rectVisible(r)) continue;
+
+    const crop = currentCropForTile(p);
+    const xMin = crop.x;
+    const yMin = crop.y;
+    const xMax = crop.x + crop.w;
+    const yMax = crop.y + crop.h;
+
+    const pxPerSrc = Math.max(r.w / Math.max(1, crop.w),
+                              r.h / Math.max(1, crop.h)) * dpr;
+    const dot = Math.max(1, Math.min(4, Math.ceil(pxPerSrc)));
+
+    for (let pi = 0; pi < currentHighlightPixels.length; pi++) {
+      const pix = currentHighlightPixels[pi] >>> 2;
+      const sx = pix % srcW;
+      const sy = (pix / srcW) | 0;
+      if (sx < xMin || sx >= xMax || sy < yMin || sy >= yMax) continue;
+
+      let nx = (sx + 0.5 - xMin) / crop.w;
+      const ny = (sy + 0.5 - yMin) / crop.h;
+      if (mirror) nx = 1 - nx;
+
+      const dx = (r.x + nx * r.w) * dpr;
+      const dy = (r.y + ny * r.h) * dpr;
+      stampHighlightPixel(outData, highlight.width, highlight.height, dx, dy, dot);
+    }
+  }
+
+  ctx.putImageData(out, 0, 0);
+}
+
+function drawHighlightFromIdmapTiles(ctx, level) {
+  const out = ctx.createImageData(highlight.width, highlight.height);
+  const outData = out.data;
+  const dpr = renderDpr;
+  const mirror = flipped;
+  const [gx, gy] = tileGridForLevel(level);
+
+  for (const p of Object.values(meta.placements)) {
+    const r = tileScreenRect(p);
+    if (!rectVisible(r)) continue;
+
+    const crop = currentCropForTile(p);
+    const mx0 = Math.max(0, Math.floor(crop.x / level));
+    const my0 = Math.max(0, Math.floor(crop.y / level));
+    const mx1 = Math.ceil((crop.x + crop.w) / level);
+    const my1 = Math.ceil((crop.y + crop.h) / level);
+
+    const pxPerMip = Math.max(r.w / Math.max(1, mx1 - mx0),
+                              r.h / Math.max(1, my1 - my0)) * dpr;
+    const dot = Math.max(1, Math.min(5, Math.ceil(pxPerMip)));
+
+    for (let ty = 0; ty < gy; ty++) {
+      for (let tx = 0; tx < gx; tx++) {
+        const b = tileBoundsForName('idmap', level, tx, ty);
+        if (!b) continue;
+        const ix0 = Math.max(mx0, b.x);
+        const iy0 = Math.max(my0, b.y);
+        const ix1 = Math.min(mx1, b.x + b.w);
+        const iy1 = Math.min(my1, b.y + b.h);
+        if (ix1 <= ix0 || iy1 <= iy0) continue;
+
+        const tile = requestIdmapTile(level, tx, ty);
+        if (!tile || !tile.data) continue;
+
+        const scaleX = tile.width / Math.max(1, b.w);
+        const scaleY = tile.height / Math.max(1, b.h);
+        const lx0 = Math.max(0, Math.floor((ix0 - b.x) * scaleX));
+        const ly0 = Math.max(0, Math.floor((iy0 - b.y) * scaleY));
+        const lx1 = Math.min(tile.width, Math.ceil((ix1 - b.x) * scaleX));
+        const ly1 = Math.min(tile.height, Math.ceil((iy1 - b.y) * scaleY));
+
+        for (let my = ly0; my < ly1; my++) {
+          for (let mx = lx0; mx < lx1; mx++) {
+            const i = (my * tile.width + mx) * 4;
+            const id = tile.data[i] | (tile.data[i + 1] << 8) | (tile.data[i + 2] << 16);
+            if (id !== currentNet) continue;
+
+            const gxMip = b.x + (mx + 0.5) / scaleX;
+            const gyMip = b.y + (my + 0.5) / scaleY;
+            let nx = (gxMip * level - crop.x) / crop.w;
+            const ny = (gyMip * level - crop.y) / crop.h;
+            if (mirror) nx = 1 - nx;
+
+            const dx = (r.x + nx * r.w) * dpr;
+            const dy = (r.y + ny * r.h) * dpr;
+            stampHighlightPixel(outData, highlight.width, highlight.height, dx, dy, dot);
+          }
+        }
+      }
+    }
+  }
+
+  ctx.putImageData(out, 0, 0);
+}
+
+function drawHighlightFromIdmapMip(ctx, mipMap) {
+  const out = ctx.createImageData(highlight.width, highlight.height);
+  const outData = out.data;
+  const dpr = renderDpr;
+  const mirror = flipped;
+  const srcW = mipMap.width;
+  const srcH = mipMap.height;
+  const level = mipMap.level;
+  const data = mipMap.data;
+
+  for (const p of Object.values(meta.placements)) {
+    const r = tileScreenRect(p);
+    if (!rectVisible(r)) continue;
+
+    const crop = currentCropForTile(p);
+    const mx0 = Math.max(0, Math.floor(crop.x / level));
+    const my0 = Math.max(0, Math.floor(crop.y / level));
+    const mx1 = Math.min(srcW, Math.ceil((crop.x + crop.w) / level));
+    const my1 = Math.min(srcH, Math.ceil((crop.y + crop.h) / level));
+
+    const pxPerMip = Math.max(r.w / Math.max(1, mx1 - mx0),
+                              r.h / Math.max(1, my1 - my0)) * dpr;
+    const dot = Math.max(1, Math.min(5, Math.ceil(pxPerMip)));
+
+    for (let my = my0; my < my1; my++) {
+      for (let mx = mx0; mx < mx1; mx++) {
+        const i = (my * srcW + mx) * 4;
+        const id = data[i] | (data[i + 1] << 8) | (data[i + 2] << 16);
+        if (id !== currentNet) continue;
+
+        let nx = ((mx + 0.5) * level - crop.x) / crop.w;
+        const ny = ((my + 0.5) * level - crop.y) / crop.h;
+        if (mirror) nx = 1 - nx;
+
+        const dx = (r.x + nx * r.w) * dpr;
+        const dy = (r.y + ny * r.h) * dpr;
+        stampHighlightPixel(outData, highlight.width, highlight.height, dx, dy, dot);
+      }
+    }
+  }
+
+  ctx.putImageData(out, 0, 0);
+}
+
+function pixelToTile(x, y) {
+  if (!meta || !meta.placements) return null;
+  for (const [name, p] of Object.entries(meta.placements)) {
+    if (x >= p.x && x < p.x + p.w && y >= p.y && y < p.y + p.h) {
+      return { name, p };
+    }
+  }
+  return null;
+}
+
+function netLayerBreakdown(netId) {
+  if (netBreakdownCache.has(netId)) return netBreakdownCache.get(netId);
+  if (!netToPixels || !netToPixels.has(netId)) return [];
+
+  const pixels = netToPixels.get(netId);
+  const w = idmap.width;
+  const counts = {};
+  for (let p = 0; p < pixels.length; p++) {
+    const i = pixels[p];
+    const pix = i >>> 2;
+    const px = pix % w;
+    const py = (pix / w) | 0;
+    const tile = pixelToTile(px, py);
+    if (!tile) continue;
+    counts[tile.name] = (counts[tile.name] || 0) + 1;
+  }
+  const result = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  netBreakdownCache.set(netId, result);
+  return result;
+}
+
+function updateNetInfo(netId) {
+  const info = document.getElementById('net-info');
+  if (!netId) {
+    info.innerHTML = '<em style="color:var(--muted)">Click a net</em>';
+    return;
+  }
+
+  const haveFullIndex = netToPixels && netToPixels.has(netId);
+  const total = haveFullIndex ? netToPixels.get(netId).length : null;
+  info.innerHTML = `<div><strong>Net ${netId}</strong></div>` +
+                   `<div style="color:var(--muted); font-size:11px">${total === null ? 'details loading…' : total + ' px total'}</div>` +
+                   `<div class="layer-list">${haveFullIndex ? 'layer breakdown…' : 'full idmap loading…'}</div>`;
+
+  if (!haveFullIndex) return;
+
+  // The layer breakdown can be expensive for huge pours, so do it after the
+  // highlight has had a chance to paint. It is cached after the first time.
+  const fillBreakdown = () => {
+    if (currentNet !== netId) return;
+    const breakdown = netLayerBreakdown(netId);
+    let html = `<div><strong>Net ${netId}</strong></div>`;
+    html += `<div style="color:var(--muted); font-size:11px">${total} px total</div>`;
+    if (breakdown.length) {
+      html += '<div class="layer-list">';
+      for (const [name, n] of breakdown) {
+        html += `<div>${name}: ${n} px</div>`;
+      }
+      html += '</div>';
+    }
+    info.innerHTML = html;
+  };
+
+  if ('requestIdleCallback' in window) {
+    requestIdleCallback(fillBreakdown, {timeout: 500});
+  } else {
+    setTimeout(fillBreakdown, 0);
+  }
+}
+
+function drawTileLabels() {
+  if (!meta || !meta.placements) return;
+  labelsDiv.innerHTML = '';
+  for (const [name, p] of Object.entries(meta.placements)) {
+    const r = tileScreenRect(p);
+    if (!rectVisible(r)) continue;
+    const tag = document.createElement('div');
+    tag.className = 'tag' + (flipped ? ' flipped' : '');
+    let txt = name;
+    if (flipped) txt += ' ⟲ (back view)';
+    tag.textContent = txt;
+    tag.style.left = (r.x + 4) + 'px';
+    tag.style.top  = (r.y + 4) + 'px';
+    labelsDiv.appendChild(tag);
+  }
+}
+
+function populateSidebar() {
+  if (!meta) return;
+  const tl = document.getElementById('tile-list');
+  const layers = meta.layers || [];
+  tl.innerHTML = layers.map(n => {
+    const corr = (meta.corrections || {})[n];
+    let note = '';
+    if (corr) {
+      if (corr.invert) note = ' (inverted)';
+      else if (corr.offset && (corr.offset[0] || corr.offset[1])) {
+        note = ` (offset ${corr.offset})`;
+      }
+    }
+    return `<div>· ${n}${note}</div>`;
+  }).join('');
+}
+
+function applyToggleStates() {
+  document.getElementById('toggle-flip').classList.toggle('active', flipped);
+  document.getElementById('toggle-silk').classList.toggle('active', silkOn);
+}
+
+// --- trace picking, transform-aware ---
+function pickNetAtClient(clientX, clientY) {
+  const level = currentMipLevel();
+
+  const pos = clientToDisplay(clientX, clientY);
+  const tile = tileAtDisplay(pos.x, pos.y);
+  if (!tile) return;
+
+  const p = tile.p;
+  const nx = clamp((pos.x - p.x) / p.w, 0, 1);
+  const ny = clamp((pos.y - p.y) / p.h, 0, 1);
+  const crop = currentCropForTile(p);
+
+  const lx = Math.floor(flipped
+    ? crop.x + (1 - nx) * crop.w
+    : crop.x + nx * crop.w);
+  const ly = Math.floor(crop.y + ny * crop.h);
+
+  if (isTiledLevel(level)) {
+    const mx = Math.floor(lx / level);
+    const my = Math.floor(ly / level);
+    const {tx, ty} = tileIndexForMipCoordForName('idmap', level, mx, my);
+    const bounds = tileBoundsForName('idmap', level, tx, ty);
+    if (!bounds) return;
+    const pickTile = requestIdmapTile(level, tx, ty);
+    if (!pickTile || !pickTile.data) {
+      const key = `${level}:${tx}:${ty}`;
+      const pending = idmapTileCache.get(key);
+      if (pending && pending.promise) pending.promise.then(() => pickNetAtClient(clientX, clientY));
+      return;
+    }
+    const scaleX = pickTile.width / Math.max(1, bounds.w);
+    const scaleY = pickTile.height / Math.max(1, bounds.h);
+    const px = Math.floor((mx - bounds.x) * scaleX);
+    const py = Math.floor((my - bounds.y) * scaleY);
+    if (px < 0 || py < 0 || px >= pickTile.width || py >= pickTile.height) return;
+    const idx = (py * pickTile.width + px) * 4;
+    const r = pickTile.data[idx];
+    const g = pickTile.data[idx + 1];
+    const b = pickTile.data[idx + 2];
+    highlightNet(r | (g << 8) | (b << 16));
+    return;
+  }
+
+  const pickMap = getIdmapForLevel(level);
+  if (!pickMap) return;
+  const mx = Math.floor(lx / pickMap.level);
+  const my = Math.floor(ly / pickMap.level);
+  if (mx < 0 || my < 0 || mx >= pickMap.width || my >= pickMap.height) return;
+
+  const idx = (my * pickMap.width + mx) * 4;
+  const r = pickMap.data[idx];
+  const g = pickMap.data[idx + 1];
+  const b = pickMap.data[idx + 2];
+  highlightNet(r | (g << 8) | (b << 16));
+}
+
+// Keep a normal click fallback for browsers that still deliver clicks to
+// the canvas. The pointer-up handler below is the primary path because
+// pointer capture used for panning can otherwise steal canvas clicks.
+display.addEventListener('click', e => {
+  if (suppressNextClick) {
+    suppressNextClick = false;
+    return;
+  }
+  pickNetAtClient(e.clientX, e.clientY);
+});
+
+document.getElementById('toggle-fit').addEventListener('click', () => {
+  fitToScreen();
+});
+
+viewport.addEventListener('wheel', e => {
+  e.preventDefault();
+  const factor = e.deltaY < 0 ? 1.18 : 1 / 1.18;
+  setZoomAt(e.clientX, e.clientY, contentZoom * factor);
+}, { passive: false });
+
+viewport.addEventListener('dblclick', e => {
+  e.preventDefault();
+  setZoomAt(e.clientX, e.clientY, contentZoom < 1.5 ? 2.0 : 1.0);
+});
+
+
+function updateHighlightDragTransform(dx, dy) {
+  if (!currentNet) return;
+  highlightDragDx = dx;
+  highlightDragDy = dy;
+  highlight.classList.add('drag-follow');
+  highlight.style.transform = `translate(${dx}px, ${dy}px)`;
+}
+
+function finishHighlightDragTransform() {
+  if (!currentNet) return;
+  highlightDragDx = 0;
+  highlightDragDy = 0;
+  highlight.classList.remove('drag-follow');
+  highlight.style.transform = '';
+  drawHighlight();
+}
+
+viewport.addEventListener('pointerdown', e => {
+  if (e.button !== 0) return;
+  isPanning = true;
+  suppressNextClick = false;
+  panMoved = false;
+  panStartX = e.clientX;
+  panStartY = e.clientY;
+  panOrigX = contentPanX;
+  panOrigY = contentPanY;
+  viewport.classList.add('dragging');
+  if (currentNet) updateHighlightDragTransform(0, 0);
+  viewport.setPointerCapture(e.pointerId);
+});
+
+viewport.addEventListener('pointermove', e => {
+  if (!isPanning) return;
+  const dx = e.clientX - panStartX;
+  const dy = e.clientY - panStartY;
+  if (Math.abs(dx) + Math.abs(dy) > 4) {
+    panMoved = true;
+    suppressNextClick = true;
+  }
+  const d = boardDims();
+  const cropW = d.w / contentZoom;
+  const cropH = d.h / contentZoom;
+  const tileW = d.w;
+  const tileH = d.h;
+  const dxPanel = dx / Math.max(0.001, panelScale);
+  const dyPanel = dy / Math.max(0.001, panelScale);
+  contentPanX = panOrigX + (flipped ? 1 : -1) * dxPanel * cropW / Math.max(1, tileW);
+  contentPanY = panOrigY - dyPanel * cropH / Math.max(1, tileH);
+  clampContentPan();
+  updateHighlightDragTransform(dx, dy);
+  redraw();
+});
+
+function endPan(e) {
+  if (!isPanning) return;
+  const wasMoved = panMoved;
+  isPanning = false;
+  panMoved = false;
+  viewport.classList.remove('dragging');
+  try { viewport.releasePointerCapture(e.pointerId); } catch {}
+  finishHighlightDragTransform();
+
+  // Left-click with no meaningful movement selects a net. Dragging pans.
+  if (e.type === 'pointerup' && e.button === 0 && !wasMoved) {
+    pickNetAtClient(e.clientX, e.clientY);
+    suppressNextClick = true;
+  }
+}
+viewport.addEventListener('pointerup', endPan);
+viewport.addEventListener('pointercancel', endPan);
+
+window.addEventListener('resize', () => {
+  // Keep the fixed panel grid fitted to the available area, but preserve the
+  // user's microscope zoom/pan inside the panels.
+  if (!gridW || !gridH) return;
+  const oldZoom = contentZoom;
+  const oldPanX = contentPanX;
+  const oldPanY = contentPanY;
+  resizeRenderCanvases();
+  fitToScreen();
+  contentZoom = oldZoom;
+  contentPanX = oldPanX;
+  contentPanY = oldPanY;
+  clampContentPan();
+  redraw();
+});
+
+document.getElementById('toggle-flip').addEventListener('click', () => {
+  flipped = !flipped;
+  applyToggleStates();
+  redraw();
+});
+
+document.getElementById('toggle-silk').addEventListener('click', () => {
+  silkOn = !silkOn;
+  applyToggleStates();
+  drawSilk();
+});
+
+document.getElementById('net-search').addEventListener('input', e => {
+  const v = parseInt(e.target.value, 10);
+  if (Number.isFinite(v)) highlightNet(v);
+});
+
+(async () => {
+  try {
+    await cacheGridSrc();
+    await init();
+  } catch (err) {
+    document.getElementById('loading').textContent = 'Error: ' + err.message;
+  }
+})();
+</script>
+</body>
+</html>
