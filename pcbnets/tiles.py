@@ -30,13 +30,21 @@ def make_tiles_for_dir(src_dir: pathlib.Path,
 
 
 def make_tiles(build_dir: pathlib.Path) -> list[pathlib.Path]:
-    """Generate viewer tiles matching the historical ``make_tiles`` script."""
-    written = make_tiles_for_dir(build_dir, build_dir / 'mips' / '1' / 'tiles', 4)
-    written.extend(
-        make_tiles_for_dir(
-            build_dir / 'mips' / '2',
-            build_dir / 'mips' / '2' / 'tiles',
-            2,
+    """Generate viewer tiles for the high-resolution mip levels."""
+    tile_grids = {
+        1: 16,
+        2: 8,
+        4: 4,
+        8: 2,
+    }
+    written: list[pathlib.Path] = []
+    for level, grid in tile_grids.items():
+        src_dir = build_dir if level == 1 else build_dir / 'mips' / str(level)
+        written.extend(
+            make_tiles_for_dir(
+                src_dir,
+                build_dir / 'mips' / str(level) / 'tiles',
+                grid,
+            )
         )
-    )
     return written
