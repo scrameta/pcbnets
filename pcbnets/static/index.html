@@ -136,6 +136,7 @@ let topSilkImg = null;
 let bottomSilkImg = null;
 let frontMaskImg = null;
 let backMaskImg = null;
+let drillImg = null;
 let flipped = false;
 let silkOn = true;
 
@@ -566,7 +567,12 @@ function preloadProgressiveMips() {
   if (meta) {
     layers.push(...((meta.silk_layers) || []));
     layers.push(...((meta.mask_layers) || []));
+    layers.push(...((meta.drill_layers) || []));
   }
+  // Drill is not always listed in meta.json, but older/current exports often
+  // provide drill.png or mips/.../drill.png. Include it as an opportunistic
+  // keepout source; failed optional loads are cached as null.
+  layers.push('drill');
   const names = [...new Set(['grid', ...layers])];
   const order = PROGRESSIVE_MIP_ORDER.filter(l => mipLevels.includes(l));
 
@@ -629,6 +635,16 @@ async function init() {
   const maskLayers = (meta && meta.mask_layers) || [];
   frontMaskImg = optionalLayerRef(maskLayers, ['F_Mask']);
   backMaskImg = optionalLayerRef(maskLayers, ['B_Mask']);
+
+  const drillLayers = [];
+  if (meta) {
+    drillLayers.push(...((meta.drill_layers) || []));
+    drillLayers.push(...((meta.hole_layers) || []));
+    drillLayers.push(...((meta.layers) || []));
+  }
+  drillImg = optionalLayerRef(drillLayers,
+                             ['drill', 'drills', 'Drill', 'Drills',
+                              'PTH', 'NPTH', 'pth', 'npth']) || layerRef('drill');
 
   if (topSilkImg || bottomSilkImg) {
     document.getElementById('toggle-silk').style.display = 'inline-block';
@@ -764,7 +780,7 @@ function processTile(img, name, level, tx, ty, mode, colour, alpha) {
   return off;
 }
 
-function drawTiledProcessed(ctx, name, level, p, localCrop, mirror, mode, colour, alpha, sourceOffsetX = 0, sourceOffsetY = 0) {
+function drawTiledProcessed(ctx, name, level, p, localCrop, mirror, mode, colour, alpha, sourceOffsetX = 0, sourceOffsetY = 0, replaceExisting = false) {
   const r = tileScreenRect(p);
   if (!rectVisible(r)) return;
 
@@ -816,6 +832,14 @@ function drawTiledProcessed(ctx, name, level, p, localCrop, mirror, mode, colour
       const dw = (nx1 - nx0) * r.w;
       const dh = (ny1 - ny0) * r.h;
 
+      // If this tiled layer is replacing a coarse alpha fallback, clear only
+      // this tile's destination region in the transparent layer canvas before
+      // drawing the sharper tile. Doing that in an offscreen layer avoids
+      // compositing semi-transparent copper/mask/silk twice over the board.
+      if (replaceExisting) {
+        ctx.clearRect(dx, dy, dw, dh);
+      }
+
       // If the tile dimensions differ from the ideal mathematical split by a
       // pixel, scale source coordinates into the actual image size.
       const imgScaleX = img.width / Math.max(1, b.w);
@@ -829,6 +853,41 @@ function drawTiledProcessed(ctx, name, level, p, localCrop, mirror, mode, colour
     }
   }
 
+  ctx.restore();
+}
+
+
+function drawTiledProcessedWithFallback(ctx, name, level, p, localCrop, mirror, mode, colour, alpha, sourceOffsetX = 0, sourceOffsetY = 0, fallbackImg = null, fallbackSourceLevel = 1) {
+  const r = tileScreenRect(p);
+  if (!rectVisible(r)) return;
+
+  // Without a fallback source, keep the previous exact-only tiled behaviour.
+  if (!fallbackImg) {
+    drawTiledProcessed(ctx, name, level, p, localCrop, mirror,
+                       mode, colour, alpha, sourceOffsetX, sourceOffsetY);
+    return;
+  }
+
+  // Compose this semi-transparent visual layer into an offscreen tile-sized
+  // transparent canvas. The coarse fallback is drawn first; loaded high-res
+  // tiles then clear and replace their own destination rectangles. The finished
+  // layer is finally alpha-composited onto the real board exactly once.
+  const layer = document.createElement('canvas');
+  layer.width = Math.max(1, Math.ceil(r.w * renderDpr));
+  layer.height = Math.max(1, Math.ceil(r.h * renderDpr));
+  const lctx = layer.getContext('2d');
+  lctx.setTransform(renderDpr, 0, 0, renderDpr, -r.x * renderDpr, -r.y * renderDpr);
+
+  drawImageToTile(lctx, fallbackImg, localCrop, p, mirror, fallbackSourceLevel);
+  drawTiledProcessed(lctx, name, level, p, localCrop, mirror,
+                     mode, colour, alpha, sourceOffsetX, sourceOffsetY,
+                     true);
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(r.x, r.y, r.w, r.h);
+  ctx.clip();
+  ctx.drawImage(layer, r.x, r.y, layer.width / renderDpr, layer.height / renderDpr);
   ctx.restore();
 }
 
@@ -1095,12 +1154,34 @@ function drawSilk() {
   const mirror = flipped;
   if (topSilkImg) {
     const p = meta.placements[frontLayerName()];
-    if (p) drawAlphaTintedImage(ctx, topSilkImg, p, mirror, '#ffffff', 0.92);
+    if (p) {
+      drawAlphaTintedImage(ctx, topSilkImg, p, mirror, '#ffffff', 0.92);
+      eraseSilkKeepouts(ctx, p, mirror, frontMaskImg, drillImg);
+    }
   }
   if (bottomSilkImg) {
     const p = meta.placements[backLayerName()];
-    if (p) drawAlphaTintedImage(ctx, bottomSilkImg, p, mirror, '#ffffff', 0.92);
+    if (p) {
+      drawAlphaTintedImage(ctx, bottomSilkImg, p, mirror, '#ffffff', 0.92);
+      eraseSilkKeepouts(ctx, p, mirror, backMaskImg, drillImg);
+    }
   }
+}
+
+function eraseSilkKeepouts(ctx, p, mirror, maskOpeningImg, holeImg) {
+  // Remove silkscreen where the solder-mask opening exposes copper, and where
+  // the drill map marks physical holes. The keepout images use high/white
+  // pixels for the regions to remove, so drawing them with destination-out
+  // punches transparent holes in the silk overlay while preserving antialiasing.
+  if (maskOpeningImg) eraseAlphaFromCanvas(ctx, maskOpeningImg, p, mirror, 1.0);
+  if (holeImg) eraseAlphaFromCanvas(ctx, holeImg, p, mirror, 1.0);
+}
+
+function eraseAlphaFromCanvas(ctx, img, p, mirror, alpha) {
+  ctx.save();
+  ctx.globalCompositeOperation = 'destination-out';
+  drawAlphaTintedImage(ctx, img, p, mirror, '#ffffff', alpha);
+  ctx.restore();
 }
 
 function parseHexColour(hex) {
@@ -1151,24 +1232,41 @@ function drawTintedGridCrop(ctx, name, p, colour, alpha, mirror) {
   const desiredLevel = currentMipLevel();
   const crop = currentCropForTile({...p, x: 0, y: 0});
 
-  // Draw the best already-loaded single-image mip as a fallback, then overlay
-  // visible high-resolution tiles if this level is tiled. This avoids blanking
-  // while new tiles are still arriving.
   const resolved = resolveImageMip(gridSrcCache, 'grid', desiredLevel);
+
+  if (isTiledLevel(desiredLevel)) {
+    const fallback = resolved.img
+      ? tintedGridTile(name, p, colour, alpha, resolved.img, resolved.level)
+      : null;
+    drawTiledProcessedWithFallback(ctx, 'grid', desiredLevel, p, crop, mirror,
+                                   'tint', colour, alpha, p.x, p.y,
+                                   fallback, resolved.level || 1);
+    return;
+  }
+
   if (resolved.img) {
     const tile = tintedGridTile(name, p, colour, alpha, resolved.img, resolved.level);
     drawImageToTile(ctx, tile, crop, p, mirror, resolved.level);
   }
+}
 
-  if (isTiledLevel(desiredLevel)) {
-    drawTiledProcessed(ctx, 'grid', desiredLevel, p, crop, mirror,
-                       'tint', colour, alpha, p.x, p.y);
-  }
+function imageCacheKey(img, fallbackName, sourceLevel) {
+  // Do not key only by img.src: generated/lazy layer references and some
+  // browser states can leave src empty or non-unique. Include the logical
+  // pcbnets layer name as well, otherwise F_Silkscreen and B_Silkscreen can
+  // accidentally reuse the same processed alpha canvas.
+  const name = (img && img._pcbnetsName) || fallbackName || 'img';
+  const src = (img && (img.currentSrc || img.src)) || '';
+  const tx = (img && Number.isFinite(img._pcbnetsTileX)) ? img._pcbnetsTileX : '';
+  const ty = (img && Number.isFinite(img._pcbnetsTileY)) ? img._pcbnetsTileY : '';
+  const w = (img && img.width) || 0;
+  const h = (img && img.height) || 0;
+  return `${name}:src=${src}:mip=${sourceLevel}:tile=${tx},${ty}:img=${w}x${h}`;
 }
 
 const alphaTintedImageCache = new Map();
 function alphaTintedImage(img, colour, alpha, outW, outH, sourceLevel) {
-  const key = `${img.src || 'img'}:${colour}:${alpha}:mip${sourceLevel}:${outW}x${outH}`;
+  const key = `${imageCacheKey(img, 'img', sourceLevel)}:${colour}:${alpha}:out=${outW}x${outH}`;
   if (alphaTintedImageCache.has(key)) return alphaTintedImageCache.get(key);
 
   const off = document.createElement('canvas');
@@ -1197,20 +1295,26 @@ function drawAlphaTintedImage(ctx, img, p, mirror, colour, alpha) {
   const crop = currentCropForTile({...p, x: 0, y: 0});
 
   const resolved = resolveImageMip(img, name, desiredLevel);
+
+  if (name && isTiledLevel(desiredLevel)) {
+    const fallback = resolved.img
+      ? alphaTintedImage(resolved.img, colour, alpha, p.w, p.h, resolved.level)
+      : null;
+    drawTiledProcessedWithFallback(ctx, name, desiredLevel, p, crop, mirror,
+                                   'alpha', colour, alpha, 0, 0,
+                                   fallback, resolved.level || 1);
+    return;
+  }
+
   if (resolved.img) {
     const off = alphaTintedImage(resolved.img, colour, alpha, p.w, p.h, resolved.level);
     drawImageToTile(ctx, off, crop, p, mirror, resolved.level);
-  }
-
-  if (name && isTiledLevel(desiredLevel)) {
-    drawTiledProcessed(ctx, name, desiredLevel, p, crop, mirror,
-                       'alpha', colour, alpha, 0, 0);
   }
 }
 
 const solderMaskFilmCache = new Map();
 function solderMaskFilm(openingImg, p, colour, alpha, sourceLevel) {
-  const key = `${openingImg.src || 'mask'}:${colour}:${alpha}:mip${sourceLevel}:${p.w}x${p.h}`;
+  const key = `${imageCacheKey(openingImg, 'mask', sourceLevel)}:${colour}:${alpha}:out=${p.w}x${p.h}`;
   if (solderMaskFilmCache.has(key)) return solderMaskFilmCache.get(key);
 
   // openingImg is a solder-mask OPENING image. Convert it to a green film:
@@ -1244,14 +1348,20 @@ function drawSolderMaskFilm(ctx, openingImg, p, mirror, colour, alpha) {
   const crop = currentCropForTile({...p, x: 0, y: 0});
 
   const resolved = resolveImageMip(openingImg, name, desiredLevel);
+
+  if (name && isTiledLevel(desiredLevel)) {
+    const fallback = resolved.img
+      ? solderMaskFilm(resolved.img, p, colour, alpha, resolved.level)
+      : null;
+    drawTiledProcessedWithFallback(ctx, name, desiredLevel, p, crop, mirror,
+                                   'maskfilm', colour, alpha, 0, 0,
+                                   fallback, resolved.level || 1);
+    return;
+  }
+
   if (resolved.img) {
     const film = solderMaskFilm(resolved.img, p, colour, alpha, resolved.level);
     drawImageToTile(ctx, film, crop, p, mirror, resolved.level);
-  }
-
-  if (name && isTiledLevel(desiredLevel)) {
-    drawTiledProcessed(ctx, name, desiredLevel, p, crop, mirror,
-                       'maskfilm', colour, alpha, 0, 0);
   }
 }
 
