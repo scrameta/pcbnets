@@ -24,6 +24,8 @@ from .gerber import (
     write_layers_json,
 )
 from .masks import MASK_LAYERS, SILK_LAYERS, load_masks, threshold_mask
+from .mips import make_mips
+from .tiles import make_tiles
 from .nets import extract_nets, merge_nets
 from .prepare import DEFAULT_OUTER_LAYERS, _shift_bool, prepare_masks
 from .render import build_grid_and_idmap
@@ -529,6 +531,14 @@ def _write_build(build_dir: pathlib.Path,
     print(f'  wrote {build_dir}/grid.png, idmap.png, meta.json')
 
 
+def _write_mips_and_tiles(build_dir: pathlib.Path) -> None:
+    """Create all progressive-loading assets expected by the web viewer."""
+    mip_paths = make_mips(build_dir)
+    tile_paths = make_tiles(build_dir)
+    print(f'  wrote {len(mip_paths)} mip PNG(s)')
+    print(f'  wrote {len(tile_paths)} tile PNG(s)')
+
+
 # ---------- subcommands ----------
 
 def cmd_audit(args: argparse.Namespace) -> int:
@@ -589,6 +599,7 @@ def cmd_render(args: argparse.Namespace) -> int:
         auto_align=args.auto_align,
     )
     _write_build(build_dir, grid, idmap, meta, masks)
+    _write_mips_and_tiles(build_dir)
     return 0
 
 
@@ -663,6 +674,16 @@ def _bundle_file_names(build_dir: pathlib.Path) -> list[str]:
     return names
 
 
+def _bundle_paths(build_dir: pathlib.Path) -> list[tuple[pathlib.Path, str]]:
+    """Return build bundle files as ``(source_path, relative_name)`` pairs."""
+    paths = [(build_dir / name, name) for name in _bundle_file_names(build_dir)]
+    mips_dir = build_dir / 'mips'
+    if mips_dir.is_dir():
+        for path in sorted(p for p in mips_dir.rglob('*') if p.is_file()):
+            paths.append((path, path.relative_to(build_dir).as_posix()))
+    return paths
+
+
 def _copy_static_bundle(build_dir: pathlib.Path,
                         out_dir: pathlib.Path,
                         title: str | None = None,
@@ -675,8 +696,10 @@ def _copy_static_bundle(build_dir: pathlib.Path,
     out_dir.mkdir(parents=True, exist_ok=True)
 
     written: list[str] = []
-    for name in _bundle_file_names(build_dir):
-        shutil.copy2(build_dir / name, out_dir / name)
+    for src, name in _bundle_paths(build_dir):
+        dst = out_dir / name
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
         written.append(name)
 
     shutil.copy2(static_dir / 'index.html', out_dir / 'index.html')
@@ -707,7 +730,7 @@ def _zip_static_bundle(build_dir: pathlib.Path,
                        prefix: str | None = None) -> list[str]:
     """Write a deployable zip containing the static viewer."""
     static_dir = pathlib.Path(__file__).parent / 'static'
-    file_names = _bundle_file_names(build_dir)
+    file_paths = _bundle_paths(build_dir)
 
     prefix = (prefix or '').strip('/\\')
     if prefix:
@@ -717,9 +740,9 @@ def _zip_static_bundle(build_dir: pathlib.Path,
     written: list[str] = []
 
     with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
-        for name in file_names:
+        for src, name in file_paths:
             arcname = prefix + name
-            zf.write(build_dir / name, arcname)
+            zf.write(src, arcname)
             written.append(arcname)
 
         # Patch the title in-memory so deploy does not need a temporary dir.
@@ -965,7 +988,8 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     print(f'deploy bundle written to {zip_path}')
     print(f'  {len(written)} file(s) packaged')
     if args.prefix:
-        print(f'  zip root folder: {args.prefix.strip("/\\")}')
+        prefix_stripped = args.prefix.strip("/\\")
+        print(f'  zip root folder: {prefix_stripped}')
     print('  unzip on a web server and open index.html via HTTP/HTTPS')
     return 0
 

@@ -38,21 +38,14 @@ pcbnets gerber ./my_kicad_gerbers -o ./pngs
 # 2. (Optional) Audit polarity and drill alignment
 pcbnets audit ./pngs -o audit.png
 
-# 3. Build the net map and grid
+# 3. Build the net map, grid, mip-maps, and tiles
 pcbnets render ./pngs -o ./build
 
-# 4. Make mip-maps and tiles to speed up web viewer
-
-./make_mips
-./make_tiles
-
-Currently these assume a folder called 'web'. They will shortly be plugged into the pcbnets tool. TODO
-
-# 5. Serve the interactive viewer
+# 4. Serve the interactive viewer
 pcbnets serve ./build
 #   → http://127.0.0.1:8000
 
-# 6. (Optional) Bundle as static HTML for a web host
+# 5. (Optional) Bundle as static HTML for a web host
 pcbnets export ./build -o ./build-static --title "My Board v1.2"
 
 # Or zip the static bundle ready to upload/unzip
