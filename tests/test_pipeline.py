@@ -194,8 +194,12 @@ def test_render_writes_mips_and_tiles(tmp_path):
     assert (build / 'mips' / '16' / 'idmap.png').is_file()
     assert Image.open(build / 'mips' / '2' / 'grid.png').size == (4, 4)
     assert Image.open(build / 'mips' / '16' / 'idmap.png').size == (1, 1)
-    assert (build / 'mips' / '1' / 'tiles' / 'grid_3_3.png').is_file()
-    assert (build / 'mips' / '2' / 'tiles' / 'idmap_1_1.png').is_file()
+    assert (build / 'mips' / '1' / 'tiles' / 'grid_7_7.png').is_file()
+    assert (build / 'mips' / '2' / 'tiles' / 'idmap_3_3.png').is_file()
+    assert (build / 'mips' / '4' / 'tiles' / 'idmap_1_1.png').is_file()
+    assert len(list((build / 'mips' / '1' / 'tiles').glob('grid_*.png'))) == 64
+    assert len(list((build / 'mips' / '2' / 'tiles').glob('grid_*.png'))) == 16
+    assert len(list((build / 'mips' / '4' / 'tiles').glob('grid_*.png'))) == 4
 
 
 def test_export_copies_mips_and_tiles(tmp_path):
