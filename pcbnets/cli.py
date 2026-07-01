@@ -988,7 +988,8 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     print(f'deploy bundle written to {zip_path}')
     print(f'  {len(written)} file(s) packaged')
     if args.prefix:
-        print(f'  zip root folder: {args.prefix.strip("/\\")}')
+        prefix_stripped = args.prefix.strip("/\\")
+        print(f'  zip root folder: {prefix_stripped}')
     print('  unzip on a web server and open index.html via HTTP/HTTPS')
     return 0
 
