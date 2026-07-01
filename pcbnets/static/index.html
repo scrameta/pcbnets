@@ -185,14 +185,14 @@ let mipPathTemplate = 'mips/{level}/{name}.png';
 // from. Use single-image mips for zoomed-out views and tiled mips for the
 // large levels. This version uses a fixed tile *grid* per mip level, not
 // fixed-size 1024px tiles. That matches generators that split level 1 into
-// e.g. 8x8 tiles and level 2 into 4x4 tiles, with edge tiles allowed to be
+// e.g. 16x16 tiles and level 2 into 8x8 tiles, with edge tiles allowed to be
 // one pixel wider/taller because of rounding. meta.json may override with:
-//   "tiled_levels": [1,2,4],
-//   "tile_grids": {"1": [8,8], "2": [4,4], "4": [2,2]},
+//   "tiled_levels": [1,2,4,8],
+//   "tile_grids": {"1": [16,16], "2": [8,8], "4": [4,4], "8": [2,2]},
 //   "tile_path": "mips/{level}/tiles/{name}_{tx}_{ty}.png",
 //   "image_dims": {"F_Mask": [10166, 5747]} // optional; otherwise boardDims()
-let tiledLevels = [1, 2, 4];
-let tileGrids = new Map([[1, [8, 8]], [2, [4, 4]], [4, [2, 2]]]);
+let tiledLevels = [1, 2, 4, 8];
+let tileGrids = new Map([[1, [16, 16]], [2, [8, 8]], [4, [4, 4]], [8, [2, 2]]]);
 let tilePathTemplate = 'mips/{level}/tiles/{name}_{tx}_{ty}.png';
 
 const imageMipCache = new Map();       // key: name:level -> HTMLImageElement | Promise | null
@@ -783,8 +783,8 @@ function drawTiledProcessed(ctx, name, level, p, localCrop, mirror, mode, colour
     ctx.scale(-1, 1);
   }
 
-  // Tile grids are small at the levels we tile (for example 8x8 at level 1,
-  // 4x4 at level 2, and 2x2 at level 4), so iterating the grid is
+  // Tile grids are small at the levels we tile (for example 16x16 at level 1,
+  // 8x8 at level 2, 4x4 at level 4, and 2x2 at level 8), so iterating the grid is
   // simpler and safer than trying to infer fixed-size tile numbers. This also
   // clamps requests to existing tile coordinates, preventing grid_14_8.png-style
   // 404s.

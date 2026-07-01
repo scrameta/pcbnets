@@ -32,9 +32,10 @@ def make_tiles_for_dir(src_dir: pathlib.Path,
 def make_tiles(build_dir: pathlib.Path) -> list[pathlib.Path]:
     """Generate viewer tiles for the high-resolution mip levels."""
     tile_grids = {
-        1: 8,
-        2: 4,
-        4: 2,
+        1: 16,
+        2: 8,
+        4: 4,
+        8: 2,
     }
     written: list[pathlib.Path] = []
     for level, grid in tile_grids.items():
