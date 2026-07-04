@@ -13,6 +13,7 @@ heavy work.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Mapping
 import copy
@@ -83,13 +84,20 @@ class AlignmentVerdict:
 
 
 def score_alignment(drill: np.ndarray,
-                    layers: Mapping[str, np.ndarray]) -> tuple[int, int, float]:
+                    layers: Mapping[str, np.ndarray],
+                    progress: Callable[[str], None] | None = None,
+                    progress_prefix: str = 'scoring drill contacts',
+                    ) -> tuple[int, int, float]:
     """How many drill components land on at least one copper pixel."""
     from scipy.ndimage import label
+    if progress:
+        progress(f'{progress_prefix}: labeling drill blobs')
     lbl_drill, n = label(drill)
     if n == 0:
         return 0, 0, 1.0
 
+    if progress:
+        progress(f'{progress_prefix}: building outer-copper union')
     any_copper = np.zeros_like(drill, dtype=bool)
     for k,arr in layers.items():
         if k.startswith('In'):
@@ -97,15 +105,19 @@ def score_alignment(drill: np.ndarray,
         any_copper |= arr
 
     touches = 0
+    report_every = max(1, n // 20)
     for d in range(1, n + 1):
         if ((lbl_drill == d) & any_copper).any():
             touches += 1
+        if progress and (d == 1 or d == n or d % report_every == 0):
+            progress(f'{progress_prefix}: checked {d}/{n} drill blob(s)')
     return n, touches, touches / n
 
 def detect_offset(
     drill: np.ndarray,
     copper_union: np.ndarray,
     max_shift: int = 500,
+    progress: Callable[[str], None] | None = None,
 ) -> tuple[int, int]:
     """
     Find the (dy, dx) shift to apply to `drill` so it best overlaps
@@ -129,6 +141,8 @@ def detect_offset(
     # corr[y, x] corresponds to shift:
     #   dy = y - (b.shape[0] - 1)
     #   dx = x - (b.shape[1] - 1)
+    if progress:
+        progress('detecting drill offset: running FFT cross-correlation')
     corr = fftconvolve(a, b[::-1, ::-1], mode="full")
 
     zero_y = b.shape[0] - 1
@@ -140,6 +154,8 @@ def detect_offset(
     x0 = max(0, zero_x - max_shift)
     x1 = min(corr.shape[1], zero_x + max_shift + 1)
 
+    if progress:
+        progress(f'detecting drill offset: searching ±{max_shift}px window')
     region = corr[y0:y1, x0:x1]
 
     py, px = np.unravel_index(np.argmax(region), region.shape)
@@ -155,7 +171,9 @@ def detect_offset(
 
 def audit_alignment(drill: np.ndarray,
                     layers: Mapping[str, np.ndarray],
-                    auto_align: bool = True) -> AlignmentVerdict:
+                    auto_align: bool = True,
+                    progress: Callable[[str], None] | None = None,
+                    ) -> AlignmentVerdict:
     """Audit whether the electrical connector mask is plausibly aligned.
 
     This is deliberately a *coarse* sanity check.  A fallback ``drill.png``
@@ -170,7 +188,9 @@ def audit_alignment(drill: np.ndarray,
       * lower scores are suspicious and may trigger auto-alignment/warnings.
     """
     mask_fill = float(drill.mean())
-    n, touches, score = score_alignment(drill, layers)
+    n, touches, score = score_alignment(drill, layers, progress=progress)
+    if progress:
+        progress(f'initial drill alignment score: {touches}/{n} = {score:.1%}')
     if n == 0:
         return AlignmentVerdict(0, 0, 1.0, mask_fill=mask_fill, action='none',
                                 reason='no drills present')
@@ -203,14 +223,25 @@ def audit_alignment(drill: np.ndarray,
     # mixed PTH+NPTH drill masks may never reach 90% because the non-plated
     # holes should not touch copper pads.
     copper_union = np.zeros_like(drill, dtype=bool)
+    if progress:
+        progress('building outer-copper union for drill offset detection')
     for k, arr in layers.items():
         if k.startswith('In'):
             continue  # skip internal planes for alignment scoring
         copper_union |= arr
 
-    offset = detect_offset(drill, copper_union)
+    offset = detect_offset(drill, copper_union, progress=progress)
+    if progress:
+        progress(f'best detected drill offset: {offset}')
     shifted = _shift_bool(drill, *offset)
-    _, touches2, score2 = score_alignment(shifted, layers)
+    _, touches2, score2 = score_alignment(
+        shifted,
+        layers,
+        progress=progress,
+        progress_prefix='rescoring shifted drill contacts',
+    )
+    if progress:
+        progress(f'shifted drill alignment score: {touches2}/{n} = {score2:.1%}')
 
     if offset != (0, 0) and score2 >= excellent_score and score2 > score + 0.10:
         return AlignmentVerdict(

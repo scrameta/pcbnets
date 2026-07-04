@@ -181,7 +181,12 @@ def prepare_masks(
     else:
         if progress:
             progress(f'auditing {drill_name} alignment against copper')
-        alignment = audit_alignment(drill_arr, arrs, auto_align=auto_align)
+        alignment = audit_alignment(
+            drill_arr,
+            arrs,
+            auto_align=auto_align,
+            progress=progress,
+        )
         if alignment.action == 'shift' and alignment.detected_offset:
             if progress:
                 progress(f'applying detected {drill_name} offset {alignment.detected_offset}')
