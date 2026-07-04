@@ -28,6 +28,7 @@
     border-right: 1px solid #333;
     overflow-y: auto;
   }
+  body.sidebar-collapsed #sidebar { display: none; }
   #sidebar h1 { font-size: 16px; margin: 0 0 12px; }
   #sidebar p { font-size: 12px; color: var(--muted); margin: 4px 0; }
   #sidebar input[type=number], #sidebar input[type=text] {
@@ -48,18 +49,40 @@
   #net-info { margin-top: 16px; font-size: 13px; }
   #net-info .layer-list { color: var(--muted); margin-top: 4px; }
   #viewport {
-    flex: 1; overflow: hidden;
+    flex: 1; overflow: auto;
     position: relative;
     padding: 0;
     cursor: crosshair;
     touch-action: none;
+    scrollbar-color: #555 #181818;
   }
   #viewport.dragging { cursor: move; }
+  #sidebar-tab {
+    position: fixed; left: 10px; top: 10px; z-index: 30;
+    display: none;
+    padding: 6px 10px;
+    background: rgba(36, 36, 36, 0.9); color: var(--fg);
+    border: 1px solid #444; border-radius: 3px; cursor: pointer;
+    font-family: inherit; font-size: 14px;
+  }
+  #sidebar-tab:hover { background: rgba(60, 60, 60, 0.95); }
+  body.sidebar-collapsed #sidebar-tab { display: block; }
+  .hint { font-size: 11px; color: var(--muted); line-height: 1.35; }
+  .readout { font-size: 11px; color: var(--muted); margin-top: 4px; }
   .stack {
     position: absolute; left: 0; top: 0;
     width: 100%; height: 100%;
     display: block;
     transform-origin: 0 0;
+    z-index: 2;
+    pointer-events: none;
+  }
+  #scroll-spacer {
+    position: absolute; left: 0; top: 0;
+    width: 100%; height: 100%;
+    min-width: 100%; min-height: 100%;
+    pointer-events: none;
+    z-index: 0;
   }
   .stack canvas {
     position: absolute; left: 0; top: 0;
@@ -102,7 +125,16 @@
 <button id="toggle-fit">Fit screen</button>
 <button id="toggle-flip">View from back</button>
 <button id="toggle-silk" style="display:none">Show silk</button>
+<button id="toggle-sidebar">Hide panel</button>
 </div>
+<label class="section">Tile windows</label>
+<div class="toggle-row">
+<button id="panel-zoom-out">− smaller</button>
+<button id="panel-zoom-fit">Fit windows</button>
+<button id="panel-zoom-in">+ larger</button>
+</div>
+<p id="panel-scale-readout" class="readout"></p>
+<p class="hint">Wheel: zoom board contents. Shift+wheel or +/-: resize the layer windows. If the grid is larger than the viewport, use the native scrollbars. Middle/right drag, or Alt+drag: move the window grid. H hides/shows this panel.</p>
 <label class="section">Find net</label>
 <input id="net-search" min="1" placeholder="net id" type="number"/>
 <label class="section">Layers</label>
@@ -111,12 +143,14 @@
 </div>
 </div>
 <div id="viewport">
+<button id="sidebar-tab" title="Show controls" aria-label="Show controls">☰</button>
 <div class="stack">
 <canvas id="display"></canvas>
 <canvas id="silk"></canvas>
 <canvas id="highlight"></canvas>
 <div id="labels"></div>
 </div>
+<div id="scroll-spacer" aria-hidden="true"></div>
 </div>
 <canvas id="idmap" style="display:none"></canvas>
 <script>
@@ -127,6 +161,9 @@ const idmap     = document.getElementById('idmap');
 const labelsDiv = document.getElementById('labels');
 const viewport  = document.getElementById('viewport');
 const stack     = document.querySelector('.stack');
+const scrollSpacer = document.getElementById('scroll-spacer');
+const sidebarTab = document.getElementById('sidebar-tab');
+const panelScaleReadout = document.getElementById('panel-scale-readout');
 
 let idData = null;
 let netToPixels = null;
@@ -144,6 +181,13 @@ let silkOn = true;
 let panelScale = 1.0;
 let panelX = 16;
 let panelY = 16;
+let lastViewportW = 0;
+let lastViewportH = 0;
+let scrollOriginX = 0;
+let scrollOriginY = 0;
+const PANEL_SCALE_MIN = 0.04;
+const PANEL_SCALE_MAX = 8.0;
+const SCROLL_PAD = 32;
 
 // Shared board viewport drawn inside every panel.
 // contentZoom=1 shows the whole board in each tile.  Larger values crop into
@@ -157,6 +201,9 @@ let panStartX = 0;
 let panStartY = 0;
 let panOrigX = 0;
 let panOrigY = 0;
+let isPanelPanning = false;
+let panelPanOrigX = 0;
+let panelPanOrigY = 0;
 let suppressNextClick = false;
 let panMoved = false;
 let currentHighlightPixels = null;
@@ -654,6 +701,11 @@ async function init() {
 
   document.getElementById('loading').style.display = 'none';
   document.getElementById('controls').style.display = 'block';
+  try {
+    if (localStorage.getItem('pcbnets.sidebarCollapsed') === '1') {
+      document.body.classList.add('sidebar-collapsed');
+    }
+  } catch {}
   applyToggleStates();
   fitToScreen();
 
@@ -694,8 +746,8 @@ function beginCanvasFrame(canvas, fillStyle = null) {
 
 function tileScreenRect(p) {
   return {
-    x: panelX + p.x * panelScale,
-    y: panelY + p.y * panelScale,
+    x: panelX - scrollOriginX - viewport.scrollLeft + p.x * panelScale,
+    y: panelY - scrollOriginY - viewport.scrollTop + p.y * panelScale,
     w: p.w * panelScale,
     h: p.h * panelScale,
   };
@@ -923,9 +975,12 @@ function requestIdmapTile(level, tx, ty) {
 
 
 function applyViewTransform() {
-  // The canvases are already in viewport coordinates; do not CSS-scale a huge
-  // canvas. Keep this function so the rest of the viewer can still call it.
-  stack.style.transform = 'none';
+  // The canvases are viewport-sized and are redrawn in visible viewport
+  // coordinates. If #viewport is scrolled, the scroll container would normally
+  // move the canvas layer away; this translation pins the drawing layer back to
+  // the visible scrollport while the virtual scroll area underneath supplies
+  // native scrollbars.
+  stack.style.transform = `translate(${viewport.scrollLeft}px, ${viewport.scrollTop}px)`;
 }
 
 function boardDims() {
@@ -947,28 +1002,155 @@ function clampContentPan() {
   contentPanY = clamp(contentPanY, 0, Math.max(0, d.h - cropH));
 }
 
-function fitToScreen() {
-  if (!gridW || !gridH) return;
-  resizeRenderCanvases();
+function rememberViewportSize() {
+  lastViewportW = Math.max(1, viewport.clientWidth);
+  lastViewportH = Math.max(1, viewport.clientHeight);
+}
+
+function fittedPanelScale() {
+  if (!gridW || !gridH) return 1.0;
   const pad = 16;
   const vw = Math.max(1, viewport.clientWidth - 2 * pad);
   const vh = Math.max(1, viewport.clientHeight - 2 * pad);
-  panelScale = Math.min(1.0, vw / gridW, vh / gridH);
-  if (!Number.isFinite(panelScale) || panelScale <= 0) panelScale = 1.0;
+  const s = Math.min(1.0, vw / gridW, vh / gridH);
+  return Number.isFinite(s) && s > 0 ? s : 1.0;
+}
+
+function updatePanelScaleReadout() {
+  if (!panelScaleReadout) return;
+  const fit = fittedPanelScale();
+  const rel = fit > 0 ? panelScale / fit : 1;
+  panelScaleReadout.textContent = `Window size: ${(rel * 100).toFixed(0)}% of fit (${(panelScale * 100).toFixed(1)}% source scale)`;
+}
+
+function updateScrollArea(preserveView = true) {
+  if (!scrollSpacer || !gridW || !gridH) return;
+
+  const oldOriginX = scrollOriginX;
+  const oldOriginY = scrollOriginY;
+  const oldScrollLeft = viewport.scrollLeft;
+  const oldScrollTop = viewport.scrollTop;
+
+  const minX = Math.min(0, panelX) - SCROLL_PAD;
+  const minY = Math.min(0, panelY) - SCROLL_PAD;
+  const maxX = Math.max(viewport.clientWidth, panelX + gridW * panelScale) + SCROLL_PAD;
+  const maxY = Math.max(viewport.clientHeight, panelY + gridH * panelScale) + SCROLL_PAD;
+
+  scrollOriginX = minX;
+  scrollOriginY = minY;
+
+  const spacerW = Math.max(viewport.clientWidth, Math.ceil(maxX - minX));
+  const spacerH = Math.max(viewport.clientHeight, Math.ceil(maxY - minY));
+  scrollSpacer.style.width = spacerW + 'px';
+  scrollSpacer.style.height = spacerH + 'px';
+
+  if (preserveView) {
+    viewport.scrollLeft = Math.max(0, oldScrollLeft + oldOriginX - scrollOriginX);
+    viewport.scrollTop = Math.max(0, oldScrollTop + oldOriginY - scrollOriginY);
+  }
+
+  applyViewTransform();
+}
+
+function cancelActiveDrag() {
+  if (!isPanning && !isPanelPanning) return;
+  isPanning = false;
+  isPanelPanning = false;
+  panMoved = false;
+  viewport.classList.remove('dragging');
+  finishHighlightDragTransform();
+}
+
+function isUiEventTarget(target) {
+  return target && target.closest && target.closest('button,input,select,textarea,a,label');
+}
+
+function centerPanelGrid() {
   panelX = Math.round((viewport.clientWidth - gridW * panelScale) / 2);
   panelY = Math.round((viewport.clientHeight - gridH * panelScale) / 2);
+}
+
+function setPanelScaleAt(clientX, clientY, newScale) {
+  if (!gridW || !gridH) return;
+  const rect = viewport.getBoundingClientRect();
+  const ax = clientX - rect.left;
+  const ay = clientY - rect.top;
+  const worldX = ax + viewport.scrollLeft + scrollOriginX;
+  const worldY = ay + viewport.scrollTop + scrollOriginY;
+  const boardX = (worldX - panelX) / Math.max(0.001, panelScale);
+  const boardY = (worldY - panelY) / Math.max(0.001, panelScale);
+
+  panelScale = clamp(newScale, PANEL_SCALE_MIN, PANEL_SCALE_MAX);
+  panelX = worldX - boardX * panelScale;
+  panelY = worldY - boardY * panelScale;
+  updateScrollArea(true);
+  updatePanelScaleReadout();
+  redraw();
+}
+
+function setPanelScaleAroundCentre(newScale) {
+  const rect = viewport.getBoundingClientRect();
+  setPanelScaleAt(rect.left + viewport.clientWidth / 2,
+                  rect.top + viewport.clientHeight / 2,
+                  newScale);
+}
+
+function fitPanelWindows() {
+  if (!gridW || !gridH) return;
+  resizeRenderCanvases();
+  panelScale = fittedPanelScale();
+  centerPanelGrid();
+  rememberViewportSize();
+  updateScrollArea(false);
+  viewport.scrollLeft = Math.max(0, -scrollOriginX);
+  viewport.scrollTop = Math.max(0, -scrollOriginY);
+  applyViewTransform();
+  updatePanelScaleReadout();
+  redraw();
+}
+
+function fitToScreen() {
+  if (!gridW || !gridH) return;
+  fitPanelWindows();
   contentZoom = 1.0;
   contentPanX = 0;
   contentPanY = 0;
-  applyViewTransform();
   redraw();
+}
+
+function handleViewportGeometryChange(oldW = lastViewportW, oldH = lastViewportH) {
+  resizeRenderCanvases();
+  const newW = Math.max(1, viewport.clientWidth);
+  const newH = Math.max(1, viewport.clientHeight);
+  if (oldW > 0 && oldH > 0) {
+    panelX += (newW - oldW) / 2;
+    panelY += (newH - oldH) / 2;
+  } else if (gridW && gridH) {
+    centerPanelGrid();
+  }
+  rememberViewportSize();
+  updateScrollArea(true);
+  updatePanelScaleReadout();
+  redraw();
+}
+
+function setSidebarCollapsed(collapsed) {
+  cancelActiveDrag();
+  const oldW = Math.max(1, viewport.clientWidth);
+  const oldH = Math.max(1, viewport.clientHeight);
+  document.body.classList.toggle('sidebar-collapsed', collapsed);
+  try { localStorage.setItem('pcbnets.sidebarCollapsed', collapsed ? '1' : '0'); } catch {}
+  applyToggleStates();
+  requestAnimationFrame(() => handleViewportGeometryChange(oldW, oldH));
 }
 
 function clientToDisplay(clientX, clientY) {
   const rect = viewport.getBoundingClientRect();
+  const worldX = clientX - rect.left + viewport.scrollLeft + scrollOriginX;
+  const worldY = clientY - rect.top  + viewport.scrollTop + scrollOriginY;
   return {
-    x: (clientX - rect.left - panelX) / panelScale,
-    y: (clientY - rect.top  - panelY) / panelScale,
+    x: (worldX - panelX) / panelScale,
+    y: (worldY - panelY) / panelScale,
   };
 }
 
@@ -1703,6 +1885,9 @@ function populateSidebar() {
 function applyToggleStates() {
   document.getElementById('toggle-flip').classList.toggle('active', flipped);
   document.getElementById('toggle-silk').classList.toggle('active', silkOn);
+  const hideButton = document.getElementById('toggle-sidebar');
+  if (hideButton) hideButton.textContent = document.body.classList.contains('sidebar-collapsed') ? 'Show panel' : 'Hide panel';
+  updatePanelScaleReadout();
 }
 
 // --- trace picking, transform-aware ---
@@ -1777,10 +1962,19 @@ document.getElementById('toggle-fit').addEventListener('click', () => {
   fitToScreen();
 });
 
+viewport.addEventListener('scroll', () => {
+  applyViewTransform();
+  redraw();
+});
+
 viewport.addEventListener('wheel', e => {
   e.preventDefault();
   const factor = e.deltaY < 0 ? 1.18 : 1 / 1.18;
-  setZoomAt(e.clientX, e.clientY, contentZoom * factor);
+  if (e.shiftKey) {
+    setPanelScaleAt(e.clientX, e.clientY, panelScale * factor);
+  } else {
+    setZoomAt(e.clientX, e.clientY, contentZoom * factor);
+  }
 }, { passive: false });
 
 viewport.addEventListener('dblclick', e => {
@@ -1807,18 +2001,24 @@ function finishHighlightDragTransform() {
 }
 
 viewport.addEventListener('pointerdown', e => {
-  if (e.button !== 0) return;
+  if (isUiEventTarget(e.target)) return;
+  if (![0, 1, 2].includes(e.button)) return;
   isPanning = true;
+  isPanelPanning = e.button === 1 || e.button === 2 || e.altKey;
   suppressNextClick = false;
   panMoved = false;
   panStartX = e.clientX;
   panStartY = e.clientY;
   panOrigX = contentPanX;
   panOrigY = contentPanY;
+  panelPanOrigX = panelX;
+  panelPanOrigY = panelY;
   viewport.classList.add('dragging');
   if (currentNet) updateHighlightDragTransform(0, 0);
   viewport.setPointerCapture(e.pointerId);
 });
+
+viewport.addEventListener('contextmenu', e => e.preventDefault());
 
 viewport.addEventListener('pointermove', e => {
   if (!isPanning) return;
@@ -1828,6 +2028,16 @@ viewport.addEventListener('pointermove', e => {
     panMoved = true;
     suppressNextClick = true;
   }
+
+  if (isPanelPanning) {
+    panelX = panelPanOrigX + dx;
+    panelY = panelPanOrigY + dy;
+    updateScrollArea(true);
+    updateHighlightDragTransform(dx, dy);
+    redraw();
+    return;
+  }
+
   const d = boardDims();
   const cropW = d.w / contentZoom;
   const cropH = d.h / contentZoom;
@@ -1846,6 +2056,7 @@ function endPan(e) {
   if (!isPanning) return;
   const wasMoved = panMoved;
   isPanning = false;
+  isPanelPanning = false;
   panMoved = false;
   viewport.classList.remove('dragging');
   try { viewport.releasePointerCapture(e.pointerId); } catch {}
@@ -1861,19 +2072,55 @@ viewport.addEventListener('pointerup', endPan);
 viewport.addEventListener('pointercancel', endPan);
 
 window.addEventListener('resize', () => {
-  // Keep the fixed panel grid fitted to the available area, but preserve the
-  // user's microscope zoom/pan inside the panels.
   if (!gridW || !gridH) return;
-  const oldZoom = contentZoom;
-  const oldPanX = contentPanX;
-  const oldPanY = contentPanY;
-  resizeRenderCanvases();
-  fitToScreen();
-  contentZoom = oldZoom;
-  contentPanX = oldPanX;
-  contentPanY = oldPanY;
-  clampContentPan();
-  redraw();
+  handleViewportGeometryChange();
+});
+
+document.getElementById('panel-zoom-out').addEventListener('click', () => {
+  setPanelScaleAroundCentre(panelScale / 1.18);
+});
+
+document.getElementById('panel-zoom-in').addEventListener('click', () => {
+  setPanelScaleAroundCentre(panelScale * 1.18);
+});
+
+document.getElementById('panel-zoom-fit').addEventListener('click', () => {
+  fitPanelWindows();
+});
+
+document.getElementById('toggle-sidebar').addEventListener('click', () => {
+  setSidebarCollapsed(!document.body.classList.contains('sidebar-collapsed'));
+  applyToggleStates();
+});
+
+sidebarTab.addEventListener('pointerdown', e => {
+  e.stopPropagation();
+});
+
+sidebarTab.addEventListener('click', e => {
+  e.stopPropagation();
+  setSidebarCollapsed(false);
+  applyToggleStates();
+});
+
+window.addEventListener('keydown', e => {
+  const active = document.activeElement;
+  if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) return;
+
+  if (e.key === 'h' || e.key === 'H') {
+    e.preventDefault();
+    setSidebarCollapsed(!document.body.classList.contains('sidebar-collapsed'));
+    applyToggleStates();
+  } else if (e.key === '+' || e.key === '=') {
+    e.preventDefault();
+    setPanelScaleAroundCentre(panelScale * 1.18);
+  } else if (e.key === '-' || e.key === '_') {
+    e.preventDefault();
+    setPanelScaleAroundCentre(panelScale / 1.18);
+  } else if (e.key === '0') {
+    e.preventDefault();
+    fitPanelWindows();
+  }
 });
 
 document.getElementById('toggle-flip').addEventListener('click', () => {
