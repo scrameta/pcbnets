@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Callable
 from typing import Mapping
 
 import numpy as np
@@ -81,7 +82,8 @@ def drill_annulus_contact_ids(layer_lbl: np.ndarray,
 
 def extract_nets(copper_layers: dict[str, Image.Image],
                  drill: Image.Image,
-                 drill_grow_px: int = 0) -> dict:
+                 drill_grow_px: int = 0,
+                 progress: Callable[[str], None] | None = None) -> dict:
     # Do not dilate drills for connectivity. Dilation is exactly the kind
     # of thing that can jump across anti-pads/clearances.
     arr_drill = _to_bool(drill)
@@ -94,16 +96,24 @@ def extract_nets(copper_layers: dict[str, Image.Image],
         for name, img in copper_layers.items()
     }
 
-    layer_labels = {
-        name: label(mask)[0]
-        for name, mask in copper_masks.items()
-    }
+    layer_labels = {}
+    n_layers = len(copper_masks)
+    for idx, (name, mask) in enumerate(copper_masks.items(), start=1):
+        if progress:
+            progress(f'labeling copper layer {idx}/{n_layers}: {name}')
+        layer_labels[name] = label(mask)[0]
 
+    if progress:
+        progress('labeling drill mask')
     lbl_drill, n_drill = label(arr_drill)
 
     drill_touches = {}
 
+    report_every = max(1, n_drill // 20)
     for drill_id, obj in enumerate(find_objects(lbl_drill), start=1):
+        if progress and (drill_id == 1 or drill_id == n_drill
+                         or drill_id % report_every == 0):
+            progress(f'checking drill contacts {drill_id}/{n_drill}')
         if obj is None:
             continue
         local = lbl_drill[obj] == drill_id

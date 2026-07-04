@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pathlib
-from typing import Iterable
+from typing import Callable, Iterable
 
 from PIL import Image
 
@@ -47,6 +47,7 @@ def load_masks(
     threshold: int = 0,
     silk: bool = True,
     extra_names: Iterable[str] = (),
+    progress: Callable[[str], None] | None = None,
 ) -> dict[str, Image.Image]:
     """Load each named layer + drill from ``directory`` as a mode-'1' mask.
 
@@ -71,19 +72,28 @@ def load_masks(
             names.append(name)
 
     masks: dict[str, Image.Image] = {}
-    for name in names:
+    for i, name in enumerate(names, start=1):
+        if progress:
+            progress(f'loading required mask {i}/{len(names)}: {name}.png')
         path = directory / f'{name}.png'
         if not path.is_file():
             raise FileNotFoundError(f'expected mask file not found: {path}')
         masks[name] = threshold_mask(Image.open(path), threshold)
 
     if silk:
-        for name in (*SILK_LAYERS, *MASK_LAYERS):
+        optional = (*SILK_LAYERS, *MASK_LAYERS)
+        for i, name in enumerate(optional, start=1):
+            if progress:
+                progress(f'checking optional visual mask {i}/{len(optional)}: {name}.png')
             path = directory / f'{name}.png'
             if path.is_file():
+                if progress:
+                    progress(f'loading optional visual mask: {name}.png')
                 masks[name] = threshold_mask(Image.open(path), threshold)
 
     # Sanity-check: every mask must have the same dimensions.
+    if progress:
+        progress(f'checking dimensions across {len(masks)} loaded mask(s)')
     sizes = {n: m.size for n, m in masks.items()}
     unique_sizes = set(sizes.values())
     if len(unique_sizes) > 1:

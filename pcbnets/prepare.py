@@ -7,7 +7,7 @@ and ``extract_nets`` (which assumes its inputs are already correct).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Callable, Mapping
 
 import numpy as np
 from PIL import Image
@@ -98,6 +98,7 @@ def prepare_masks(
     invert_overrides: set[str] | None = None,
     no_invert_overrides: set[str] | None = None,
     offset_overrides: dict[str, tuple[int, int]] | None = None,
+    progress: Callable[[str], None] | None = None,
 ) -> tuple[dict[str, np.ndarray], np.ndarray, PreparationReport]:
     """Apply detected and user-requested polarity/offset corrections.
 
@@ -110,14 +111,20 @@ def prepare_masks(
     no_invert_overrides = no_invert_overrides or set()
     offset_overrides = offset_overrides or {}
 
+    if progress:
+        progress(f'converting {len(layer_names)} copper mask(s) to arrays')
     arrs = _arrays_from_masks({n: masks[n] for n in layer_names})
+    if progress:
+        progress(f'converting {drill_name} mask to array')
     drill_arr = _to_bool(masks[drill_name])
 
     polarity: dict[str, PolarityVerdict] = {}
     corrections: dict[str, LayerCorrection] = {}
     warnings: list[str] = []
 
-    for name in layer_names:
+    for i, name in enumerate(layer_names, start=1):
+        if progress:
+            progress(f'auditing polarity {i}/{len(layer_names)}: {name}')
         verdict = detect_polarity(arrs[name], name, outer_layers)
         polarity[name] = verdict
 
@@ -162,6 +169,8 @@ def prepare_masks(
     # Apply drill offset (overrides win over auto).
     alignment: AlignmentVerdict | None = None
     if drill_name in offset_overrides:
+        if progress:
+            progress(f'applying manual {drill_name} offset')
         dy, dx = offset_overrides[drill_name]
         drill_arr = _shift_bool(drill_arr, dy, dx)
         corrections[drill_name] = LayerCorrection(
@@ -170,8 +179,12 @@ def prepare_masks(
             notes=f'manual offset ({dy}, {dx})',
         )
     else:
+        if progress:
+            progress(f'auditing {drill_name} alignment against copper')
         alignment = audit_alignment(drill_arr, arrs, auto_align=auto_align)
         if alignment.action == 'shift' and alignment.detected_offset:
+            if progress:
+                progress(f'applying detected {drill_name} offset {alignment.detected_offset}')
             dy, dx = alignment.detected_offset
             drill_arr = _shift_bool(drill_arr, dy, dx)
             corrections[drill_name] = LayerCorrection(
