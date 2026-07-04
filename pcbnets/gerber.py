@@ -14,14 +14,18 @@ works on any PNG masks regardless of how they were produced.
 from __future__ import annotations
 
 import json
+import logging
 import pathlib
 import re
 import shutil
 import subprocess
-import sys
+import time
 from typing import Iterable
 
 from PIL import Image
+
+
+log = logging.getLogger('pcbnets.gerber')
 
 
 # --- detection ---
@@ -240,21 +244,32 @@ _DRILL_CANONICAL = {'drill', 'via', 'PTH', 'NPTH'}
 
 # --- rasterisation ---
 
+def _format_elapsed(seconds: float) -> str:
+    if seconds < 60:
+        return f'{seconds:.1f}s'
+    minutes, secs = divmod(int(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f'{hours}h{minutes:02d}m{secs:02d}s'
+    return f'{minutes}m{secs:02d}s'
+
+
 def _rasterise_one(
-                   all_sources: List[pathlib.Path],
+                   all_sources: list[pathlib.Path],
                    selected_src: int,
                    output: pathlib.Path,
-                   dpi: int) -> None:
+                   dpi: int,
+                   progress_interval: float = 30.0) -> None:
     """Run gerbv on all these files, just outputting one
        Done this way to get alignment
     """
     sources = [str(x) for x in all_sources]
     foregrounds = []
-    for i,src in enumerate(all_sources):
-        if i==selected_src:
-            foregrounds.append("--foreground=#FFFFFFFF");
+    for i, src in enumerate(all_sources):
+        if i == selected_src:
+            foregrounds.append("--foreground=#FFFFFFFF")
         else:
-            foregrounds.append("--foreground=#FFFFFF00");
+            foregrounds.append("--foreground=#FFFFFF00")
     cmd = [
         'gerbv',
         '--export=png',
@@ -263,17 +278,37 @@ def _rasterise_one(
         '--background=#000000',
         *foregrounds,
         '--border=0',
-        *sources
+        *sources,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
+    started = time.monotonic()
+    next_progress = started + progress_interval
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    while proc.poll() is None:
+        now = time.monotonic()
+        if now >= next_progress:
+            log.info(
+                '    still rasterising %s in gerbv (%s elapsed)',
+                output.name,
+                _format_elapsed(now - started),
+            )
+            next_progress = now + progress_interval
+        time.sleep(min(1.0, max(0.0, next_progress - now)))
+    stdout, stderr = proc.communicate()
+    if proc.returncode != 0:
         raise RuntimeError(
-            f'gerbv failed on {all_sources[selected_src].name}:\n{result.stderr.strip()}'
+            f'gerbv failed on {all_sources[selected_src].name}:\n{stderr.strip()}'
         )
     if not output.exists():
         raise RuntimeError(
             f'gerbv claimed success but {output} was not written'
         )
+    if stdout.strip():
+        log.debug('gerbv stdout for %s:\n%s', output.name, stdout.strip())
 
 def rasterise(
     source_dir: pathlib.Path,
@@ -316,18 +351,20 @@ def rasterise(
         fname = mapping[name]
         src = source_dir / fname
         if not src.is_file():
-            print(f'  warning: {src} not found (skipping {name})', file=sys.stderr)
+            log.warning('  warning: %s not found (skipping %s)', src, name)
             continue
         out = output_dir / f'{name}.png'
-        print(f'  rendering {name}.png from {fname}')
+        started = time.monotonic()
+        log.info('  rasterising %s.png from %s', name, fname)
         try:
             _rasterise_one(sources, tgt_i, out, dpi)
         except RuntimeError as e:
-            print(f'  ! {e}', file=sys.stderr)
+            log.error('  ! %s', e)
             continue
         size = Image.open(out).size
         rendered_sizes[name] = size
-        print(f'    → {size[0]}×{size[1]} px')
+        log.info('    → %s×%s px (%s)',
+                 size[0], size[1], _format_elapsed(time.monotonic() - started))
         written.append(out)
 
     # Convenience aliases for downstream use:

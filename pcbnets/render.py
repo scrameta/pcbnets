@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Mapping
+from typing import Callable, Mapping
 
 import numpy as np
 from PIL import Image
@@ -45,13 +45,25 @@ def _downsample_image(img: Image.Image, scale: float) -> Image.Image:
 
 
 def _downsample_labels(labels: np.ndarray, scale: float) -> np.ndarray:
-    """Nearest-neighbour downsample preserving exact label values."""
+    """Downsample labels without letting background erase traces.
+
+    Output pixels take the maximum label from their source area. Since blank
+    pixels are label 0, any trace label in the area wins over blank space while
+    still only emitting labels that existed in the source image.
+    """
     if scale == 1.0:
         return labels
     h, w = labels.shape
     new_w = max(1, int(w * scale))
     new_h = max(1, int(h * scale))
-    # Pillow's mode='I' is 32-bit signed int.
+    block_h = h // new_h
+    block_w = w // new_w
+    if block_h > 0 and block_w > 0:
+        cropped = labels[:new_h * block_h, :new_w * block_w]
+        return cropped.reshape(new_h, block_h, new_w, block_w).max(axis=(1, 3))
+
+    # Upscaling or heavily skewed dimensions should not happen for idmaps in
+    # normal builds; keep exact ids by falling back to nearest-neighbour.
     img = Image.fromarray(labels.astype(np.int32), mode='I')
     img = img.resize((new_w, new_h), Image.Resampling.NEAREST)
     return np.asarray(img, dtype=np.int32)
@@ -63,6 +75,7 @@ def build_grid_and_idmap(
     cols: int = 2,
     scale: float = 1.0,
     label_text: bool = True,
+    progress: Callable[[str], None] | None = None,
 ) -> tuple[Image.Image, Image.Image, dict]:
     """Build the greyscale display grid and the encoded net-id map.
 
@@ -71,13 +84,15 @@ def build_grid_and_idmap(
     geometry as the grid, so click coordinates map directly between them.
 
     ``scale`` shrinks both outputs by that factor (1.0 = full size). The id
-    map uses nearest-neighbour to preserve exact ids; the display image
-    uses LANCZOS for smoother edges.
+    map prefers real net ids over background when reducing pixels; the
+    display image uses LANCZOS for smoother edges.
 
     Returns ``(grid_image, idmap_image, metadata)``. The metadata dict
     captures layer placements and per-layer dimensions so the viewer can
     label tiles and report which layer was clicked.
     """
+    if progress:
+        progress('checking grid inputs')
     layers = list(layer_images)
     if not layers:
         raise ValueError('no layers provided')
@@ -91,12 +106,16 @@ def build_grid_and_idmap(
     w, h = sizes[layers[0]]
     rows = (len(layers) + cols - 1) // cols
 
+    if progress:
+        progress(f'allocating full grid/idmap canvases: {w * cols}x{h * rows}')
     grid_full = Image.new('L', (w * cols, h * rows), 0)
     # 'RGB' with black background = net id 0 = background. Perfect.
     idmap_full = Image.new('RGB', (w * cols, h * rows), (0, 0, 0))
 
     placements: dict[str, dict] = {}
     for i, name in enumerate(layers):
+        if progress:
+            progress(f'placing layer {i + 1}/{len(layers)}: {name}')
         col = i % cols
         row = i // cols
         x, y = col * w, row * h
@@ -107,18 +126,30 @@ def build_grid_and_idmap(
             'col': col, 'row': row,
         }
 
+    if progress:
+        progress(f'downsampling display grid at scale {scale:g}')
     grid_out = _downsample_image(grid_full, scale)
     # For the idmap, downsample the *labels* via nearest then re-encode, so
     # we never invent intermediate ids.
     if scale != 1.0:
+        if progress:
+            progress('decoding idmap labels for trace-preserving downsample')
         idmap_full_labels = _decode_ids_rgb(idmap_full)
+        if progress:
+            progress(f'downsampling idmap labels at scale {scale:g}')
         idmap_full_labels = _downsample_labels(idmap_full_labels, scale)
+        if progress:
+            progress('encoding downsampled idmap labels')
         idmap_out = _encode_ids_rgb(idmap_full_labels)
     else:
+        if progress:
+            progress('keeping full-size idmap without downsample')
         idmap_out = idmap_full
 
     # Scale placements to match the downsampled output.
     if scale != 1.0:
+        if progress:
+            progress('scaling layer placement metadata')
         scaled_placements = {}
         for name, p in placements.items():
             scaled_placements[name] = {
@@ -131,6 +162,8 @@ def build_grid_and_idmap(
             }
         placements = scaled_placements
 
+    if progress:
+        progress('assembling grid metadata')
     meta = {
         'layers': layers,
         'cols': cols,

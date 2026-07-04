@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import pathlib
 import pickle
 import re
 import shutil
 import sys
+import time
 import zipfile
 from typing import Iterable
 
@@ -30,6 +32,69 @@ from .nets import extract_nets, merge_nets
 from .prepare import DEFAULT_OUTER_LAYERS, _shift_bool, prepare_masks
 from .render import build_grid_and_idmap
 
+
+def _format_elapsed(seconds: float) -> str:
+    """Format an elapsed duration for human-readable progress messages."""
+    if seconds < 60:
+        return f'{seconds:.1f}s'
+    minutes, secs = divmod(int(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f'{hours}h{minutes:02d}m{secs:02d}s'
+    return f'{minutes}m{secs:02d}s'
+
+
+class _Progress:
+    """Timestamped progress reporter for long render operations."""
+
+    def __init__(self, total: int) -> None:
+        self.total = total
+        self.current = 0
+        self.started = time.monotonic()
+        self.step_started = self.started
+        self.log = logging.getLogger('pcbnets.render')
+
+    def step(self, message: str) -> None:
+        now = time.monotonic()
+        if self.current:
+            self.log.info('  previous step took %s',
+                          _format_elapsed(now - self.step_started))
+        self.current += 1
+        self.step_started = now
+        pct = min(99, int(self.current * 100 / self.total))
+        elapsed = _format_elapsed(now - self.started)
+        self.log.info('  [%s/%s %2s%% %s] %s',
+                      self.current, self.total, pct, elapsed, message)
+
+    def detail(self, message: str) -> None:
+        now = time.monotonic()
+        total_elapsed = _format_elapsed(now - self.started)
+        step_elapsed = _format_elapsed(now - self.step_started)
+        self.log.info('    ... %s (%s step, %s total)',
+                      message, step_elapsed, total_elapsed)
+
+    def finish(self) -> None:
+        now = time.monotonic()
+        self.log.info('  previous step took %s',
+                      _format_elapsed(now - self.step_started))
+        elapsed = _format_elapsed(now - self.started)
+        self.log.info('  [%s/%s 100%% %s] render complete',
+                      self.total, self.total, elapsed)
+
+
+def _configure_cli_logging() -> None:
+    """Emit CLI status logs to stdout with readable timestamps."""
+    logger = logging.getLogger('pcbnets')
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    if logger.handlers:
+        return
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter(
+        '%(asctime)s %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S',
+    ))
+    logger.addHandler(handler)
 
 # Canonical copper naming only.  The normal auto-detected form is
 # F_Cu, optional InN_Cu layers, then B_Cu.
@@ -280,7 +345,7 @@ def _align_visual_masks(masks: dict[str, Image.Image],
                 'reference': copper_name,
                 'notes': f'manual visual offset against {copper_name}',
             }
-            print(f'  {mask_name:<14} visual  shift (forced)     offset ({dy}, {dx}) against {copper_name}')
+            logging.getLogger('pcbnets.render').info('  %-14s visual  shift (forced)     offset (%s, %s) against %s', mask_name, dy, dx, copper_name)
             continue
 
         if not auto_align:
@@ -312,7 +377,7 @@ def _align_visual_masks(masks: dict[str, Image.Image],
                 'reference': copper_name,
                 'notes': f'overlap with {copper_name} improved by {gain:.0%}',
             }
-            print(f'  {mask_name:<14} visual  shift (auto)       offset ({dy}, {dx}) against {copper_name}; overlap +{gain:.0%}')
+            logging.getLogger('pcbnets.render').info('  %-14s visual  shift (auto)       offset (%s, %s) against %s; overlap +%.0f%%', mask_name, dy, dx, copper_name, gain * 100)
         else:
             corrections[mask_name] = {
                 'offset': [0, 0],
@@ -321,7 +386,7 @@ def _align_visual_masks(masks: dict[str, Image.Image],
                 'notes': f'best offset ({dy}, {dx}) improved overlap by {gain:.0%}; kept unshifted',
             }
             if (dy, dx) != (0, 0):
-                print(f'  {mask_name:<14} visual  keep               best offset ({dy}, {dx}) only overlap +{gain:.0%}')
+                logging.getLogger('pcbnets.render').info('  %-14s visual  keep               best offset (%s, %s) only overlap +%.0f%%', mask_name, dy, dx, gain * 100)
 
     return corrections
 
@@ -333,8 +398,9 @@ def _print_report(report, drill_name: str) -> None:
     touch score, not pixel fill, so print it explicitly to avoid confusing
     a sparse drill mask with an 80-100% alignment score.
     """
-    print('  --- audit ---')
-    print(f'  {"Layer":<14} {"Fill%":>7}  {"Kind":<7} {"Action":<18} Note')
+    log = logging.getLogger('pcbnets.render')
+    log.info('  --- audit ---')
+    log.info('  %-14s %7s  %-7s %-18s Note', 'Layer', 'Fill%', 'Kind', 'Action')
     for name, p in report.polarity.items():
         c = report.corrections.get(name)
         if c and c.invert and c.source == 'override':
@@ -346,22 +412,19 @@ def _print_report(report, drill_name: str) -> None:
         else:
             action = 'keep'
         kind = 'outer' if p.is_outer else 'inner'
-        print(f'  {name:<14} {p.fill*100:>6.1f}%  {kind:<7} {action:<18} {p.reason}')
+        log.info('  %-14s %6.1f%%  %-7s %-18s %s', name, p.fill * 100, kind, action, p.reason)
 
     if report.alignment is not None:
         a = report.alignment
         drill_action = 'keep' if a.action == 'none' else a.action
-        print(f'  {drill_name:<14} {a.mask_fill*100:>6.1f}%  via     '
-              f'{drill_action:<18} '
-              f'touch {a.drills_on_copper}/{a.total_drills} = {a.score:.1%}')
+        log.info('  %-14s %6.1f%%  via     %-18s touch %s/%s = %.1f%%', drill_name, a.mask_fill * 100, drill_action, a.drills_on_copper, a.total_drills, a.score * 100)
         if a.detected_offset is not None and a.detected_offset != (0, 0):
-            print(f'  {"":<14} {"":>7}          '
-                  f'{"":<18} detected offset: {a.detected_offset}')
+            log.info('  %-14s %7s          %-18s detected offset: %s', '', '', '', a.detected_offset)
 
     if report.warnings:
-        print('  --- warnings ---')
+        log.info('  --- warnings ---')
         for w in report.warnings:
-            print(f'  ! {w}')
+            log.warning('  ! %s', w)
 
 
 def _run_pipeline(directory: pathlib.Path,
@@ -375,7 +438,8 @@ def _run_pipeline(directory: pathlib.Path,
                   cache: bool,
                   prep_kwargs: dict,
                   auto_invert: bool,
-                  auto_align: bool) -> tuple:
+                  auto_align: bool,
+                  progress: _Progress | None = None) -> tuple:
     """Returns (grid, idmap, meta, masks, report).
 
     ``drill_name`` is the physical hole mask.  ``via_name`` is the electrical
@@ -383,19 +447,27 @@ def _run_pipeline(directory: pathlib.Path,
     for old/simple builds.
     """
     extra = [] if drill_name == via_name else [drill_name]
+    if progress:
+        progress.step('loading masks')
     masks = load_masks(directory, layer_names, via_name, threshold,
-                       extra_names=extra)
+                       extra_names=extra,
+                       progress=progress.detail if progress else None)
 
+    if progress:
+        progress.step('preparing and auditing masks')
     arrs, via_arr, report = prepare_masks(
         masks=masks,
         layer_names=layer_names,
         drill_name=via_name,
         auto_invert=auto_invert,
         auto_align=auto_align,
+        progress=progress.detail if progress else None,
         **prep_kwargs,
     )
     _print_report(report, via_name)
 
+    if progress:
+        progress.step('aligning visual masks')
     visual_corrections = _align_visual_masks(
         masks=masks,
         arrs=arrs,
@@ -417,6 +489,8 @@ def _run_pipeline(directory: pathlib.Path,
         'prep': report.cache_signature(),
     }
 
+    if progress:
+        progress.step('loading cached nets or extracting/merging nets')
     net_labels = None
     if cache and cache_path.exists():
         try:
@@ -424,32 +498,37 @@ def _run_pipeline(directory: pathlib.Path,
                 cached = pickle.load(fp)
             if cached.get('key') == cache_key:
                 net_labels = cached['net_labels']
-                print(f'  using cached net labels from {cache_path.name}')
+                logging.getLogger('pcbnets.render').info('  using cached net labels from %s', cache_path.name)
         except Exception:
             net_labels = None
 
     if net_labels is None:
-        print(f'  extracting components on {len(layer_names)} layers...')
+        logging.getLogger('pcbnets.render').info('  extracting components on %s layers...', len(layer_names))
         result = extract_nets(
             copper_layers=arrs,
             drill=via_arr,
             drill_grow_px=drill_grow_px,
+            progress=progress.detail if progress else None,
         )
-        print(f'  merging via {len(result["drill_touches"])} connector components...')
+        logging.getLogger('pcbnets.render').info('  merging via %s connector components...', len(result['drill_touches']))
         net_labels = merge_nets(result['drill_touches'], result['layer_labels'])
         if cache:
             try:
                 with open(cache_path, 'wb') as fp:
                     pickle.dump({'key': cache_key, 'net_labels': net_labels}, fp)
             except Exception as e:
-                print(f'  (warning: cache write failed: {e})', file=sys.stderr)
+                logging.getLogger('pcbnets.render').warning('  (warning: cache write failed: %s)', e)
 
+    if progress:
+        progress.step('validating merged nets')
     check = check_merged_nets(net_labels)
     for w in check.warnings:
-        print(f'  ! {w}', file=sys.stderr)
+        logging.getLogger('pcbnets.render').warning('  ! %s', w)
 
-    print(f'  {check.n_nets} distinct nets across the board')
-    print('  building display grid + id map...')
+    logging.getLogger('pcbnets.render').info('  %s distinct nets across the board', check.n_nets)
+    if progress:
+        progress.step('building display grid + id map')
+    logging.getLogger('pcbnets.render').info('  building display grid + id map...')
 
     # ``arrs`` and ``net_labels`` are deliberately kept unpunched for the
     # electrical extraction above.  For the viewer, physical drill holes should
@@ -462,6 +541,8 @@ def _run_pipeline(directory: pathlib.Path,
         via_arr=via_arr,
         offset_overrides=prep_kwargs.get('offset_overrides', {}),
     )
+    if progress:
+        progress.detail('punching physical drill holes out of display layers')
     display_images, display_net_labels = _punch_drill_holes_for_display(
         arrs=arrs,
         net_labels=net_labels,
@@ -474,6 +555,7 @@ def _run_pipeline(directory: pathlib.Path,
         net_labels=display_net_labels,
         cols=cols,
         scale=scale,
+        progress=progress.detail if progress else None,
     )
     meta['n_nets'] = check.n_nets
     meta['source_dir'] = str(directory)
@@ -526,17 +608,23 @@ def _write_build(build_dir: pathlib.Path,
         if visual_name in masks:
             masks[visual_name].convert('L').save(build_dir / f'{visual_name}.png',
                                                  optimize=True)
-            print(f'  wrote {visual_name}.png')
+            logging.getLogger('pcbnets.render').info('  wrote %s.png', visual_name)
 
-    print(f'  wrote {build_dir}/grid.png, idmap.png, meta.json')
+    logging.getLogger('pcbnets.render').info('  wrote %s/grid.png, idmap.png, meta.json', build_dir)
 
 
-def _write_mips_and_tiles(build_dir: pathlib.Path) -> None:
+def _write_mips_and_tiles(build_dir: pathlib.Path,
+                           progress: _Progress | None = None) -> None:
     """Create all progressive-loading assets expected by the web viewer."""
-    mip_paths = make_mips(build_dir)
-    tile_paths = make_tiles(build_dir)
-    print(f'  wrote {len(mip_paths)} mip PNG(s)')
-    print(f'  wrote {len(tile_paths)} tile PNG(s)')
+    if progress:
+        progress.step('generating mip PNGs')
+    mip_paths = make_mips(build_dir, progress=progress.detail if progress else None)
+    logging.getLogger('pcbnets.render').info('  wrote %s mip PNG(s)', len(mip_paths))
+
+    if progress:
+        progress.step('generating tile PNGs')
+    tile_paths = make_tiles(build_dir, progress=progress.detail if progress else None)
+    logging.getLogger('pcbnets.render').info('  wrote %s tile PNG(s)', len(tile_paths))
 
 
 # ---------- subcommands ----------
@@ -578,6 +666,7 @@ def cmd_audit(args: argparse.Namespace) -> int:
 
 
 def cmd_render(args: argparse.Namespace) -> int:
+    _configure_cli_logging()
     directory = pathlib.Path(args.directory).resolve()
     build_dir = pathlib.Path(args.output).resolve()
     drill_name = _resolve_drill_name(directory, args.drill)
@@ -585,11 +674,12 @@ def cmd_render(args: argparse.Namespace) -> int:
     layers = _resolve_layers(directory, args.layers, drill_name, via_name)
     overrides = _collect_overrides(args)
 
-    print(f'rendering nets from {directory}')
-    print(f'  layers: {", ".join(layers)}')
-    print(f'  drill : {drill_name}')
-    print(f'  via   : {via_name}')
+    logging.getLogger('pcbnets.render').info('rendering nets from %s', directory)
+    logging.getLogger('pcbnets.render').info('  layers: %s', ', '.join(layers))
+    logging.getLogger('pcbnets.render').info('  drill : %s', drill_name)
+    logging.getLogger('pcbnets.render').info('  via   : %s', via_name)
 
+    progress = _Progress(total=9)
     grid, idmap, meta, masks, _ = _run_pipeline(
         directory, layers, drill_name, via_name,
         args.drill_grow, args.threshold, args.scale, args.cols,
@@ -597,9 +687,12 @@ def cmd_render(args: argparse.Namespace) -> int:
         prep_kwargs=overrides,
         auto_invert=not args.no_auto_invert,
         auto_align=args.auto_align,
+        progress=progress,
     )
+    progress.step('writing build artifacts')
     _write_build(build_dir, grid, idmap, meta, masks)
-    _write_mips_and_tiles(build_dir)
+    _write_mips_and_tiles(build_dir, progress=progress)
+    progress.finish()
     return 0
 
 
@@ -888,9 +981,9 @@ def cmd_align(args: argparse.Namespace) -> int:
     manual_offsets: dict[str, tuple[int, int]] = dict(overrides['offset_overrides'])
 
     print(f'aligning PNG masks from {directory}')
-    print(f'  layers: {", ".join(layers)}')
-    print(f'  drill : {drill_name}')
-    print(f'  via   : {via_name}')
+    logging.getLogger('pcbnets.render').info('  layers: %s', ', '.join(layers))
+    logging.getLogger('pcbnets.render').info('  drill : %s', drill_name)
+    logging.getLogger('pcbnets.render').info('  via   : %s', via_name)
 
     shift_info: dict[str, dict] = {}
     for name, off in manual_offsets.items():
@@ -996,12 +1089,14 @@ def cmd_deploy(args: argparse.Namespace) -> int:
 
 def cmd_gerber(args: argparse.Namespace) -> int:
     """Rasterise Gerber/Excellon files in a directory to PNG masks."""
+    _configure_cli_logging()
+    log = logging.getLogger('pcbnets.gerber')
     directory = pathlib.Path(args.directory).resolve()
     out_dir = pathlib.Path(args.output).resolve() if args.output \
               else directory / 'pngs'
 
     if not directory.is_dir():
-        print(f'{directory} is not a directory', file=sys.stderr)
+        log.error('%s is not a directory', directory)
         return 1
 
     # Layer mapping is explicit or auto-detected.  Deliberately do NOT read
@@ -1011,43 +1106,43 @@ def cmd_gerber(args: argparse.Namespace) -> int:
     if args.mapping:
         from .gerber import read_layers_json
         mapping = read_layers_json(pathlib.Path(args.mapping))
-        print(f'using mapping from {args.mapping}')
+        log.info('using mapping from %s', args.mapping)
         created = False
     else:
         mapping = detect_layers(directory)
         write_layers_json(directory, mapping)
         if args.force_detect:
-            print(f'wrote (re-detected) {directory / "layers.json"}')
+            log.info('wrote (re-detected) %s', directory / "layers.json")
         else:
-            print(f'wrote detected {directory / "layers.json"}')
+            log.info('wrote detected %s', directory / "layers.json")
         created = True
 
     if not mapping:
-        print('no Gerber/Excellon files recognised in directory', file=sys.stderr)
-        print('  files seen:', file=sys.stderr)
+        log.error('no Gerber/Excellon files recognised in directory')
+        log.error('  files seen:')
         for p in sorted(directory.iterdir()):
             if p.is_file():
-                print(f'    {p.name}', file=sys.stderr)
+                log.error('    %s', p.name)
         return 1
 
-    print(f'rasterising {len(mapping)} layers at {args.dpi} DPI into {out_dir}')
+    log.info('rasterising %s layers at %s DPI into %s',
+             len(mapping), args.dpi, out_dir)
     from .gerber import _sort_key
     for name in sorted(mapping, key=_sort_key):
-        print(f'  {name:<14} ← {mapping[name]}')
+        log.info('  %-14s ← %s', name, mapping[name])
 
     try:
         written = rasterise(
             directory, mapping, out_dir, dpi=args.dpi
         )
     except GerbvMissingError as e:
-        print(f'{e}', file=sys.stderr)
+        log.error('%s', e)
         return 2
 
-    print(f'wrote {len(written)} PNG(s) to {out_dir}')
+    log.info('wrote %s PNG(s) to %s', len(written), out_dir)
     if created:
-        print()
-        print(f'Edit {directory / "layers.json"} if needed, then pass it '
-              f'explicitly with --mapping.')
+        log.info('Edit %s if needed, then pass it explicitly with --mapping.',
+                 directory / "layers.json")
     return 0
 
 
