@@ -253,12 +253,18 @@ The output is a shortest drill-by-drill path, for example:
 
 ```
 F_Cu:18 connects to In1_Cu:7 through 1 drill edge(s):
-  F_Cu:18 -- drill 203 -- In1_Cu:7
+  F_Cu:18 @ approx 1220,560 (bbox 1180,520..1260,600)
+    -- drill 203 @ 1240,580 (bbox 1234,574..1246,586) --
+  In1_Cu:7 @ approx 1240,580 (bbox 1202,542..1282,622)
 ```
 
 The interactive viewer also shows the last clicked coordinate in the sidebar
 as `LAYER:X,Y`, which can be copied directly into `pcbnets explain --from`
 or `--to`.
+
+Those coordinates and bboxes are pixel coordinates in the source PNGs, so you
+can inspect the listed points directly in `F_Cu.png`, `In1_Cu.png`, `via.png`,
+and the other input masks.
 
 ### `pcbnets serve <build_dir>`
 

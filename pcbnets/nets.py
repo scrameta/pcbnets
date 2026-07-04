@@ -166,6 +166,7 @@ def extract_nets(copper_layers: dict[str, Image.Image],
 def merge_nets_debug(
     drill_touches: Mapping[int, set],
     layer_labels: Mapping[str, np.ndarray],
+    drill_labels: np.ndarray | None = None,
 ) -> tuple[dict[str, np.ndarray], dict]:
     """Merge components and return labels plus explainable merge metadata.
 
@@ -213,17 +214,44 @@ def merge_nets_debug(
             'component': comp['component'],
         })
 
+    drill_stats: dict[int, dict] = {}
+    if drill_labels is not None:
+        max_drill = int(drill_labels.max())
+        drill_areas = np.bincount(drill_labels.ravel(), minlength=max_drill + 1)
+        drill_objects = find_objects(drill_labels)
+        for drill_id in range(1, max_drill + 1):
+            area = int(drill_areas[drill_id])
+            obj = drill_objects[drill_id - 1] if drill_id - 1 < len(drill_objects) else None
+            if area == 0 or obj is None:
+                continue
+            local = drill_labels[obj] == drill_id
+            ys, xs = np.nonzero(local)
+            if len(xs) == 0:
+                continue
+            x0 = int(obj[1].start)
+            y0 = int(obj[0].start)
+            drill_stats[drill_id] = {
+                'area_px': area,
+                'bbox': [x0, y0, int(obj[1].stop), int(obj[0].stop)],
+                'centroid': [
+                    float(x0 + xs.mean()),
+                    float(y0 + ys.mean()),
+                ],
+            }
+
     for drill_id, members in sorted(drill_touches.items()):
         member_list = [
             {'layer': layer, 'component': int(component),
              'net': int(component_to_net.get((layer, int(component)), 0))}
             for layer, component in sorted(members, key=lambda m: (m[0], m[1]))
         ]
-        drills.append({
+        drill_record = {
             'drill': int(drill_id),
             'members': member_list,
             'nets': sorted({m['net'] for m in member_list if m['net']}),
-        })
+        }
+        drill_record.update(drill_stats.get(int(drill_id), {}))
+        drills.append(drill_record)
 
     debug = {
         'components': components,

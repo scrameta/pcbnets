@@ -120,8 +120,11 @@ def test_merge_nets_debug_explains_drill_path():
     net_labels, debug = merge_nets_debug(
         result['drill_touches'],
         result['layer_labels'],
+        result['drill_labels'],
     )
     assert net_labels['top'][45, 70] == net_labels['bot'][50, 80] != 0
+    assert debug['drills'][0]['bbox'] == [65, 45, 86, 66]
+    assert debug['drills'][0]['centroid'] == [75.0, 55.0]
 
     path = explain_merge_path(debug, ('top', 1), ('bot', 1))
     assert path == [{

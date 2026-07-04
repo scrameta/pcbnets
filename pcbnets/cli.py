@@ -567,7 +567,11 @@ def _run_pipeline(directory: pathlib.Path,
             progress=progress.detail if progress else None,
         )
         logging.getLogger('pcbnets.render').info('  merging via %s connector components...', len(result['drill_touches']))
-        net_labels, net_debug = merge_nets_debug(result['drill_touches'], result['layer_labels'])
+        net_labels, net_debug = merge_nets_debug(
+            result['drill_touches'],
+            result['layer_labels'],
+            result['drill_labels'],
+        )
         if cache:
             try:
                 with open(cache_path, 'wb') as fp:
@@ -824,7 +828,11 @@ def cmd_nets(args: argparse.Namespace) -> int:
         progress=progress.detail,
     )
     progress.step('merging nets and building debug metadata')
-    net_labels, debug = merge_nets_debug(result['drill_touches'], result['layer_labels'])
+    net_labels, debug = merge_nets_debug(
+        result['drill_touches'],
+        result['layer_labels'],
+        result['drill_labels'],
+    )
     progress.step('writing net debug artefacts')
     _write_net_debug(
         out_dir=out_dir,
@@ -869,6 +877,55 @@ def _parse_component_spec(spec: str, labels: dict[str, np.ndarray]) -> tuple[str
     return layer, component
 
 
+def _debug_component_index(debug: dict) -> dict[tuple[str, int], dict]:
+    return {
+        (c['layer'], int(c['component'])): c
+        for c in debug.get('components', [])
+    }
+
+
+def _debug_drill_index(debug: dict) -> dict[int, dict]:
+    return {
+        int(d['drill']): d
+        for d in debug.get('drills', [])
+    }
+
+
+def _format_bbox(bbox: list | tuple | None) -> str:
+    if not bbox or len(bbox) < 4:
+        return 'bbox unavailable'
+    x0, y0, x1, y1 = [int(v) for v in bbox[:4]]
+    return f'bbox {x0},{y0}..{x1 - 1},{y1 - 1}'
+
+
+def _format_component_location(node: dict, components: dict[tuple[str, int], dict]) -> str:
+    comp = components.get((node['layer'], int(node['component'])))
+    if not comp:
+        return f'{node["layer"]}:{node["component"]} (location unavailable)'
+    bbox = comp.get('bbox')
+    if bbox and len(bbox) >= 4:
+        cx = (float(bbox[0]) + float(bbox[2]) - 1) / 2
+        cy = (float(bbox[1]) + float(bbox[3]) - 1) / 2
+        return (
+            f'{node["layer"]}:{node["component"]} '
+            f'@ approx {cx:.0f},{cy:.0f} ({_format_bbox(bbox)})'
+        )
+    return f'{node["layer"]}:{node["component"]} ({_format_bbox(None)})'
+
+
+def _format_drill_location(drill_id: int, drills: dict[int, dict]) -> str:
+    drill = drills.get(int(drill_id))
+    if not drill:
+        return f'drill {drill_id} (location unavailable; regenerate nets data with a newer pcbnets)'
+    centroid = drill.get('centroid')
+    if centroid and len(centroid) >= 2:
+        return (
+            f'drill {drill_id} @ {float(centroid[0]):.0f},{float(centroid[1]):.0f} '
+            f'({_format_bbox(drill.get("bbox"))})'
+        )
+    return f'drill {drill_id} ({_format_bbox(drill.get("bbox"))})'
+
+
 def cmd_explain(args: argparse.Namespace) -> int:
     """Explain which drill contacts connect two local components."""
     debug_dir = pathlib.Path(args.debug_dir).resolve()
@@ -892,11 +949,15 @@ def cmd_explain(args: argparse.Namespace) -> int:
         print(f'{args.start} and {args.end} are not connected by recorded drill merge edges')
         return 1
 
+    components = _debug_component_index(debug)
+    drills = _debug_drill_index(debug)
     print(f'{start[0]}:{start[1]} connects to {end[0]}:{end[1]} through {len(path)} drill edge(s):')
     for step in path:
         a = step['from']
         b = step['to']
-        print(f'  {a["layer"]}:{a["component"]} -- drill {step["drill"]} -- {b["layer"]}:{b["component"]}')
+        print(f'  {_format_component_location(a, components)}')
+        print(f'    -- {_format_drill_location(step["drill"], drills)} --')
+        print(f'  {_format_component_location(b, components)}')
     return 0
 
 
