@@ -111,8 +111,11 @@ by some other route, you may need to align them manually.
 Rasterises every recognised Gerber/Excellon file in `<dir>` to a PNG
 mask. Each output is named after the canonical KiCad layer
 (`F_Cu.png`, `In1_Cu.png`, `B_Cu.png`, `F_Silkscreen.png`, `PTH.png`,
-etc). The `PTH` mask is also aliased to `drill.png` so the rest of the
-pipeline works without extra flags.
+etc). Drill outputs are also aliased for the downstream pipeline:
+`via.png` is the preferred electrical connector mask, while `drill.png`
+is the physical-hole mask. If only one generic drill file is present, the
+gerber stage writes both names from that same source so the fallback is
+visible and inspectable.
 
 Detection writes (or reads) `layers.json` in the source directory:
 
@@ -400,8 +403,9 @@ for w in check.warnings:
    alignment, otherwise bail with an actionable error.
 4. **Connected components** (4-connectivity) per layer → each isolated
    piece of copper gets a local id.
-5. **Drill components** found the same way. `PTH`/`drill` is used for
-   electrical connectivity; `NPTH` is not used to merge nets.
+5. **Connector components** found the same way. `via.png` is preferred for
+   electrical connectivity, then `PTH.png`, then `drill.png` as a fallback;
+   `NPTH` is not used to merge nets.
 6. **Barrel contact test**: for each drill, sample a narrow annulus just
    outside the hole and record which `(layer, id)` copper regions actually
    reach the hole wall. This avoids treating mechanical holes or anti-pads

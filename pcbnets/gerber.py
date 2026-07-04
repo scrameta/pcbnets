@@ -310,6 +310,39 @@ def _rasterise_one(
     if stdout.strip():
         log.debug('gerbv stdout for %s:\n%s', output.name, stdout.strip())
 
+
+def _write_drill_aliases(output_dir: pathlib.Path,
+                         written: list[pathlib.Path]) -> None:
+    """Create downstream-friendly drill/via aliases from rendered drill masks."""
+    pth_path = output_dir / 'PTH.png'
+    via_path = output_dir / 'via.png'
+    drill_alias = output_dir / 'drill.png'
+
+    if not via_path.exists():
+        source = None
+        if pth_path.exists():
+            source = pth_path
+        elif drill_alias.exists():
+            # A single generic drill file is ambiguous: it may include NPTH,
+            # but downstream connectivity already falls back to ``drill`` when
+            # no via/PTH mask exists.  Write the alias explicitly so users can
+            # inspect the exact mask being used as the electrical fallback.
+            source = drill_alias
+        if source is not None:
+            shutil.copy2(source, via_path)
+            written.append(via_path)
+
+    if not drill_alias.exists():
+        source = None
+        if pth_path.exists():
+            source = pth_path
+        elif via_path.exists():
+            source = via_path
+        if source is not None:
+            shutil.copy2(source, drill_alias)
+            written.append(drill_alias)
+
+
 def rasterise(
     source_dir: pathlib.Path,
     mapping: dict[str, str],
@@ -371,21 +404,6 @@ def rasterise(
     #   via.png   = preferred electrical connectivity mask
     #   drill.png = physical hole mask, falling back to the electrical mask
     #               only when no explicit drill mask was rendered
-    pth_path = output_dir / 'PTH.png'
-    via_path = output_dir / 'via.png'
-    drill_alias = output_dir / 'drill.png'
-
-    if not via_path.exists() and pth_path.exists():
-        shutil.copy2(pth_path, via_path)
-        written.append(via_path)
-    if not drill_alias.exists():
-        source = None
-        if pth_path.exists():
-            source = pth_path
-        elif via_path.exists():
-            source = via_path
-        if source is not None:
-            shutil.copy2(source, drill_alias)
-            written.append(drill_alias)
+    _write_drill_aliases(output_dir, written)
 
     return written
