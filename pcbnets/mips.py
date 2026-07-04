@@ -29,21 +29,43 @@ def _downsample_idmap(img: Image.Image,
                       width: int,
                       height: int,
                       progress: Callable[[str], None] | None = None,
+                      chunk_rows: int = 256,
                       ) -> Image.Image:
     """Downsample an encoded idmap, preferring trace labels over blank space."""
-    if progress:
-        progress('  idmap mip: decoding RGB ids')
-    labels = _decode_ids_rgb(img)
-    src_h, src_w = labels.shape
+    src_w, src_h = img.size
     block_h = src_h // height
     block_w = src_w // width
+    if block_h <= 0 or block_w <= 0:
+        return img.resize((width, height), Image.Resampling.NEAREST)
+
     if progress:
-        progress(f'  idmap mip: max-pooling {src_w}x{src_h} → {width}x{height}')
-    cropped = labels[:height * block_h, :width * block_w]
-    out = cropped.reshape(height, block_h, width, block_w).max(axis=(1, 3))
-    if progress:
-        progress('  idmap mip: encoding RGB ids')
-    return _encode_ids_rgb(out)
+        progress(
+            f'  idmap mip: block max-pooling {src_w}x{src_h} '
+            f'→ {width}x{height} in row chunks'
+        )
+
+    rgb_out = np.empty((height, width, 3), dtype=np.uint8)
+    rows_per_chunk = max(1, min(chunk_rows, height))
+    for y0 in range(0, height, rows_per_chunk):
+        y1 = min(height, y0 + rows_per_chunk)
+        src_y0 = y0 * block_h
+        src_y1 = y1 * block_h
+        if progress:
+            progress(f'  idmap mip: rows {y0 + 1}-{y1}/{height}')
+
+        arr = np.asarray(
+            img.crop((0, src_y0, width * block_w, src_y1)).convert('RGB')
+        )
+        labels = (
+            arr[..., 0].astype(np.uint32)
+            | (arr[..., 1].astype(np.uint32) << 8)
+            | (arr[..., 2].astype(np.uint32) << 16)
+        )
+        pooled = labels.reshape(y1 - y0, block_h, width, block_w).max(axis=(1, 3))
+        rgb_out[y0:y1, :, 0] = pooled & 0xFF
+        rgb_out[y0:y1, :, 1] = (pooled >> 8) & 0xFF
+        rgb_out[y0:y1, :, 2] = (pooled >> 16) & 0xFF
+    return Image.fromarray(rgb_out, mode='RGB')
 
 
 def make_mips(build_dir: pathlib.Path,
@@ -52,15 +74,27 @@ def make_mips(build_dir: pathlib.Path,
     """Generate downsampled mip-map PNGs for every root PNG in ``build_dir``."""
     written: list[pathlib.Path] = []
     pngs = sorted(p for p in build_dir.glob('*.png') if p.is_file())
+    idmap_source = build_dir / 'idmap.png'
+    idmap_source_level = 1
     for level in levels:
         out_dir = build_dir / 'mips' / str(level)
         out_dir.mkdir(parents=True, exist_ok=True)
         for png in pngs:
             if progress:
                 progress(f'generating mip level {level}: {png.name}')
-            with Image.open(png) as im:
-                width = max(1, im.width // level)
-                height = max(1, im.height // level)
+            source_png = png
+            factor = level
+            if png.name == 'idmap.png' and level % idmap_source_level == 0:
+                source_png = idmap_source
+                factor = level // idmap_source_level
+                if progress and source_png != png:
+                    progress(
+                        f'  idmap mip: using {source_png.relative_to(build_dir)} '
+                        f'as source (additional /{factor})'
+                    )
+            with Image.open(source_png) as im:
+                width = max(1, im.width // factor)
+                height = max(1, im.height // factor)
                 if png.name == 'idmap.png':
                     resized = _downsample_idmap(
                         im,
@@ -82,4 +116,7 @@ def make_mips(build_dir: pathlib.Path,
                 if progress:
                     progress(f'  wrote mip {out_path.relative_to(build_dir)}')
                 written.append(out_path)
+                if png.name == 'idmap.png':
+                    idmap_source = out_path
+                    idmap_source_level = level
     return written
