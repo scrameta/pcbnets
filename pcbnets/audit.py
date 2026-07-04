@@ -104,13 +104,12 @@ def score_alignment(drill: np.ndarray,
             continue #Skip planes!
         any_copper |= arr
 
-    touches = 0
-    report_every = max(1, n // 20)
-    for d in range(1, n + 1):
-        if ((lbl_drill == d) & any_copper).any():
-            touches += 1
-        if progress and (d == 1 or d == n or d % report_every == 0):
-            progress(f'{progress_prefix}: checked {d}/{n} drill blob(s)')
+    if progress:
+        progress(f'{progress_prefix}: finding drill blobs touching copper')
+    touching_labels = np.unique(lbl_drill[drill & any_copper])
+    touches = int(np.count_nonzero(touching_labels))
+    if progress:
+        progress(f'{progress_prefix}: {touches}/{n} drill blob(s) touch copper')
     return n, touches, touches / n
 
 def detect_offset(
