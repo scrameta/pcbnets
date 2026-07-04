@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import filecmp
 import json
 import logging
 import pathlib
@@ -201,6 +202,23 @@ def _resolve_via_name(directory: pathlib.Path, requested: str = 'auto') -> str:
     if (directory / f'{requested}.png').is_file():
         return requested
     return requested
+
+
+def _connector_mode(directory: pathlib.Path, via_name: str) -> str:
+    """Return how the selected vertical-connector mask should be interpreted."""
+    if via_name == 'NPTH':
+        return 'never'
+    if via_name == 'via':
+        via_path = directory / 'via.png'
+        drill_path = directory / 'drill.png'
+        pth_path = directory / 'PTH.png'
+        if (not pth_path.exists() and via_path.exists() and drill_path.exists()
+                and filecmp.cmp(via_path, drill_path, shallow=False)):
+            return 'infer'
+        return 'explicit'
+    if via_name in {'via', 'PTH'}:
+        return 'explicit'
+    return 'infer'
 
 
 def _parse_offset(spec: str) -> tuple[int, int]:
@@ -526,6 +544,7 @@ def _run_pipeline(directory: pathlib.Path,
         'layers': layer_names,
         'drill': drill_name,
         'via': via_name,
+        'connector_mode': _connector_mode(directory, via_name),
         'grow': drill_grow_px,
         'threshold': threshold,
         'sizes': {n: masks[n].size for n in masks
@@ -564,6 +583,7 @@ def _run_pipeline(directory: pathlib.Path,
             copper_layers=arrs,
             drill=via_arr,
             drill_grow_px=drill_grow_px,
+            connector_mode=_connector_mode(directory, via_name),
             progress=progress.detail if progress else None,
         )
         logging.getLogger('pcbnets.render').info('  merging via %s connector components...', len(result['drill_touches']))
@@ -622,6 +642,7 @@ def _run_pipeline(directory: pathlib.Path,
     meta['render_scale'] = scale
     meta['drill_name'] = drill_name
     meta['via_name'] = via_name
+    meta['connector_mode'] = _connector_mode(directory, via_name)
     meta['drill_grow_px'] = drill_grow_px
     meta['outer_layers'] = sorted(prep_kwargs.get('outer_layers', DEFAULT_OUTER_LAYERS))
     meta['corrections'] = {
@@ -739,6 +760,7 @@ def cmd_render(args: argparse.Namespace) -> int:
     logging.getLogger('pcbnets.render').info('  layers: %s', ', '.join(layers))
     logging.getLogger('pcbnets.render').info('  drill : %s', drill_name)
     logging.getLogger('pcbnets.render').info('  via   : %s', via_name)
+    logging.getLogger('pcbnets.render').info('  mode  : %s', _connector_mode(directory, via_name))
 
     progress = _Progress(total=9)
     grid, idmap, meta, masks, _ = _run_pipeline(
@@ -783,6 +805,7 @@ def _write_net_debug(out_dir: pathlib.Path,
                      layers: list[str],
                      drill_name: str,
                      via_name: str,
+                     connector_mode: str,
                      threshold: int,
                      layer_labels: dict[str, np.ndarray],
                      net_labels: dict[str, np.ndarray],
@@ -796,6 +819,7 @@ def _write_net_debug(out_dir: pathlib.Path,
         'layers': layers,
         'drill_name': drill_name,
         'via_name': via_name,
+        'connector_mode': connector_mode,
         'threshold': threshold,
         'shapes': {
             name: list(net_labels[name].shape)
@@ -817,6 +841,7 @@ def cmd_nets(args: argparse.Namespace) -> int:
     logging.getLogger('pcbnets.render').info('  layers: %s', ', '.join(layers))
     logging.getLogger('pcbnets.render').info('  drill : %s', drill_name)
     logging.getLogger('pcbnets.render').info('  via   : %s', via_name)
+    logging.getLogger('pcbnets.render').info('  mode  : %s', _connector_mode(directory, via_name))
     _print_report(report, via_name)
 
     progress = _Progress(total=3, label='net extraction')
@@ -825,6 +850,7 @@ def cmd_nets(args: argparse.Namespace) -> int:
         arrs,
         via_arr,
         drill_grow_px=args.drill_grow,
+        connector_mode=_connector_mode(directory, via_name),
         progress=progress.detail,
     )
     progress.step('merging nets and building debug metadata')
@@ -840,6 +866,7 @@ def cmd_nets(args: argparse.Namespace) -> int:
         layers=layers,
         drill_name=drill_name,
         via_name=via_name,
+        connector_mode=_connector_mode(directory, via_name),
         threshold=args.threshold,
         layer_labels=result['layer_labels'],
         net_labels=net_labels,

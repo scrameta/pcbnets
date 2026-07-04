@@ -111,11 +111,12 @@ by some other route, you may need to align them manually.
 Rasterises every recognised Gerber/Excellon file in `<dir>` to a PNG
 mask. Each output is named after the canonical KiCad layer
 (`F_Cu.png`, `In1_Cu.png`, `B_Cu.png`, `F_Silkscreen.png`, `PTH.png`,
-etc). Drill outputs are also aliased for the downstream pipeline:
-`via.png` is the preferred electrical connector mask, while `drill.png`
-is the physical-hole mask. If only one generic drill file is present, the
-gerber stage writes both names from that same source so the fallback is
-visible and inspectable.
+etc). Drill outputs are also aliased for the downstream pipeline when they
+are explicit: `PTH.png` is copied to `via.png` as the preferred electrical
+connector mask, and `via.png`/`PTH.png` can be copied to `drill.png` as the
+physical-hole mask when no generic drill file exists. A lone generic drill
+file remains `drill.png`; the net-finding stage then infers which drill
+blobs are electrical.
 
 Detection writes (or reads) `layers.json` in the source directory:
 
@@ -403,9 +404,11 @@ for w in check.warnings:
    alignment, otherwise bail with an actionable error.
 4. **Connected components** (4-connectivity) per layer → each isolated
    piece of copper gets a local id.
-5. **Connector components** found the same way. `via.png` is preferred for
-   electrical connectivity, then `PTH.png`, then `drill.png` as a fallback;
-   `NPTH` is not used to merge nets.
+5. **Connector components** found the same way. `via.png` and `PTH.png` are
+   treated as explicit electrical connectors. `NPTH.png` never connects.
+   Generic `drill.png` is inferred hole-by-hole: partial annular contact is
+   considered plated/electrical, while all-around annular contact is treated
+   as a non-connecting drill.
 6. **Barrel contact test**: for each drill, sample a narrow annulus just
    outside the hole and record which `(layer, id)` copper regions actually
    reach the hole wall. This avoids treating mechanical holes or anti-pads

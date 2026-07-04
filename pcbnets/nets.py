@@ -29,12 +29,12 @@ import math
 from types import SimpleNamespace
 
 
-def drill_annulus_contact_ids(layer_lbl: np.ndarray,
-                              layer_copper: np.ndarray,
-                              prop,
-                              gap_px: int = 1,
-                              width_px: int = 4,
-                              min_copper_frac: float = 0.10) -> list[int]:
+def drill_annulus_contact_info(layer_lbl: np.ndarray,
+                               layer_copper: np.ndarray,
+                               prop,
+                               gap_px: int = 1,
+                               width_px: int = 4,
+                               min_copper_frac: float = 0.10) -> tuple[list[int], float]:
     """
     Return copper component ids that touch the drill barrel.
 
@@ -67,23 +67,45 @@ def drill_annulus_contact_ids(layer_lbl: np.ndarray,
     annulus = (dist >= r0) & (dist <= r1)
 
     if not annulus.any():
-        return []
+        return [], 0.0
 
     local_copper = layer_copper[y0:y1, x0:x1] & annulus
     frac = local_copper.sum() / annulus.sum()
 
     if frac < min_copper_frac:
-        return []
+        return [], float(frac)
 
     ids = np.unique(layer_lbl[y0:y1, x0:x1][local_copper])
     ids = ids[ids != 0]
 
-    return [int(i) for i in ids]
+    return [int(i) for i in ids], float(frac)
+
+
+def drill_annulus_contact_ids(layer_lbl: np.ndarray,
+                              layer_copper: np.ndarray,
+                              prop,
+                              gap_px: int = 1,
+                              width_px: int = 4,
+                              min_copper_frac: float = 0.10) -> list[int]:
+    ids, _ = drill_annulus_contact_info(
+        layer_lbl=layer_lbl,
+        layer_copper=layer_copper,
+        prop=prop,
+        gap_px=gap_px,
+        width_px=width_px,
+        min_copper_frac=min_copper_frac,
+    )
+    return ids
 
 def extract_nets(copper_layers: dict[str, Image.Image],
                  drill: Image.Image,
                  drill_grow_px: int = 0,
+                 connector_mode: str = 'explicit',
                  progress: Callable[[str], None] | None = None) -> dict:
+    if connector_mode not in {'explicit', 'infer', 'never'}:
+        raise ValueError(
+            "connector_mode must be 'explicit', 'infer', or 'never'"
+        )
     # Do not dilate drills for connectivity. Dilation is exactly the kind
     # of thing that can jump across anti-pads/clearances.
     arr_drill = _to_bool(drill)
@@ -109,6 +131,13 @@ def extract_nets(copper_layers: dict[str, Image.Image],
 
     drill_touches = {}
 
+    if connector_mode == 'never':
+        return {
+            'layer_labels': layer_labels,
+            'drill_labels': lbl_drill,
+            'drill_touches': drill_touches,
+        }
+
     report_every = max(1, n_drill // 20)
     for drill_id, obj in enumerate(find_objects(lbl_drill), start=1):
         if progress and (drill_id == 1 or drill_id == n_drill
@@ -126,7 +155,7 @@ def extract_nets(copper_layers: dict[str, Image.Image],
         members = set()
 
         for layer, layer_lbl in layer_labels.items():
-            ids = drill_annulus_contact_ids(
+            ids, frac = drill_annulus_contact_info(
                 layer_lbl=layer_lbl,
                 layer_copper=copper_masks[layer],
                 prop=prop,
@@ -134,26 +163,17 @@ def extract_nets(copper_layers: dict[str, Image.Image],
                 width_px=4,
                 min_copper_frac=0.10,
             )
+            if connector_mode == 'infer' and frac >= 0.85:
+                # Generic drill files often include mechanical holes that pass
+                # through copper pours.  Treat all-around annular contact as a
+                # non-plated/mechanical drill; only partial contacts are
+                # inferred as plated connectors.
+                continue
 
             for net_id in ids:
                 members.add((layer, net_id))
 
-        # This is the important NPTH/mechanical-hole guard.
-        #
-        # A through plated hole should normally have a visible annular pad
-        # on top and/or bottom. If the only contacts are internal planes,
-        # reject it as a vertical connector.
-        layer_names = list(copper_layers.keys())
-        outer_layers = {"F_Cu", "B_Cu"}
-        if layer_names:
-            outer_layers.add(layer_names[0])
-            outer_layers.add(layer_names[-1])
-        has_outer_contact = any(
-            layer in outer_layers
-            for layer, net_id in members
-        )
-
-        if has_outer_contact and members:
+        if members:
             drill_touches[drill_id] = members
 
     return {

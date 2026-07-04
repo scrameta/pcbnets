@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from PIL import Image
 
-from pcbnets.cli import _resolve_drill_name, _resolve_layers, _resolve_via_name
+from pcbnets.cli import (
+    _connector_mode,
+    _resolve_drill_name,
+    _resolve_layers,
+    _resolve_via_name,
+)
 
 
 def png(path):
@@ -47,6 +52,21 @@ def test_resolve_via_prefers_via_then_pth_then_drill(tmp_path):
     assert _resolve_via_name(tmp_path, 'auto') == 'PTH'
     png(tmp_path / 'via.png')
     assert _resolve_via_name(tmp_path, 'auto') == 'via'
+
+
+def test_connector_mode_infers_copied_generic_drill_alias(tmp_path):
+    png(tmp_path / 'drill.png')
+    (tmp_path / 'via.png').write_bytes((tmp_path / 'drill.png').read_bytes())
+
+    assert _connector_mode(tmp_path, 'via') == 'infer'
+
+
+def test_connector_mode_treats_pth_backed_via_as_explicit(tmp_path):
+    png(tmp_path / 'drill.png')
+    png(tmp_path / 'PTH.png')
+    (tmp_path / 'via.png').write_bytes((tmp_path / 'drill.png').read_bytes())
+
+    assert _connector_mode(tmp_path, 'via') == 'explicit'
 
 
 

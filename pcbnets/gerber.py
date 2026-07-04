@@ -322,12 +322,6 @@ def _write_drill_aliases(output_dir: pathlib.Path,
         source = None
         if pth_path.exists():
             source = pth_path
-        elif drill_alias.exists():
-            # A single generic drill file is ambiguous: it may include NPTH,
-            # but downstream connectivity already falls back to ``drill`` when
-            # no via/PTH mask exists.  Write the alias explicitly so users can
-            # inspect the exact mask being used as the electrical fallback.
-            source = drill_alias
         if source is not None:
             shutil.copy2(source, via_path)
             written.append(via_path)

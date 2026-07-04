@@ -108,6 +108,51 @@ def test_extract_nets_drill_bridges_layers():
     assert top_net == bot_net != 0
 
 
+def test_inferred_generic_drill_ignores_all_around_copper():
+    """Generic drill fallback treats all-around copper as non-connecting."""
+    layers = {
+        'top': make_mask(w=80, h=80, shapes=[('rect', 0, 0, 79, 79)]),
+        'bot': make_mask(w=80, h=80, shapes=[('rect', 0, 0, 79, 79)]),
+    }
+    drill = make_mask(w=80, h=80, shapes=[('ellipse', 35, 35, 45, 45)])
+
+    result = extract_nets(layers, drill, connector_mode='infer')
+
+    assert result['drill_touches'] == {}
+
+
+def test_inferred_generic_drill_connects_partial_annular_contacts():
+    """Generic drill fallback treats partial annular copper contact as plated."""
+    layers = {
+        'top': make_mask(w=80, h=80, shapes=[('rect', 40, 35, 70, 45)]),
+        'bot': make_mask(w=80, h=80, shapes=[('rect', 10, 35, 40, 45)]),
+    }
+    drill = make_mask(w=80, h=80, shapes=[('ellipse', 35, 35, 45, 45)])
+
+    result = extract_nets(layers, drill, connector_mode='infer')
+
+    assert len(result['drill_touches']) == 1
+    members = next(iter(result['drill_touches'].values()))
+    assert ('top', 1) in members
+    assert ('bot', 1) in members
+
+
+def test_explicit_pth_connects_all_around_copper():
+    """Explicit PTH/via masks connect even when annular contact is all around."""
+    layers = {
+        'top': make_mask(w=80, h=80, shapes=[('rect', 0, 0, 79, 79)]),
+        'bot': make_mask(w=80, h=80, shapes=[('rect', 0, 0, 79, 79)]),
+    }
+    drill = make_mask(w=80, h=80, shapes=[('ellipse', 35, 35, 45, 45)])
+
+    result = extract_nets(layers, drill, connector_mode='explicit')
+
+    assert len(result['drill_touches']) == 1
+    members = next(iter(result['drill_touches'].values()))
+    assert ('top', 1) in members
+    assert ('bot', 1) in members
+
+
 def test_merge_nets_debug_explains_drill_path():
     """Debug metadata should explain the drill edge that merged local nets."""
     layers = {
