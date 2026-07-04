@@ -1797,6 +1797,20 @@ function updateHighlightDragTransform(dx, dy) {
   highlight.style.transform = `translate(${dx}px, ${dy}px)`;
 }
 
+function highlightDragDeltaFromPan(d, cropW, cropH) {
+  // The highlight canvas is not rerasterised until pointerup, so while dragging
+  // it needs to be translated by the *actual* content movement after pan
+  // clamping.  At whole-board zoom (or at pan edges) the board may not move even
+  // though the pointer does; using the raw pointer delta would make the pink
+  // overlay slide away from the fixed grid.
+  const deltaPanX = contentPanX - panOrigX;
+  const deltaPanY = contentPanY - panOrigY;
+  return {
+    dx: (flipped ? 1 : -1) * deltaPanX * d.w / Math.max(1, cropW) * panelScale,
+    dy: -deltaPanY * d.h / Math.max(1, cropH) * panelScale,
+  };
+}
+
 function finishHighlightDragTransform() {
   if (!currentNet) return;
   highlightDragDx = 0;
@@ -1838,7 +1852,8 @@ viewport.addEventListener('pointermove', e => {
   contentPanX = panOrigX + (flipped ? 1 : -1) * dxPanel * cropW / Math.max(1, tileW);
   contentPanY = panOrigY - dyPanel * cropH / Math.max(1, tileH);
   clampContentPan();
-  updateHighlightDragTransform(dx, dy);
+  const highlightDelta = highlightDragDeltaFromPan(d, cropW, cropH);
+  updateHighlightDragTransform(highlightDelta.dx, highlightDelta.dy);
   redraw();
 });
 
