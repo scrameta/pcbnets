@@ -178,6 +178,41 @@ def test_id_encoding_roundtrip():
     np.testing.assert_array_equal(decoded, labels['top'].astype(np.uint32))
 
 
+def _decode_idmap_labels(img):
+    arr = np.asarray(img.convert('RGB')).astype(np.uint32)
+    return arr[..., 0] | (arr[..., 1] << 8) | (arr[..., 2] << 16)
+
+
+def test_scaled_idmap_prefers_trace_ids_over_blank_space():
+    labels = {'top': np.array([[0, 0], [0, 42]], dtype=np.int32)}
+    layers = {'top': Image.new('L', (2, 2), 0)}
+
+    _, idmap, _ = build_grid_and_idmap(layers, labels, cols=1, scale=0.5)
+
+    decoded = _decode_idmap_labels(idmap)
+    assert decoded.shape == (1, 1)
+    assert decoded[0, 0] == 42
+
+
+def test_mip_idmap_prefers_trace_ids_over_blank_space(tmp_path):
+    from pcbnets.mips import make_mips
+
+    build = tmp_path / 'build'
+    build.mkdir()
+    Image.new('L', (2, 2), 0).save(build / 'grid.png')
+    _, idmap, _ = build_grid_and_idmap(
+        {'top': Image.new('L', (2, 2), 0)},
+        {'top': np.array([[0, 0], [0, 7]], dtype=np.int32)},
+        cols=1,
+    )
+    idmap.save(build / 'idmap.png')
+
+    make_mips(build, levels=(2,))
+
+    decoded = _decode_idmap_labels(Image.open(build / 'mips' / '2' / 'idmap.png'))
+    assert decoded.shape == (1, 1)
+    assert decoded[0, 0] == 7
+
 def test_render_writes_mips_and_tiles(tmp_path):
     from pcbnets.mips import make_mips
     from pcbnets.tiles import make_tiles

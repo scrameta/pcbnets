@@ -45,13 +45,25 @@ def _downsample_image(img: Image.Image, scale: float) -> Image.Image:
 
 
 def _downsample_labels(labels: np.ndarray, scale: float) -> np.ndarray:
-    """Nearest-neighbour downsample preserving exact label values."""
+    """Downsample labels without letting background erase traces.
+
+    Output pixels take the maximum label from their source area. Since blank
+    pixels are label 0, any trace label in the area wins over blank space while
+    still only emitting labels that existed in the source image.
+    """
     if scale == 1.0:
         return labels
     h, w = labels.shape
     new_w = max(1, int(w * scale))
     new_h = max(1, int(h * scale))
-    # Pillow's mode='I' is 32-bit signed int.
+    block_h = h // new_h
+    block_w = w // new_w
+    if block_h > 0 and block_w > 0:
+        cropped = labels[:new_h * block_h, :new_w * block_w]
+        return cropped.reshape(new_h, block_h, new_w, block_w).max(axis=(1, 3))
+
+    # Upscaling or heavily skewed dimensions should not happen for idmaps in
+    # normal builds; keep exact ids by falling back to nearest-neighbour.
     img = Image.fromarray(labels.astype(np.int32), mode='I')
     img = img.resize((new_w, new_h), Image.Resampling.NEAREST)
     return np.asarray(img, dtype=np.int32)
@@ -71,8 +83,8 @@ def build_grid_and_idmap(
     geometry as the grid, so click coordinates map directly between them.
 
     ``scale`` shrinks both outputs by that factor (1.0 = full size). The id
-    map uses nearest-neighbour to preserve exact ids; the display image
-    uses LANCZOS for smoother edges.
+    map prefers real net ids over background when reducing pixels; the
+    display image uses LANCZOS for smoother edges.
 
     Returns ``(grid_image, idmap_image, metadata)``. The metadata dict
     captures layer placements and per-layer dimensions so the viewer can
