@@ -292,7 +292,7 @@ def _rasterise_one(
         now = time.monotonic()
         if now >= next_progress:
             log.info(
-                '    still rendering %s (%s elapsed in gerbv)',
+                '    still rasterising %s in gerbv (%s elapsed)',
                 output.name,
                 _format_elapsed(now - started),
             )
@@ -355,7 +355,7 @@ def rasterise(
             continue
         out = output_dir / f'{name}.png'
         started = time.monotonic()
-        log.info('  rendering %s.png from %s', name, fname)
+        log.info('  rasterising %s.png from %s', name, fname)
         try:
             _rasterise_one(sources, tgt_i, out, dpi)
         except RuntimeError as e:
