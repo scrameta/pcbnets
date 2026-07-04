@@ -1964,7 +1964,13 @@ document.getElementById('toggle-fit').addEventListener('click', () => {
 
 viewport.addEventListener('scroll', () => {
   applyViewTransform();
-  redraw();
+  // Native scrolling moves the entire virtual grid immediately. The canvases
+  // are pinned back to the visible scrollport with applyViewTransform(), so the
+  // browser would otherwise show the previous frame's highlight for one
+  // requestAnimationFrame tick. Redraw synchronously here so the pink net
+  // overlay is recomputed in the same scroll coordinates as the board.
+  redrawPending = false;
+  redrawNow();
 });
 
 viewport.addEventListener('wheel', e => {
