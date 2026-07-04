@@ -180,19 +180,29 @@ def merge_nets_debug(
     components: list[dict] = []
     for layer, lbl in layer_labels.items():
         max_id = int(lbl.max())
+        areas = np.bincount(lbl.ravel(), minlength=max_id + 1)
+        objects = find_objects(lbl)
         for component in range(1, max_id + 1):
-            mask = lbl == component
-            ys, xs = np.nonzero(mask)
-            if len(xs) == 0:
+            area = int(areas[component])
+            obj = objects[component - 1] if component - 1 < len(objects) else None
+            if area == 0 or obj is None:
                 continue
-            net_id = int(net_labels[layer][ys[0], xs[0]])
+            local = lbl[obj] == component
+            first = int(np.flatnonzero(local)[0])
+            local_y, local_x = np.unravel_index(first, local.shape)
+            y = obj[0].start + int(local_y)
+            x = obj[1].start + int(local_x)
+            net_id = int(net_labels[layer][y, x])
             component_to_net[(layer, component)] = net_id
             components.append({
                 'layer': layer,
                 'component': component,
                 'net': net_id,
-                'area_px': int(len(xs)),
-                'bbox': [int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1],
+                'area_px': area,
+                'bbox': [
+                    int(obj[1].start), int(obj[0].start),
+                    int(obj[1].stop), int(obj[0].stop),
+                ],
             })
 
     drills: list[dict] = []

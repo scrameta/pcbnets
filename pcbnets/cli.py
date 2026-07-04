@@ -47,11 +47,12 @@ def _format_elapsed(seconds: float) -> str:
 class _Progress:
     """Timestamped progress reporter for long render operations."""
 
-    def __init__(self, total: int) -> None:
+    def __init__(self, total: int, label: str = 'render') -> None:
         self.total = total
         self.current = 0
         self.started = time.monotonic()
         self.step_started = self.started
+        self.label = label
         self.log = logging.getLogger('pcbnets.render')
 
     def step(self, message: str) -> None:
@@ -78,8 +79,8 @@ class _Progress:
         self.log.info('  previous step took %s',
                       _format_elapsed(now - self.step_started))
         elapsed = _format_elapsed(now - self.started)
-        self.log.info('  [%s/%s 100%% %s] render complete',
-                      self.total, self.total, elapsed)
+        self.log.info('  [%s/%s 100%% %s] %s complete',
+                      self.total, self.total, elapsed, self.label)
 
 
 def _configure_cli_logging() -> None:
@@ -814,8 +815,17 @@ def cmd_nets(args: argparse.Namespace) -> int:
     logging.getLogger('pcbnets.render').info('  via   : %s', via_name)
     _print_report(report, via_name)
 
-    result = extract_nets(arrs, via_arr, drill_grow_px=args.drill_grow)
+    progress = _Progress(total=3, label='net extraction')
+    progress.step('extracting per-layer components and drill contacts')
+    result = extract_nets(
+        arrs,
+        via_arr,
+        drill_grow_px=args.drill_grow,
+        progress=progress.detail,
+    )
+    progress.step('merging nets and building debug metadata')
     net_labels, debug = merge_nets_debug(result['drill_touches'], result['layer_labels'])
+    progress.step('writing net debug artefacts')
     _write_net_debug(
         out_dir=out_dir,
         source_dir=directory,
@@ -831,6 +841,7 @@ def cmd_nets(args: argparse.Namespace) -> int:
     print('  layer-labels.npz  local per-layer connected components')
     print('  net-labels.npz    board-wide merged net labels')
     print('  nets.json         components, drill merge edges, merged groups')
+    progress.finish()
     return 0
 
 
