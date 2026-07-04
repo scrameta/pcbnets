@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Callable
 from typing import Mapping
 
@@ -161,6 +161,113 @@ def extract_nets(copper_layers: dict[str, Image.Image],
         'drill_labels': lbl_drill,
         'drill_touches': drill_touches,
     }
+
+
+def merge_nets_debug(
+    drill_touches: Mapping[int, set],
+    layer_labels: Mapping[str, np.ndarray],
+) -> tuple[dict[str, np.ndarray], dict]:
+    """Merge components and return labels plus explainable merge metadata.
+
+    The debug metadata is intentionally JSON-serialisable.  It records the
+    original per-layer component nodes, drill edges between those nodes, and
+    final merged groups, so later tools can answer "why are these two local
+    copper islands on the same net?" without re-running image processing.
+    """
+    net_labels = merge_nets(drill_touches, layer_labels)
+
+    component_to_net: dict[tuple[str, int], int] = {}
+    components: list[dict] = []
+    for layer, lbl in layer_labels.items():
+        max_id = int(lbl.max())
+        for component in range(1, max_id + 1):
+            mask = lbl == component
+            ys, xs = np.nonzero(mask)
+            if len(xs) == 0:
+                continue
+            net_id = int(net_labels[layer][ys[0], xs[0]])
+            component_to_net[(layer, component)] = net_id
+            components.append({
+                'layer': layer,
+                'component': component,
+                'net': net_id,
+                'area_px': int(len(xs)),
+                'bbox': [int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1],
+            })
+
+    drills: list[dict] = []
+    groups: dict[int, list[dict]] = defaultdict(list)
+    for comp in components:
+        groups[int(comp['net'])].append({
+            'layer': comp['layer'],
+            'component': comp['component'],
+        })
+
+    for drill_id, members in sorted(drill_touches.items()):
+        member_list = [
+            {'layer': layer, 'component': int(component),
+             'net': int(component_to_net.get((layer, int(component)), 0))}
+            for layer, component in sorted(members, key=lambda m: (m[0], m[1]))
+        ]
+        drills.append({
+            'drill': int(drill_id),
+            'members': member_list,
+            'nets': sorted({m['net'] for m in member_list if m['net']}),
+        })
+
+    debug = {
+        'components': components,
+        'drills': drills,
+        'merged_nets': [
+            {'net': int(net), 'members': members}
+            for net, members in sorted(groups.items())
+        ],
+    }
+    return net_labels, debug
+
+
+def explain_merge_path(debug: Mapping, start: tuple[str, int], end: tuple[str, int]) -> list[dict]:
+    """Return a shortest drill-by-drill path connecting two local components."""
+    graph: dict[tuple[str, int], list[tuple[tuple[str, int], int]]] = defaultdict(list)
+    for drill in debug.get('drills', []):
+        members = [
+            (m['layer'], int(m['component']))
+            for m in drill.get('members', [])
+        ]
+        for i, a in enumerate(members):
+            for b in members[i + 1:]:
+                graph[a].append((b, int(drill['drill'])))
+                graph[b].append((a, int(drill['drill'])))
+
+    q = deque([start])
+    prev: dict[tuple[str, int], tuple[tuple[str, int], int] | None] = {start: None}
+    while q:
+        node = q.popleft()
+        if node == end:
+            break
+        for nxt, drill_id in graph.get(node, []):
+            if nxt not in prev:
+                prev[nxt] = (node, drill_id)
+                q.append(nxt)
+
+    if end not in prev:
+        return []
+
+    nodes = []
+    cur = end
+    while cur != start:
+        parent, drill_id = prev[cur]
+        nodes.append((parent, drill_id, cur))
+        cur = parent
+    nodes.reverse()
+    return [
+        {
+            'from': {'layer': a[0], 'component': a[1]},
+            'drill': drill_id,
+            'to': {'layer': b[0], 'component': b[1]},
+        }
+        for a, drill_id, b in nodes
+    ]
 
 class UnionFind:
     """Tiny union-find with path compression. Keys can be any hashable."""

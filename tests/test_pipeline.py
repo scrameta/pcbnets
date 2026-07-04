@@ -9,9 +9,11 @@ from PIL import Image, ImageDraw
 from pcbnets import (
     UnionFind,
     build_grid_and_idmap,
+    explain_merge_path,
     extract_nets,
     load_masks,
     merge_nets,
+    merge_nets_debug,
     threshold_mask,
 )
 
@@ -106,6 +108,29 @@ def test_extract_nets_drill_bridges_layers():
     assert top_net == bot_net != 0
 
 
+def test_merge_nets_debug_explains_drill_path():
+    """Debug metadata should explain the drill edge that merged local nets."""
+    layers = {
+        'top': make_mask(shapes=[('rect', 50, 30, 90, 70)]),
+        'bot': make_mask(shapes=[('rect', 60, 40, 100, 80)]),
+    }
+    drill = make_mask(shapes=[('ellipse', 65, 45, 85, 65)])
+    result = extract_nets(layers, drill, drill_grow_px=0)
+
+    net_labels, debug = merge_nets_debug(
+        result['drill_touches'],
+        result['layer_labels'],
+    )
+    assert net_labels['top'][45, 70] == net_labels['bot'][50, 80] != 0
+
+    path = explain_merge_path(debug, ('top', 1), ('bot', 1))
+    assert path == [{
+        'from': {'layer': 'top', 'component': 1},
+        'drill': 1,
+        'to': {'layer': 'bot', 'component': 1},
+    }]
+
+
 def test_isolated_net_gets_an_id():
     """A copper region with no drills should still get a unique net id."""
     layers = {
@@ -166,6 +191,35 @@ def test_display_punches_drill_holes_out_of_copper_and_idmap():
     assert not display[3, 3]
     assert display_labels['top'][2, 2] == 1
     assert display_labels['top'][3, 3] == 0
+
+
+def test_load_net_labels_for_render_accepts_nets_output(tmp_path):
+    from pcbnets.cli import _load_net_labels_for_render
+
+    arrs = {
+        'top': np.zeros((3, 4), dtype=bool),
+        'bot': np.zeros((3, 4), dtype=bool),
+    }
+    top = np.zeros((3, 4), dtype=np.int32)
+    bot = np.ones((3, 4), dtype=np.int32)
+    np.savez_compressed(tmp_path / 'net-labels.npz', top=top, bot=bot)
+
+    loaded = _load_net_labels_for_render(tmp_path, ['top', 'bot'], arrs)
+
+    assert list(loaded) == ['top', 'bot']
+    np.testing.assert_array_equal(loaded['top'], top)
+    np.testing.assert_array_equal(loaded['bot'], bot)
+
+
+def test_load_net_labels_for_render_rejects_shape_mismatch(tmp_path):
+    from pcbnets.cli import _load_net_labels_for_render
+
+    arrs = {'top': np.zeros((3, 4), dtype=bool)}
+    np.savez_compressed(tmp_path / 'net-labels.npz',
+                        top=np.zeros((2, 4), dtype=np.int32))
+
+    with pytest.raises(ValueError, match='expected'):
+        _load_net_labels_for_render(tmp_path, ['top'], arrs)
 
 
 def test_id_encoding_roundtrip():

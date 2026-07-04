@@ -20,7 +20,7 @@ from .gerber import (
     write_layers_json,
 )
 from .masks import MASK_LAYERS, MASK_POSITION, SILK_LAYERS, SILK_POSITION, load_masks, threshold_mask
-from .nets import extract_nets, merge_nets, UnionFind
+from .nets import extract_nets, merge_nets, merge_nets_debug, explain_merge_path, UnionFind
 from .prepare import (
     DEFAULT_OUTER_LAYERS,
     LayerCorrection,
@@ -36,7 +36,7 @@ __all__ = [
     # masks
     "load_masks", "threshold_mask", "SILK_LAYERS", "SILK_POSITION", "MASK_LAYERS", "MASK_POSITION",
     # nets
-    "extract_nets", "merge_nets", "UnionFind",
+    "extract_nets", "merge_nets", "merge_nets_debug", "explain_merge_path", "UnionFind",
     # prepare
     "prepare_masks", "PreparationReport", "LayerCorrection",
     "DEFAULT_OUTER_LAYERS", "default_outer_for",

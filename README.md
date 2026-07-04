@@ -38,14 +38,18 @@ pcbnets gerber ./my_kicad_gerbers -o ./pngs
 # 2. (Optional) Audit polarity and drill alignment
 pcbnets audit ./pngs -o audit.png
 
-# 3. Build the net map, grid, mip-maps, and tiles
-pcbnets render ./pngs -o ./build
+# 3. (Optional) Write net-finding debug data without rendering
+pcbnets nets ./pngs -o ./nets-debug
+pcbnets explain ./nets-debug --from F_Cu:123,456 --to B_Cu:42
 
-# 4. Serve the interactive viewer
+# 4. Build the net map, grid, mip-maps, and tiles
+pcbnets render ./pngs -o ./build --nets ./nets-debug
+
+# 5. Serve the interactive viewer
 pcbnets serve ./build
 #   → http://127.0.0.1:8000
 
-# 5. (Optional) Bundle as static HTML for a web host
+# 6. (Optional) Bundle as static HTML for a web host
 pcbnets export ./build -o ./build-static --title "My Board v1.2"
 
 # Or zip the static bundle ready to upload/unzip
@@ -206,6 +210,7 @@ Key options:
 | `--threshold`        | `0`     | Pixel value above which a mask pixel counts as "set"                 |
 | `--scale`            | `1.0`   | Downsample factor for the rendered grid                              |
 | `--cols`             | `2`     | Layer tiles per row in the grid                                      |
+| `--nets DIR`         | —       | Reuse `net-labels.npz` from `pcbnets nets -o DIR` instead of extracting/merging again |
 | `--no-cache`         | off     | Skip the per-directory cache                                         |
 
 Polarity / alignment options (see "Polarity and alignment" below):
@@ -218,6 +223,42 @@ Polarity / alignment options (see "Polarity and alignment" below):
 | `--no-invert LAYER`  | —       | Force-do-not-invert this layer (overrides auto)               |
 | `--offset LAYER DY,DX` | —     | Manually shift a layer by (dy, dx) pixels                     |
 | `--outer LAYER ...`  | F_Cu B_Cu | Override which layers are treated as outer                 |
+
+### `pcbnets nets <dir>` and `pcbnets explain <debug_dir>`
+
+`pcbnets nets` runs the net-finding stage without building the viewer. It
+writes reusable debug artefacts that can also be consumed by
+`pcbnets render --nets <debug_dir>`:
+
+```
+nets-debug/
+├── layer-labels.npz    # per-layer connected components before via/drill merging
+├── net-labels.npz      # final board-wide merged net labels
+└── nets.json           # component stats, drill contacts, and merged groups
+```
+
+This splits the connectivity pass from rendering so unexpected shorts can
+be debugged directly. To find why two unmerged per-layer copper islands
+ended up in one final net, point `pcbnets explain` at the debug directory:
+
+```bash
+# Coordinates are X,Y pixels in the original mask coordinate frame.
+pcbnets explain ./nets-debug --from F_Cu:1234,567 --to B_Cu:42
+
+# Or address local connected-component ids directly.
+pcbnets explain ./nets-debug --from F_Cu:18 --to In1_Cu:7
+```
+
+The output is a shortest drill-by-drill path, for example:
+
+```
+F_Cu:18 connects to In1_Cu:7 through 1 drill edge(s):
+  F_Cu:18 -- drill 203 -- In1_Cu:7
+```
+
+The interactive viewer also shows the last clicked coordinate in the sidebar
+as `LAYER:X,Y`, which can be copied directly into `pcbnets explain --from`
+or `--to`.
 
 ### `pcbnets serve <build_dir>`
 
