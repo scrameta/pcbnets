@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pathlib
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
 import numpy as np
 from PIL import Image
@@ -37,7 +37,8 @@ def _downsample_idmap(img: Image.Image, width: int, height: int) -> Image.Image:
 
 
 def make_mips(build_dir: pathlib.Path,
-              levels: Iterable[int] = (2, 4, 8, 16)) -> list[pathlib.Path]:
+              levels: Iterable[int] = (2, 4, 8, 16),
+              progress: Callable[[str], None] | None = None) -> list[pathlib.Path]:
     """Generate downsampled mip-map PNGs for every root PNG in ``build_dir``."""
     written: list[pathlib.Path] = []
     pngs = sorted(p for p in build_dir.glob('*.png') if p.is_file())
@@ -45,6 +46,8 @@ def make_mips(build_dir: pathlib.Path,
         out_dir = build_dir / 'mips' / str(level)
         out_dir.mkdir(parents=True, exist_ok=True)
         for png in pngs:
+            if progress:
+                progress(f'generating mip level {level}: {png.name}')
             with Image.open(png) as im:
                 width = max(1, im.width // level)
                 height = max(1, im.height // level)

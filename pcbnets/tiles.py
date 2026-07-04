@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 import pathlib
+from collections.abc import Callable
 
 from PIL import Image
 
 
 def make_tiles_for_dir(src_dir: pathlib.Path,
                        out_dir: pathlib.Path,
-                       grid: int) -> list[pathlib.Path]:
+                       grid: int,
+                       progress: Callable[[str], None] | None = None) -> list[pathlib.Path]:
     """Split every PNG in ``src_dir`` into a fixed ``grid`` x ``grid`` set."""
     written: list[pathlib.Path] = []
     out_dir.mkdir(parents=True, exist_ok=True)
     for png in sorted(p for p in src_dir.glob('*.png') if p.is_file()):
         base = png.stem
+        if progress:
+            progress(f'tiling level grid {grid}x{grid}: {png.name}')
         with Image.open(png) as im:
             for ty in range(grid):
                 y0 = ty * im.height // grid
@@ -29,7 +33,8 @@ def make_tiles_for_dir(src_dir: pathlib.Path,
     return written
 
 
-def make_tiles(build_dir: pathlib.Path) -> list[pathlib.Path]:
+def make_tiles(build_dir: pathlib.Path,
+               progress: Callable[[str], None] | None = None) -> list[pathlib.Path]:
     """Generate viewer tiles for the high-resolution mip levels."""
     tile_grids = {
         1: 16,
@@ -45,6 +50,7 @@ def make_tiles(build_dir: pathlib.Path) -> list[pathlib.Path]:
                 src_dir,
                 build_dir / 'mips' / str(level) / 'tiles',
                 grid,
+                progress=progress,
             )
         )
     return written

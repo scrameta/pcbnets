@@ -9,6 +9,7 @@ import pickle
 import re
 import shutil
 import sys
+import time
 import zipfile
 from typing import Iterable
 
@@ -30,6 +31,41 @@ from .nets import extract_nets, merge_nets
 from .prepare import DEFAULT_OUTER_LAYERS, _shift_bool, prepare_masks
 from .render import build_grid_and_idmap
 
+
+def _format_elapsed(seconds: float) -> str:
+    """Format an elapsed duration for human-readable progress messages."""
+    if seconds < 60:
+        return f'{seconds:.1f}s'
+    minutes, secs = divmod(int(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f'{hours}h{minutes:02d}m{secs:02d}s'
+    return f'{minutes}m{secs:02d}s'
+
+
+class _Progress:
+    """Small stdout progress reporter for long render operations."""
+
+    def __init__(self, total: int) -> None:
+        self.total = total
+        self.current = 0
+        self.started = time.monotonic()
+
+    def step(self, message: str) -> None:
+        self.current += 1
+        pct = min(99, int(self.current * 100 / self.total))
+        elapsed = _format_elapsed(time.monotonic() - self.started)
+        print(f'  [{self.current}/{self.total} {pct:>2}% {elapsed}] {message}',
+              flush=True)
+
+    def detail(self, message: str) -> None:
+        elapsed = _format_elapsed(time.monotonic() - self.started)
+        print(f'    ... {message} ({elapsed} elapsed)', flush=True)
+
+    def finish(self) -> None:
+        elapsed = _format_elapsed(time.monotonic() - self.started)
+        print(f'  [{self.total}/{self.total} 100% {elapsed}] render complete',
+              flush=True)
 
 # Canonical copper naming only.  The normal auto-detected form is
 # F_Cu, optional InN_Cu layers, then B_Cu.
@@ -375,7 +411,8 @@ def _run_pipeline(directory: pathlib.Path,
                   cache: bool,
                   prep_kwargs: dict,
                   auto_invert: bool,
-                  auto_align: bool) -> tuple:
+                  auto_align: bool,
+                  progress: _Progress | None = None) -> tuple:
     """Returns (grid, idmap, meta, masks, report).
 
     ``drill_name`` is the physical hole mask.  ``via_name`` is the electrical
@@ -383,9 +420,13 @@ def _run_pipeline(directory: pathlib.Path,
     for old/simple builds.
     """
     extra = [] if drill_name == via_name else [drill_name]
+    if progress:
+        progress.step('loading masks')
     masks = load_masks(directory, layer_names, via_name, threshold,
                        extra_names=extra)
 
+    if progress:
+        progress.step('preparing and auditing masks')
     arrs, via_arr, report = prepare_masks(
         masks=masks,
         layer_names=layer_names,
@@ -396,6 +437,8 @@ def _run_pipeline(directory: pathlib.Path,
     )
     _print_report(report, via_name)
 
+    if progress:
+        progress.step('aligning visual masks')
     visual_corrections = _align_visual_masks(
         masks=masks,
         arrs=arrs,
@@ -417,6 +460,8 @@ def _run_pipeline(directory: pathlib.Path,
         'prep': report.cache_signature(),
     }
 
+    if progress:
+        progress.step('loading cached nets or extracting/merging nets')
     net_labels = None
     if cache and cache_path.exists():
         try:
@@ -434,6 +479,7 @@ def _run_pipeline(directory: pathlib.Path,
             copper_layers=arrs,
             drill=via_arr,
             drill_grow_px=drill_grow_px,
+            progress=progress.detail if progress else None,
         )
         print(f'  merging via {len(result["drill_touches"])} connector components...')
         net_labels = merge_nets(result['drill_touches'], result['layer_labels'])
@@ -444,11 +490,15 @@ def _run_pipeline(directory: pathlib.Path,
             except Exception as e:
                 print(f'  (warning: cache write failed: {e})', file=sys.stderr)
 
+    if progress:
+        progress.step('validating merged nets')
     check = check_merged_nets(net_labels)
     for w in check.warnings:
         print(f'  ! {w}', file=sys.stderr)
 
     print(f'  {check.n_nets} distinct nets across the board')
+    if progress:
+        progress.step('building display grid + id map')
     print('  building display grid + id map...')
 
     # ``arrs`` and ``net_labels`` are deliberately kept unpunched for the
@@ -531,11 +581,17 @@ def _write_build(build_dir: pathlib.Path,
     print(f'  wrote {build_dir}/grid.png, idmap.png, meta.json')
 
 
-def _write_mips_and_tiles(build_dir: pathlib.Path) -> None:
+def _write_mips_and_tiles(build_dir: pathlib.Path,
+                           progress: _Progress | None = None) -> None:
     """Create all progressive-loading assets expected by the web viewer."""
-    mip_paths = make_mips(build_dir)
-    tile_paths = make_tiles(build_dir)
+    if progress:
+        progress.step('generating mip PNGs')
+    mip_paths = make_mips(build_dir, progress=progress.detail if progress else None)
     print(f'  wrote {len(mip_paths)} mip PNG(s)')
+
+    if progress:
+        progress.step('generating tile PNGs')
+    tile_paths = make_tiles(build_dir, progress=progress.detail if progress else None)
     print(f'  wrote {len(tile_paths)} tile PNG(s)')
 
 
@@ -590,6 +646,7 @@ def cmd_render(args: argparse.Namespace) -> int:
     print(f'  drill : {drill_name}')
     print(f'  via   : {via_name}')
 
+    progress = _Progress(total=9)
     grid, idmap, meta, masks, _ = _run_pipeline(
         directory, layers, drill_name, via_name,
         args.drill_grow, args.threshold, args.scale, args.cols,
@@ -597,9 +654,12 @@ def cmd_render(args: argparse.Namespace) -> int:
         prep_kwargs=overrides,
         auto_invert=not args.no_auto_invert,
         auto_align=args.auto_align,
+        progress=progress,
     )
+    progress.step('writing build artifacts')
     _write_build(build_dir, grid, idmap, meta, masks)
-    _write_mips_and_tiles(build_dir)
+    _write_mips_and_tiles(build_dir, progress=progress)
+    progress.finish()
     return 0
 
 
