@@ -28,6 +28,136 @@ def _to_bool(img) -> np.ndarray:
 import math
 from types import SimpleNamespace
 
+ALL_AROUND_COPPER_FRAC = 0.85
+
+
+def _contact_kind(frac: float, min_copper_frac: float = 0.10) -> str:
+    if frac < min_copper_frac:
+        return 'none'
+    if frac >= ALL_AROUND_COPPER_FRAC:
+        return 'all_around'
+    return 'partial'
+
+
+def _classify_drill(
+    drill_id: int,
+    contacts: list[dict],
+    layer_names: list[str],
+    radius_px: float,
+    small_radius_px: float,
+    large_radius_px: float,
+    connector_mode: str,
+) -> dict:
+    """Explain whether one drill blob is treated as plated/electrical."""
+    if connector_mode == 'never':
+        return {
+            'drill': int(drill_id),
+            'plated': False,
+            'classification': 'explicit_npth',
+            'reason': 'NPTH mask selected; holes in this mask never connect',
+        }
+
+    contacts_with_copper = [
+        c for c in contacts
+        if c['contact'] != 'none' and c['component_ids']
+    ]
+    partial_contacts = [c for c in contacts_with_copper if c['contact'] == 'partial']
+
+    if connector_mode == 'explicit':
+        return {
+            'drill': int(drill_id),
+            'plated': bool(contacts_with_copper),
+            'classification': 'explicit_pth' if contacts_with_copper else 'explicit_pth_no_copper',
+            'reason': (
+                'explicit via/PTH mask selected; copper contacts are used as electrical connections'
+                if contacts_with_copper
+                else 'explicit via/PTH mask selected, but this blob had no copper contact to merge'
+            ),
+        }
+
+    outer_layers = []
+    if layer_names:
+        outer_layers.extend([layer_names[0], layer_names[-1]])
+    for name in ('F_Cu', 'B_Cu'):
+        if name in layer_names and name not in outer_layers:
+            outer_layers.append(name)
+
+    layers_with_copper = {c['layer'] for c in contacts_with_copper}
+    outer_with_copper = {c['layer'] for c in contacts_with_copper if c['layer'] in outer_layers}
+    has_top_bottom = (
+        bool(layer_names)
+        and layer_names[0] in layers_with_copper
+        and layer_names[-1] in layers_with_copper
+    )
+
+    if not contacts_with_copper:
+        return {
+            'drill': int(drill_id),
+            'plated': False,
+            'classification': 'likely_npth',
+            'reason': 'no copper annulus/pad contact on any copper layer',
+        }
+
+    if radius_px >= large_radius_px and len(layers_with_copper) <= 1:
+        return {
+            'drill': int(drill_id),
+            'plated': False,
+            'classification': 'likely_npth',
+            'reason': (
+                f'large isolated hole (radius {radius_px:.1f}px) with copper contact '
+                'on at most one layer'
+            ),
+        }
+
+    if len(outer_with_copper) == 1 and len(layers_with_copper) == 1:
+        return {
+            'drill': int(drill_id),
+            'plated': False,
+            'classification': 'ambiguous_likely_npth',
+            'reason': 'copper appears on only one outer side; not enough evidence for a plated connector',
+        }
+
+    if has_top_bottom:
+        return {
+            'drill': int(drill_id),
+            'plated': True,
+            'classification': 'likely_pth',
+            'reason': 'copper annulus/pad contact found on both outer copper layers',
+        }
+
+    if radius_px <= small_radius_px and partial_contacts:
+        return {
+            'drill': int(drill_id),
+            'plated': True,
+            'classification': 'likely_pth',
+            'reason': (
+                f'small via-like hole (radius {radius_px:.1f}px) with partial annular copper contact'
+            ),
+        }
+
+    if partial_contacts and len(layers_with_copper) >= 2:
+        return {
+            'drill': int(drill_id),
+            'plated': True,
+            'classification': 'likely_pth',
+            'reason': 'partial annular copper contact found on multiple layers',
+        }
+
+    if not partial_contacts:
+        return {
+            'drill': int(drill_id),
+            'plated': False,
+            'classification': 'likely_npth',
+            'reason': 'only all-around copper contact was found; treated as non-connecting drill',
+        }
+
+    return {
+        'drill': int(drill_id),
+        'plated': False,
+        'classification': 'ambiguous_likely_npth',
+        'reason': 'partial copper contact exists, but not enough layers/sides indicate a plated connector',
+    }
+
 
 def drill_annulus_contact_info(layer_lbl: np.ndarray,
                                layer_copper: np.ndarray,
@@ -130,12 +260,52 @@ def extract_nets(copper_layers: dict[str, Image.Image],
     lbl_drill, n_drill = label(arr_drill)
 
     drill_touches = {}
+    drill_classifications = []
+
+    drill_areas = np.bincount(lbl_drill.ravel(), minlength=n_drill + 1)
+    drill_radii = np.sqrt(drill_areas[1:] / math.pi) if n_drill else np.array([])
+    if len(drill_radii):
+        small_radius_px = float(max(8.0, np.percentile(drill_radii, 60)))
+        large_radius_px = float(max(20.0, np.percentile(drill_radii, 90)))
+    else:
+        small_radius_px = 8.0
+        large_radius_px = 20.0
 
     if connector_mode == 'never':
+        for drill_id, obj in enumerate(find_objects(lbl_drill), start=1):
+            if obj is None:
+                continue
+            local = lbl_drill[obj] == drill_id
+            ys, xs = np.nonzero(local)
+            if len(xs) == 0:
+                continue
+            x0 = int(obj[1].start)
+            y0 = int(obj[0].start)
+            area = int(len(xs))
+            radius_px = float(math.sqrt(area / math.pi))
+            decision = _classify_drill(
+                drill_id=drill_id,
+                contacts=[],
+                layer_names=list(copper_layers.keys()),
+                radius_px=radius_px,
+                small_radius_px=small_radius_px,
+                large_radius_px=large_radius_px,
+                connector_mode=connector_mode,
+            )
+            decision.update({
+                'area_px': area,
+                'radius_px': radius_px,
+                'bbox': [x0, y0, int(obj[1].stop), int(obj[0].stop)],
+                'centroid': [float(x0 + xs.mean()), float(y0 + ys.mean())],
+                'contacts': [],
+                'members': [],
+            })
+            drill_classifications.append(decision)
         return {
             'layer_labels': layer_labels,
             'drill_labels': lbl_drill,
             'drill_touches': drill_touches,
+            'drill_classifications': drill_classifications,
         }
 
     report_every = max(1, n_drill // 20)
@@ -153,6 +323,7 @@ def extract_nets(copper_layers: dict[str, Image.Image],
         cx = float(xs.mean() + obj[1].start)
         prop = SimpleNamespace(label=drill_id, centroid=(cy, cx), area=int(len(xs)))
         members = set()
+        contact_records = []
 
         for layer, layer_lbl in layer_labels.items():
             ids, frac = drill_annulus_contact_info(
@@ -163,15 +334,44 @@ def extract_nets(copper_layers: dict[str, Image.Image],
                 width_px=4,
                 min_copper_frac=0.10,
             )
-            if connector_mode == 'infer' and frac >= 0.85:
-                # Generic drill files often include mechanical holes that pass
-                # through copper pours.  Treat all-around annular contact as a
-                # non-plated/mechanical drill; only partial contacts are
-                # inferred as plated connectors.
-                continue
+            contact_records.append({
+                'layer': layer,
+                'component_ids': ids,
+                'copper_fraction': frac,
+                'contact': _contact_kind(frac),
+            })
 
-            for net_id in ids:
-                members.add((layer, net_id))
+        area = int(len(xs))
+        radius_px = float(math.sqrt(area / math.pi))
+        decision = _classify_drill(
+            drill_id=drill_id,
+            contacts=contact_records,
+            layer_names=list(copper_layers.keys()),
+            radius_px=radius_px,
+            small_radius_px=small_radius_px,
+            large_radius_px=large_radius_px,
+            connector_mode=connector_mode,
+        )
+        decision.update({
+            'area_px': area,
+            'radius_px': radius_px,
+            'bbox': [
+                int(obj[1].start), int(obj[0].start),
+                int(obj[1].stop), int(obj[0].stop),
+            ],
+            'centroid': [cx, cy],
+            'contacts': contact_records,
+        })
+
+        if decision['plated']:
+            for contact in contact_records:
+                for net_id in contact['component_ids']:
+                    members.add((contact['layer'], net_id))
+        decision['members'] = [
+            {'layer': layer, 'component': int(net_id)}
+            for layer, net_id in sorted(members, key=lambda m: (m[0], m[1]))
+        ]
+        drill_classifications.append(decision)
 
         if members:
             drill_touches[drill_id] = members
@@ -180,6 +380,7 @@ def extract_nets(copper_layers: dict[str, Image.Image],
         'layer_labels': layer_labels,
         'drill_labels': lbl_drill,
         'drill_touches': drill_touches,
+        'drill_classifications': drill_classifications,
     }
 
 
@@ -187,6 +388,7 @@ def merge_nets_debug(
     drill_touches: Mapping[int, set],
     layer_labels: Mapping[str, np.ndarray],
     drill_labels: np.ndarray | None = None,
+    drill_classifications: list[dict] | None = None,
 ) -> tuple[dict[str, np.ndarray], dict]:
     """Merge components and return labels plus explainable merge metadata.
 
@@ -259,6 +461,11 @@ def merge_nets_debug(
                 ],
             }
 
+    classification_by_drill = {
+        int(d['drill']): d
+        for d in (drill_classifications or [])
+    }
+
     for drill_id, members in sorted(drill_touches.items()):
         member_list = [
             {'layer': layer, 'component': int(component),
@@ -271,11 +478,18 @@ def merge_nets_debug(
             'nets': sorted({m['net'] for m in member_list if m['net']}),
         }
         drill_record.update(drill_stats.get(int(drill_id), {}))
+        if int(drill_id) in classification_by_drill:
+            drill_record.update({
+                k: v
+                for k, v in classification_by_drill[int(drill_id)].items()
+                if k not in {'members'}
+            })
         drills.append(drill_record)
 
     debug = {
         'components': components,
         'drills': drills,
+        'drill_classifications': drill_classifications or [],
         'merged_nets': [
             {'net': int(net), 'members': members}
             for net, members in sorted(groups.items())

@@ -238,7 +238,7 @@ writes reusable debug artefacts that can also be consumed by
 nets-debug/
 ├── layer-labels.npz    # per-layer connected components before via/drill merging
 ├── net-labels.npz      # final board-wide merged net labels
-└── nets.json           # component stats, drill contacts, and merged groups
+└── nets.json           # component stats, per-drill plated/NPTH decisions, drill contacts, and merged groups
 ```
 
 This splits the connectivity pass from rendering so unexpected shorts can
@@ -406,9 +406,10 @@ for w in check.warnings:
    piece of copper gets a local id.
 5. **Connector components** found the same way. `via.png` and `PTH.png` are
    treated as explicit electrical connectors. `NPTH.png` never connects.
-   Generic `drill.png` is inferred hole-by-hole: partial annular contact is
-   considered plated/electrical, while all-around annular contact is treated
-   as a non-connecting drill.
+   Generic `drill.png` is inferred hole-by-hole: copper pads/annuli on both
+   outer layers or via-like partial annular contact are considered
+   plated/electrical, while no copper contact, large isolated holes, and
+   one-sided outer copper contact are treated as NPTH or ambiguous/likely NPTH.
 6. **Barrel contact test**: for each drill, sample a narrow annulus just
    outside the hole and record which `(layer, id)` copper regions actually
    reach the hole wall. This avoids treating mechanical holes or anti-pads

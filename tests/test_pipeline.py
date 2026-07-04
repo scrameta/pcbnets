@@ -108,17 +108,20 @@ def test_extract_nets_drill_bridges_layers():
     assert top_net == bot_net != 0
 
 
-def test_inferred_generic_drill_ignores_all_around_copper():
-    """Generic drill fallback treats all-around copper as non-connecting."""
+def test_inferred_generic_drill_ignores_holes_without_copper():
+    """Generic drill fallback treats holes with no copper pads as NPTH."""
     layers = {
-        'top': make_mask(w=80, h=80, shapes=[('rect', 0, 0, 79, 79)]),
-        'bot': make_mask(w=80, h=80, shapes=[('rect', 0, 0, 79, 79)]),
+        'top': make_mask(w=80, h=80),
+        'bot': make_mask(w=80, h=80),
     }
     drill = make_mask(w=80, h=80, shapes=[('ellipse', 35, 35, 45, 45)])
 
     result = extract_nets(layers, drill, connector_mode='infer')
 
     assert result['drill_touches'] == {}
+    assert result['drill_classifications'][0]['plated'] is False
+    assert result['drill_classifications'][0]['classification'] == 'likely_npth'
+    assert 'no copper annulus' in result['drill_classifications'][0]['reason']
 
 
 def test_inferred_generic_drill_connects_partial_annular_contacts():
@@ -132,9 +135,28 @@ def test_inferred_generic_drill_connects_partial_annular_contacts():
     result = extract_nets(layers, drill, connector_mode='infer')
 
     assert len(result['drill_touches']) == 1
+    assert result['drill_classifications'][0]['plated'] is True
+    assert result['drill_classifications'][0]['classification'] == 'likely_pth'
     members = next(iter(result['drill_touches'].values()))
     assert ('top', 1) in members
     assert ('bot', 1) in members
+
+
+def test_inferred_generic_drill_connects_top_and_bottom_annular_pads():
+    """Generic drill fallback treats copper on both outer sides as likely PTH."""
+    layers = {
+        'top': make_mask(w=80, h=80, shapes=[('rect', 0, 0, 79, 79)]),
+        'bot': make_mask(w=80, h=80, shapes=[('rect', 0, 0, 79, 79)]),
+    }
+    drill = make_mask(w=80, h=80, shapes=[('ellipse', 35, 35, 45, 45)])
+
+    result = extract_nets(layers, drill, connector_mode='infer')
+
+    assert len(result['drill_touches']) == 1
+    assert result['drill_classifications'][0]['plated'] is True
+    assert result['drill_classifications'][0]['reason'] == (
+        'copper annulus/pad contact found on both outer copper layers'
+    )
 
 
 def test_explicit_pth_connects_all_around_copper():
@@ -148,6 +170,7 @@ def test_explicit_pth_connects_all_around_copper():
     result = extract_nets(layers, drill, connector_mode='explicit')
 
     assert len(result['drill_touches']) == 1
+    assert result['drill_classifications'][0]['classification'] == 'explicit_pth'
     members = next(iter(result['drill_touches'].values()))
     assert ('top', 1) in members
     assert ('bot', 1) in members
@@ -166,10 +189,12 @@ def test_merge_nets_debug_explains_drill_path():
         result['drill_touches'],
         result['layer_labels'],
         result['drill_labels'],
+        result['drill_classifications'],
     )
     assert net_labels['top'][45, 70] == net_labels['bot'][50, 80] != 0
     assert debug['drills'][0]['bbox'] == [65, 45, 86, 66]
     assert debug['drills'][0]['centroid'] == [75.0, 55.0]
+    assert debug['drill_classifications'][0]['classification'] == 'explicit_pth'
 
     path = explain_merge_path(debug, ('top', 1), ('bot', 1))
     assert path == [{

@@ -591,6 +591,7 @@ def _run_pipeline(directory: pathlib.Path,
             result['drill_touches'],
             result['layer_labels'],
             result['drill_labels'],
+            result.get('drill_classifications'),
         )
         if cache:
             try:
@@ -858,6 +859,7 @@ def cmd_nets(args: argparse.Namespace) -> int:
         result['drill_touches'],
         result['layer_labels'],
         result['drill_labels'],
+        result.get('drill_classifications'),
     )
     progress.step('writing net debug artefacts')
     _write_net_debug(
