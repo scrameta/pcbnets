@@ -14,14 +14,17 @@ works on any PNG masks regardless of how they were produced.
 from __future__ import annotations
 
 import json
+import logging
 import pathlib
 import re
 import shutil
 import subprocess
-import sys
 from typing import Iterable
 
 from PIL import Image
+
+
+log = logging.getLogger('pcbnets.gerber')
 
 
 # --- detection ---
@@ -316,18 +319,18 @@ def rasterise(
         fname = mapping[name]
         src = source_dir / fname
         if not src.is_file():
-            print(f'  warning: {src} not found (skipping {name})', file=sys.stderr)
+            log.warning('  warning: %s not found (skipping %s)', src, name)
             continue
         out = output_dir / f'{name}.png'
-        print(f'  rendering {name}.png from {fname}')
+        log.info('  rendering %s.png from %s', name, fname)
         try:
             _rasterise_one(sources, tgt_i, out, dpi)
         except RuntimeError as e:
-            print(f'  ! {e}', file=sys.stderr)
+            log.error('  ! %s', e)
             continue
         size = Image.open(out).size
         rendered_sizes[name] = size
-        print(f'    → {size[0]}×{size[1]} px')
+        log.info('    → %s×%s px', size[0], size[1])
         written.append(out)
 
     # Convenience aliases for downstream use:
