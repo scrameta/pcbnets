@@ -298,7 +298,9 @@ When `--excellon` is used, each `drill-identify.json` decision also includes
 `source_object_index`, `source_x`, and `source_y` where gerbonara can expose
 them. Those are the original Excellon drill coordinates, so they are usually
 the easiest way to jump from a pcbnets drill id/centroid back to CAD/Gerber
-space without manually reversing the PNG rasterisation transform.
+space without manually reversing the PNG rasterisation transform. The mapping
+is based on nearest normalised Excellon/object coordinates versus raster drill
+centroids, rather than relying on file/object order.
 
 ### `pcbnets nets <dir>` and `pcbnets explain <debug_dir>`
 

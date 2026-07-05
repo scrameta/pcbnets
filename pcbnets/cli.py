@@ -19,6 +19,7 @@ from typing import Iterable
 
 import numpy as np
 from PIL import Image
+from scipy.optimize import linear_sum_assignment
 
 from . import __version__
 from .audit import check_merged_nets, detect_offset, make_audit_overlay
@@ -1076,6 +1077,76 @@ def _object_xy(obj) -> tuple[float, float] | None:
     return None
 
 
+def _normalised_points(
+    points: list[tuple[float, float]],
+    *,
+    invert_y: bool = False,
+) -> np.ndarray:
+    arr = np.asarray(points, dtype=float)
+    if invert_y:
+        arr[:, 1] *= -1.0
+    mins = arr.min(axis=0)
+    spans = arr.max(axis=0) - mins
+    spans[spans == 0.0] = 1.0
+    return (arr - mins) / spans
+
+
+def _map_excellon_objects_to_drills(
+    objects: list,
+    classifications: list[dict],
+) -> dict[int, int]:
+    """Map raster drill ids to Excellon object indexes by nearest normalised XY.
+
+    gerbv writes a cropped image window, so absolute PCB coordinates cannot be
+    compared directly with PNG pixels.  The transform is still monotonic: X
+    increases to the right and Gerber/Excellon +Y maps upward while PNG +Y maps
+    downward.  Normalising both point clouds removes translation/scale, then a
+    Hungarian assignment avoids the previous fragile top-to-bottom sort.
+    """
+    object_points: list[tuple[int, tuple[float, float]]] = []
+    for idx, obj in enumerate(objects):
+        xy = _object_xy(obj)
+        if xy is not None:
+            object_points.append((idx, xy))
+
+    drill_points: list[tuple[int, tuple[float, float]]] = []
+    for decision in classifications:
+        centroid = decision.get('centroid')
+        if centroid and len(centroid) >= 2:
+            drill_points.append((
+                int(decision['drill']),
+                (float(centroid[0]), float(centroid[1])),
+            ))
+
+    if len(object_points) != len(objects) or len(drill_points) != len(classifications):
+        # Fallback for unusual gerbonara objects or old classifications without
+        # centroids.  This preserves the older deterministic behaviour.
+        sortable = []
+        for idx, obj in enumerate(objects):
+            xy = _object_xy(obj)
+            if xy is None:
+                sortable.append((1, idx, idx))
+            else:
+                x, y = xy
+                sortable.append((0, -y, x, idx))
+        sorted_object_indexes = [item[-1] for item in sorted(sortable)]
+        sorted_drill_ids = [
+            int(d['drill'])
+            for d in sorted(classifications, key=lambda d: int(d['drill']))
+        ]
+        return dict(zip(sorted_drill_ids, sorted_object_indexes))
+
+    object_norm = _normalised_points([xy for _, xy in object_points], invert_y=True)
+    drill_norm = _normalised_points([xy for _, xy in drill_points])
+    cost = np.linalg.norm(drill_norm[:, None, :] - object_norm[None, :, :], axis=2)
+    drill_rows, object_cols = linear_sum_assignment(cost)
+
+    return {
+        drill_points[drill_row][0]: object_points[object_col][0]
+        for drill_row, object_col in zip(drill_rows, object_cols)
+    }
+
+
 def _infer_excellon_object_decisions(
     excellon_path: pathlib.Path,
     classifications: list[dict],
@@ -1088,27 +1159,12 @@ def _infer_excellon_object_decisions(
             f'{len(objects)} Excellon objects'
         )
 
-    sortable = []
-    for idx, obj in enumerate(objects):
-        xy = _object_xy(obj)
-        if xy is None:
-            sortable.append((1, idx, idx))
-        else:
-            x, y = xy
-            # gerbv renders +Y upward into image coordinates, while scipy labels
-            # raster blobs top-to-bottom.  Sort Excellon objects high-Y first,
-            # then low-X first, to match raster connected-component order.
-            sortable.append((0, -y, x, idx))
-    sorted_object_indexes = [item[-1] for item in sorted(sortable)]
-
-    sorted_classifications = sorted(classifications, key=lambda d: int(d['drill']))
+    drill_to_object = _map_excellon_objects_to_drills(objects, classifications)
     object_decisions: dict[int, bool] = {}
-    drill_to_object: dict[int, int] = {}
     drill_to_xy: dict[int, tuple[float, float]] = {}
-    for decision, object_index in zip(sorted_classifications, sorted_object_indexes):
-        drill_id = int(decision['drill'])
-        object_decisions[int(object_index)] = bool(decision['plated'])
-        drill_to_object[drill_id] = int(object_index)
+    by_drill = {int(decision['drill']): decision for decision in classifications}
+    for drill_id, object_index in drill_to_object.items():
+        object_decisions[int(object_index)] = bool(by_drill[drill_id]['plated'])
         xy = _object_xy(objects[object_index])
         if xy is not None:
             drill_to_xy[drill_id] = xy

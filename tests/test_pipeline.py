@@ -435,6 +435,30 @@ def test_drill_identify_choices_override_masks(tmp_path):
     assert decisions[1]['override'] is True
 
 
+
+def test_excellon_mapping_uses_centroids_not_drill_id_order():
+    from pcbnets.cli import _map_excellon_objects_to_drills
+
+    class Obj:
+        def __init__(self, x, y):
+            self.x = x
+            self.y = y
+
+    objects = [
+        Obj(0, 0),    # bottom-left in Excellon space
+        Obj(0, 100),  # top-left in Excellon space
+    ]
+    classifications = [
+        {'drill': 1, 'plated': True, 'centroid': [0, 100]},
+        {'drill': 2, 'plated': False, 'centroid': [0, 0]},
+    ]
+
+    assert _map_excellon_objects_to_drills(objects, classifications) == {
+        1: 0,
+        2: 1,
+    }
+
+
 def test_drill_identify_excellon_without_choices_writes_excellon_splits(tmp_path, monkeypatch):
     import argparse
     import json
