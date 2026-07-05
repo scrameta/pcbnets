@@ -29,6 +29,7 @@ import math
 from types import SimpleNamespace
 
 ALL_AROUND_COPPER_FRAC = 0.85
+PAD_RING_COPPER_FRAC = 0.95
 
 
 def _contact_kind(frac: float, min_copper_frac: float = 0.10) -> str:
@@ -57,9 +58,14 @@ def _classify_drill(
             'reason': 'NPTH mask selected; holes in this mask never connect',
         }
 
-    contacts_with_copper = [
+    raw_contacts_with_copper = [
         c for c in contacts
         if c['contact'] != 'none' and c['component_ids']
+    ]
+    contacts_with_copper = [
+        c for c in raw_contacts_with_copper
+        if connector_mode == 'explicit'
+        or c.get('pad_ring_fraction', 0.0) >= PAD_RING_COPPER_FRAC
     ]
     partial_contacts = [c for c in contacts_with_copper if c['contact'] == 'partial']
 
@@ -95,7 +101,7 @@ def _classify_drill(
             'drill': int(drill_id),
             'plated': False,
             'classification': 'likely_npth',
-            'reason': 'no copper annulus/pad contact on any copper layer',
+            'reason': 'no complete copper pad ring within 5% of the drill diameter on any copper layer',
         }
 
     if radius_px >= large_radius_px and len(layers_with_copper) <= 1:
@@ -164,12 +170,14 @@ def drill_annulus_contact_info(layer_lbl: np.ndarray,
                                prop,
                                gap_px: int = 1,
                                width_px: int = 4,
-                               min_copper_frac: float = 0.10) -> tuple[list[int], float]:
+                               min_copper_frac: float = 0.10) -> tuple[list[int], float, float]:
     """
     Return copper component ids that touch the drill barrel.
 
-    This tests a *narrow annulus* immediately outside the drill.
-    For 1000 dpi PNGs, gap=1, width=4 is a reasonable starting point.
+    This tests both a narrow annulus immediately outside the drill and a
+    tight pad ring whose outside diameter is 5% larger than the drill.
+    For inferred generic drills, that tight ring must be essentially all
+    copper before the contact is considered a real pad/annulus.
 
     Important:
       Do not test a big outer annulus. On plane layers, an unconnected
@@ -197,18 +205,26 @@ def drill_annulus_contact_info(layer_lbl: np.ndarray,
     annulus = (dist >= r0) & (dist <= r1)
 
     if not annulus.any():
-        return [], 0.0
+        return [], 0.0, 0.0
 
-    local_copper = layer_copper[y0:y1, x0:x1] & annulus
+    local_layer_copper = layer_copper[y0:y1, x0:x1]
+    local_copper = local_layer_copper & annulus
     frac = local_copper.sum() / annulus.sum()
 
+    pad_r0 = r
+    pad_r1 = max(r + 1.0, r * 1.05)
+    pad_ring = (dist > pad_r0) & (dist <= pad_r1)
+    pad_frac = 0.0
+    if pad_ring.any():
+        pad_frac = float((local_layer_copper & pad_ring).sum() / pad_ring.sum())
+
     if frac < min_copper_frac:
-        return [], float(frac)
+        return [], float(frac), pad_frac
 
     ids = np.unique(layer_lbl[y0:y1, x0:x1][local_copper])
     ids = ids[ids != 0]
 
-    return [int(i) for i in ids], float(frac)
+    return [int(i) for i in ids], float(frac), pad_frac
 
 
 def drill_annulus_contact_ids(layer_lbl: np.ndarray,
@@ -217,7 +233,7 @@ def drill_annulus_contact_ids(layer_lbl: np.ndarray,
                               gap_px: int = 1,
                               width_px: int = 4,
                               min_copper_frac: float = 0.10) -> list[int]:
-    ids, _ = drill_annulus_contact_info(
+    ids, _, _ = drill_annulus_contact_info(
         layer_lbl=layer_lbl,
         layer_copper=layer_copper,
         prop=prop,
@@ -326,7 +342,7 @@ def extract_nets(copper_layers: dict[str, Image.Image],
         contact_records = []
 
         for layer, layer_lbl in layer_labels.items():
-            ids, frac = drill_annulus_contact_info(
+            ids, frac, pad_frac = drill_annulus_contact_info(
                 layer_lbl=layer_lbl,
                 layer_copper=copper_masks[layer],
                 prop=prop,
@@ -338,6 +354,8 @@ def extract_nets(copper_layers: dict[str, Image.Image],
                 'layer': layer,
                 'component_ids': ids,
                 'copper_fraction': frac,
+                'pad_ring_fraction': pad_frac,
+                'pad_ring_contact': pad_frac >= PAD_RING_COPPER_FRAC,
                 'contact': _contact_kind(frac),
             })
 

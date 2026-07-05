@@ -121,11 +121,11 @@ def test_inferred_generic_drill_ignores_holes_without_copper():
     assert result['drill_touches'] == {}
     assert result['drill_classifications'][0]['plated'] is False
     assert result['drill_classifications'][0]['classification'] == 'likely_npth'
-    assert 'no copper annulus' in result['drill_classifications'][0]['reason']
+    assert 'no complete copper pad ring' in result['drill_classifications'][0]['reason']
 
 
-def test_inferred_generic_drill_connects_partial_annular_contacts():
-    """Generic drill fallback treats partial annular copper contact as plated."""
+def test_inferred_generic_drill_rejects_trace_touches_without_complete_pad_ring():
+    """Generic drill fallback ignores traces that touch without forming pads."""
     layers = {
         'top': make_mask(w=80, h=80, shapes=[('rect', 40, 35, 70, 45)]),
         'bot': make_mask(w=80, h=80, shapes=[('rect', 10, 35, 40, 45)]),
@@ -134,12 +134,12 @@ def test_inferred_generic_drill_connects_partial_annular_contacts():
 
     result = extract_nets(layers, drill, connector_mode='infer')
 
-    assert len(result['drill_touches']) == 1
-    assert result['drill_classifications'][0]['plated'] is True
-    assert result['drill_classifications'][0]['classification'] == 'likely_pth'
-    members = next(iter(result['drill_touches'].values()))
-    assert ('top', 1) in members
-    assert ('bot', 1) in members
+    assert result['drill_touches'] == {}
+    assert result['drill_classifications'][0]['plated'] is False
+    assert result['drill_classifications'][0]['classification'] == 'likely_npth'
+    contacts = result['drill_classifications'][0]['contacts']
+    assert any(c['contact'] == 'partial' for c in contacts)
+    assert not any(c['pad_ring_contact'] for c in contacts)
 
 
 def test_inferred_generic_drill_connects_top_and_bottom_annular_pads():
@@ -304,10 +304,10 @@ def test_drill_identify_writes_split_masks_and_choices(tmp_path):
     out = tmp_path / 'out'
     src.mkdir()
     make_mask(w=80, h=80, shapes=[
-        ('rect', 20, 15, 50, 25),
+        ('ellipse', 12, 12, 28, 28),
     ]).save(src / 'F_Cu.png')
     make_mask(w=80, h=80, shapes=[
-        ('rect', 0, 15, 20, 25),
+        ('ellipse', 12, 12, 28, 28),
     ]).save(src / 'B_Cu.png')
     make_mask(w=80, h=80, shapes=[
         ('ellipse', 15, 15, 25, 25),
@@ -399,10 +399,10 @@ def test_drill_identify_excellon_without_choices_writes_excellon_splits(tmp_path
     out = tmp_path / 'out'
     src.mkdir()
     make_mask(w=40, h=40, shapes=[
-        ('rect', 10, 10, 25, 20),
+        ('ellipse', 7, 7, 23, 23),
     ]).save(src / 'F_Cu.png')
     make_mask(w=40, h=40, shapes=[
-        ('rect', 0, 10, 15, 20),
+        ('ellipse', 7, 7, 23, 23),
     ]).save(src / 'B_Cu.png')
     make_mask(w=40, h=40, shapes=[
         ('ellipse', 10, 10, 20, 20),
