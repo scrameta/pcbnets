@@ -322,6 +322,7 @@ def test_drill_identify_writes_split_masks_and_choices(tmp_path):
         layers=None,
         drill='auto',
         threshold=0,
+        dpi=1000,
         no_auto_invert=False,
         auto_align=False,
         invert=[],
@@ -366,6 +367,51 @@ def test_drill_identify_choices_override_masks(tmp_path):
     assert npth[0, 1]
     assert decisions[0]['override'] is True
     assert decisions[1]['override'] is True
+
+
+def test_drill_identify_excellon_without_choices_still_applies_png_rules(tmp_path):
+    import argparse
+    import json
+    from pcbnets.cli import cmd_drill_identify
+
+    src = tmp_path / 'src'
+    out = tmp_path / 'out'
+    src.mkdir()
+    make_mask(w=40, h=40, shapes=[
+        ('rect', 10, 10, 25, 20),
+    ]).save(src / 'F_Cu.png')
+    make_mask(w=40, h=40, shapes=[
+        ('rect', 0, 10, 15, 20),
+    ]).save(src / 'B_Cu.png')
+    make_mask(w=40, h=40, shapes=[
+        ('ellipse', 10, 10, 20, 20),
+    ]).save(src / 'drill.png')
+
+    args = argparse.Namespace(
+        directory=str(src),
+        output=str(out),
+        choices=None,
+        excellon=str(tmp_path / 'all_drills.drl'),
+        layers=None,
+        drill='auto',
+        threshold=0,
+        dpi=1000,
+        no_auto_invert=False,
+        auto_align=False,
+        invert=[],
+        no_invert=[],
+        offset=[],
+        outer=None,
+    )
+
+    assert cmd_drill_identify(args) == 0
+
+    manifest = json.loads((out / 'drill-identify.json').read_text())
+    assert manifest['plated_count'] == 1
+    assert (out / 'PTH.png').exists()
+    assert (out / 'NPTH.png').exists()
+    assert not (out / 'PTH.drl').exists()
+
 
 
 def test_split_excellon_with_gerbonara_uses_object_index_choices(tmp_path, monkeypatch):

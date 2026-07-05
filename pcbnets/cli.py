@@ -12,6 +12,7 @@ import pickle
 import re
 import shutil
 import sys
+import tempfile
 import time
 import zipfile
 from typing import Iterable
@@ -1053,41 +1054,50 @@ def cmd_drill_identify(args: argparse.Namespace) -> int:
         print(f'{directory} is not a directory', file=sys.stderr)
         return 1
 
-    if args.excellon:
-        if not args.choices:
-            print('--excellon requires --choices with object_index decisions', file=sys.stderr)
-            return 2
-        try:
-            pth_path, npth_path = _split_excellon_with_gerbonara(
-                pathlib.Path(args.excellon).resolve(),
-                out_dir,
-                pathlib.Path(args.choices).resolve(),
+    temp_pngs = None
+    png_dir = directory
+    if not any(directory.glob('*.png')):
+        if not args.excellon:
+            print(
+                'drill_identify needs either a PNG mask directory or '
+                '`--excellon` with a Gerber/Excellon directory to rasterise. '
+                'For PNG mode, run `pcbnets gerber ... -o pngs` first, then '
+                '`pcbnets drill_identify pngs -o identified`.',
+                file=sys.stderr,
             )
-        except (GerbonaraMissingError, ValueError, RuntimeError) as e:
+            return 2
+
+        temp_pngs = tempfile.TemporaryDirectory(prefix='pcbnets-drill-identify-')
+        png_dir = pathlib.Path(temp_pngs.name)
+        mapping = detect_layers(directory)
+        excellon_path = pathlib.Path(args.excellon).resolve()
+        mapping['drill'] = str(
+            excellon_path if excellon_path.is_absolute()
+            else pathlib.Path(args.excellon)
+        )
+        layer_targets = list(args.layers) if args.layers else [
+            name for name in mapping
+            if re.match(r'^(F_Cu|In\d+_Cu|B_Cu)$', name)
+        ]
+        if 'drill' not in layer_targets:
+            layer_targets.append('drill')
+        try:
+            rasterise(directory, mapping, png_dir, dpi=args.dpi, layers=layer_targets)
+        except (GerbvMissingError, RuntimeError) as e:
+            if temp_pngs is not None:
+                temp_pngs.cleanup()
             print(str(e), file=sys.stderr)
             return 2
-        print(f'wrote {pth_path}')
-        print(f'wrote {npth_path}')
-        return 0
 
-    if not any(directory.glob('*.png')):
-        print(
-            'drill_identify currently needs a PNG mask directory. '
-            'Run `pcbnets gerber ... -o pngs` first, then run '
-            '`pcbnets drill_identify pngs -o identified`.',
-            file=sys.stderr,
-        )
-        return 2
-
-    drill_name = _resolve_drill_name(directory, args.drill)
-    layers = _resolve_layers(directory, args.layers, drill_name, drill_name)
+    drill_name = _resolve_drill_name(png_dir, args.drill)
+    layers = _resolve_layers(png_dir, args.layers, drill_name, drill_name)
     overrides = _collect_overrides(args)
 
     logging.getLogger('pcbnets.render').info('identifying drill holes from %s', directory)
     logging.getLogger('pcbnets.render').info('  layers: %s', ', '.join(layers))
     logging.getLogger('pcbnets.render').info('  drill : %s', drill_name)
 
-    masks = load_masks(directory, layers, drill_name, args.threshold)
+    masks = load_masks(png_dir, layers, drill_name, args.threshold)
     arrs, drill_arr, report = prepare_masks(
         masks=masks,
         layer_names=layers,
@@ -1107,7 +1117,7 @@ def cmd_drill_identify(args: argparse.Namespace) -> int:
         progress=progress.detail,
     )
     progress.step('copying PNG inputs')
-    _copy_pngs_for_drill_identify(directory, out_dir)
+    _copy_pngs_for_drill_identify(png_dir, out_dir)
     progress.step('writing PTH/NPTH/via masks and choices JSON')
     _write_drill_identify_outputs(
         out_dir=out_dir,
@@ -1118,6 +1128,33 @@ def cmd_drill_identify(args: argparse.Namespace) -> int:
         classifications=result['drill_classifications'],
         choices_path=pathlib.Path(args.choices).resolve() if args.choices else None,
     )
+    if args.excellon and args.choices:
+        try:
+            pth_path, npth_path = _split_excellon_with_gerbonara(
+                pathlib.Path(args.excellon).resolve(),
+                out_dir,
+                pathlib.Path(args.choices).resolve(),
+            )
+            print(f'wrote {pth_path}')
+            print(f'wrote {npth_path}')
+        except (GerbonaraMissingError, RuntimeError) as e:
+            if temp_pngs is not None:
+                temp_pngs.cleanup()
+            print(str(e), file=sys.stderr)
+            return 2
+        except ValueError as e:
+            print(f'skipped Excellon split: {e}', file=sys.stderr)
+    elif args.excellon:
+        print(
+            'note: wrote PNG masks and drill-identify.json. '
+            'To also write PTH.drl/NPTH.drl, re-run with --choices containing '
+            'object_index/source_object_index decisions.',
+            file=sys.stderr,
+        )
+
+    if temp_pngs is not None:
+        temp_pngs.cleanup()
+
     progress.finish()
     print(f'wrote drill identification outputs to {out_dir}')
     print('  PTH.png, via.png, NPTH.png, drill.png')
@@ -1897,6 +1934,8 @@ def build_parser() -> argparse.ArgumentParser:
     pdrill.add_argument('--drill', default='auto',
                         help='Generic/physical drill-hole mask name (default: auto)')
     pdrill.add_argument('--threshold', type=int, default=0)
+    pdrill.add_argument('--dpi', type=int, default=1000,
+                        help='DPI to use when --excellon rasterises Gerbers for classification (default: 1000)')
     _add_audit_flags(pdrill)
     pdrill.set_defaults(func=cmd_drill_identify)
 
