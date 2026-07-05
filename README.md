@@ -262,27 +262,29 @@ will be created/updated with the classified outputs.
 
 For Gerber/Excellon input, pass the original Excellon drill file. The command
 rasterises the Gerber copper layers plus that drill file, applies the same
-annulus/pad rules, and writes PNG masks plus `drill-identify.json`:
+annulus/pad rules, and writes PNG masks, `drill-identify.json`, `PTH.drl`,
+and `NPTH.drl`:
 
 ```bash
 pcbnets drill_identify ./gerbers -o ./drills_discovered \
   --excellon ./gerbers/all_drills.drl
 ```
 
-If you also want vector drill files, install the optional Gerbonara dependency
-with `pip install pcbnets[excellon]` and provide a choices JSON whose
-decisions contain `object_index` or `source_object_index` fields mapping back
-to the Gerbonara Excellon objects:
+The vector split uses the optional Gerbonara dependency; install it with
+`pip install pcbnets[excellon]`. If you edit choices and want to regenerate
+the vector files, keep the generated `source_object_index` fields in
+`drill-identify.json` and pass it back with `--choices`:
 
 ```bash
 pcbnets drill_identify ./gerbers -o ./gerbers-identified \
   --excellon ./gerbers/all_drills.drl \
-  --choices ./drill-object-choices.json
+  --choices ./drills_discovered/drill-identify.json
 ```
 
-That split step writes `PTH.drl` and `NPTH.drl`. PNG-level choices are still
-useful for mask regeneration, but they do not map back to Excellon objects
-unless your choices JSON includes the object indexes.
+That regeneration step rewrites `PTH.drl` and `NPTH.drl` as well as the PNG
+masks. If the input is only PNGs and no `--excellon` file is supplied, vector
+Gerber/Excellon outputs are skipped because there is no source drill file to
+split.
 
 ### `pcbnets nets <dir>` and `pcbnets explain <debug_dir>`
 

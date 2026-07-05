@@ -1009,23 +1009,9 @@ def _copy_excellon_with_objects(excellon, objects: list):
     return out
 
 
-def _split_excellon_with_gerbonara(excellon_path: pathlib.Path,
-                                   out_dir: pathlib.Path,
-                                   choices_path: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
-    data = json.loads(choices_path.read_text())
-    decisions = data.get('drill_classifications', data.get('decisions', []))
-    object_decisions = {
-        int(d.get('source_object_index', d.get('object_index'))): bool(d['plated'])
-        for d in decisions
-        if (d.get('source_object_index', d.get('object_index')) is not None
-            and 'plated' in d)
-    }
-    if not object_decisions:
-        raise ValueError(
-            'choices JSON does not contain source_object_index/object_index fields; '
-            'cannot map decisions back to Excellon objects'
-        )
-
+def _split_excellon_objects(excellon_path: pathlib.Path,
+                            out_dir: pathlib.Path,
+                            object_decisions: dict[int, bool]) -> tuple[pathlib.Path, pathlib.Path]:
     excellon = _load_gerbonara_excellon(excellon_path)
     objects = list(getattr(excellon, 'objects'))
     pth_objects = [
@@ -1043,6 +1029,84 @@ def _split_excellon_with_gerbonara(excellon_path: pathlib.Path,
     _save_gerbonara_file(_copy_excellon_with_objects(excellon, pth_objects), pth_path)
     _save_gerbonara_file(_copy_excellon_with_objects(excellon, npth_objects), npth_path)
     return pth_path, npth_path
+
+
+def _split_excellon_with_gerbonara(excellon_path: pathlib.Path,
+                                   out_dir: pathlib.Path,
+                                   choices_path: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
+    data = json.loads(choices_path.read_text())
+    decisions = data.get('drill_classifications', data.get('decisions', []))
+    object_decisions = {
+        int(d.get('source_object_index', d.get('object_index'))): bool(d['plated'])
+        for d in decisions
+        if (d.get('source_object_index', d.get('object_index')) is not None
+            and 'plated' in d)
+    }
+    if not object_decisions:
+        raise ValueError(
+            'choices JSON does not contain source_object_index/object_index fields; '
+            'cannot map decisions back to Excellon objects'
+        )
+    return _split_excellon_objects(excellon_path, out_dir, object_decisions)
+
+
+def _object_xy(obj) -> tuple[float, float] | None:
+    x = getattr(obj, 'x', None)
+    y = getattr(obj, 'y', None)
+    if x is not None and y is not None:
+        try:
+            return float(x), float(y)
+        except (TypeError, ValueError):
+            pass
+    bbox = None
+    for name in ('bounding_box', 'bounding_box_no_aperture'):
+        candidate = getattr(obj, name, None)
+        if callable(candidate):
+            try:
+                bbox = candidate()
+                break
+            except TypeError:
+                continue
+    if bbox and len(bbox) == 2:
+        (min_x, min_y), (max_x, max_y) = bbox
+        try:
+            return (float(min_x) + float(max_x)) / 2, (float(min_y) + float(max_y)) / 2
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _infer_excellon_object_decisions(excellon_path: pathlib.Path,
+                                     classifications: list[dict]
+                                     ) -> tuple[dict[int, bool], dict[int, int]]:
+    excellon = _load_gerbonara_excellon(excellon_path)
+    objects = list(getattr(excellon, 'objects'))
+    if len(objects) != len(classifications):
+        raise RuntimeError(
+            f'cannot map {len(classifications)} raster drill blobs to '
+            f'{len(objects)} Excellon objects'
+        )
+
+    sortable = []
+    for idx, obj in enumerate(objects):
+        xy = _object_xy(obj)
+        if xy is None:
+            sortable.append((1, idx, idx))
+        else:
+            x, y = xy
+            # gerbv renders +Y upward into image coordinates, while scipy labels
+            # raster blobs top-to-bottom.  Sort Excellon objects high-Y first,
+            # then low-X first, to match raster connected-component order.
+            sortable.append((0, -y, x, idx))
+    sorted_object_indexes = [item[-1] for item in sorted(sortable)]
+
+    sorted_classifications = sorted(classifications, key=lambda d: int(d['drill']))
+    object_decisions: dict[int, bool] = {}
+    drill_to_object: dict[int, int] = {}
+    for decision, object_index in zip(sorted_classifications, sorted_object_indexes):
+        object_decisions[int(object_index)] = bool(decision['plated'])
+        drill_to_object[int(decision['drill'])] = int(object_index)
+    return object_decisions, drill_to_object
 
 
 def cmd_drill_identify(args: argparse.Namespace) -> int:
@@ -1116,6 +1180,27 @@ def cmd_drill_identify(args: argparse.Namespace) -> int:
         connector_mode='infer',
         progress=progress.detail,
     )
+    classifications = list(result['drill_classifications'])
+    excellon_object_decisions = None
+    if args.excellon and not args.choices:
+        try:
+            excellon_object_decisions, drill_to_object = _infer_excellon_object_decisions(
+                pathlib.Path(args.excellon).resolve(),
+                classifications,
+            )
+        except (GerbonaraMissingError, RuntimeError) as e:
+            if temp_pngs is not None:
+                temp_pngs.cleanup()
+            print(str(e), file=sys.stderr)
+            return 2
+        classifications = [
+            {
+                **decision,
+                'source_object_index': drill_to_object.get(int(decision['drill'])),
+            }
+            for decision in classifications
+        ]
+
     progress.step('copying PNG inputs')
     _copy_pngs_for_drill_identify(png_dir, out_dir)
     progress.step('writing PTH/NPTH/via masks and choices JSON')
@@ -1125,7 +1210,7 @@ def cmd_drill_identify(args: argparse.Namespace) -> int:
         drill_name=drill_name,
         layer_names=layers,
         drill_labels=result['drill_labels'],
-        classifications=result['drill_classifications'],
+        classifications=classifications,
         choices_path=pathlib.Path(args.choices).resolve() if args.choices else None,
     )
     if args.excellon and args.choices:
@@ -1137,20 +1222,25 @@ def cmd_drill_identify(args: argparse.Namespace) -> int:
             )
             print(f'wrote {pth_path}')
             print(f'wrote {npth_path}')
+        except (GerbonaraMissingError, RuntimeError, ValueError) as e:
+            if temp_pngs is not None:
+                temp_pngs.cleanup()
+            print(str(e), file=sys.stderr)
+            return 2
+    elif args.excellon:
+        try:
+            pth_path, npth_path = _split_excellon_objects(
+                pathlib.Path(args.excellon).resolve(),
+                out_dir,
+                excellon_object_decisions or {},
+            )
+            print(f'wrote {pth_path}')
+            print(f'wrote {npth_path}')
         except (GerbonaraMissingError, RuntimeError) as e:
             if temp_pngs is not None:
                 temp_pngs.cleanup()
             print(str(e), file=sys.stderr)
             return 2
-        except ValueError as e:
-            print(f'skipped Excellon split: {e}', file=sys.stderr)
-    elif args.excellon:
-        print(
-            'note: wrote PNG masks and drill-identify.json. '
-            'To also write PTH.drl/NPTH.drl, re-run with --choices containing '
-            'object_index/source_object_index decisions.',
-            file=sys.stderr,
-        )
 
     if temp_pngs is not None:
         temp_pngs.cleanup()

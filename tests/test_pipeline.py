@@ -369,10 +369,31 @@ def test_drill_identify_choices_override_masks(tmp_path):
     assert decisions[1]['override'] is True
 
 
-def test_drill_identify_excellon_without_choices_still_applies_png_rules(tmp_path):
+def test_drill_identify_excellon_without_choices_writes_excellon_splits(tmp_path, monkeypatch):
     import argparse
     import json
+    import sys
+    import types
     from pcbnets.cli import cmd_drill_identify
+
+    class FakeObj:
+        def __init__(self, name, x, y):
+            self.name = name
+            self.x = x
+            self.y = y
+
+    class FakeExcellon:
+        def __init__(self, objects):
+            self.objects = list(objects)
+
+        @classmethod
+        def open(cls, path):
+            return cls([FakeObj('plated-hole', 10, 30)])
+
+        def save(self, path):
+            path.write_text('\n'.join(obj.name for obj in self.objects))
+
+    monkeypatch.setitem(sys.modules, 'gerbonara', types.SimpleNamespace(ExcellonFile=FakeExcellon))
 
     src = tmp_path / 'src'
     out = tmp_path / 'out'
@@ -410,7 +431,9 @@ def test_drill_identify_excellon_without_choices_still_applies_png_rules(tmp_pat
     assert manifest['plated_count'] == 1
     assert (out / 'PTH.png').exists()
     assert (out / 'NPTH.png').exists()
-    assert not (out / 'PTH.drl').exists()
+    assert (out / 'PTH.drl').read_text() == 'plated-hole'
+    assert (out / 'NPTH.drl').read_text() == ''
+    assert manifest['drill_classifications'][0]['source_object_index'] == 0
 
 
 
