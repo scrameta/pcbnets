@@ -121,7 +121,7 @@ def test_inferred_generic_drill_ignores_holes_without_copper():
     assert result['drill_touches'] == {}
     assert result['drill_classifications'][0]['plated'] is False
     assert result['drill_classifications'][0]['classification'] == 'likely_npth'
-    assert 'no complete copper pad ring' in result['drill_classifications'][0]['reason']
+    assert 'no substantial copper pad ring' in result['drill_classifications'][0]['reason']
 
 
 def test_inferred_generic_drill_rejects_trace_touches_without_complete_pad_ring():
@@ -140,6 +140,40 @@ def test_inferred_generic_drill_rejects_trace_touches_without_complete_pad_ring(
     contacts = result['drill_classifications'][0]['contacts']
     assert any(c['contact'] == 'partial' for c in contacts)
     assert not any(c['pad_ring_contact'] for c in contacts)
+
+
+def test_inferred_generic_drill_rejects_one_sided_high_pixel_ring():
+    from pcbnets.nets import _classify_drill
+
+    contacts = [
+        {
+            'layer': 'top',
+            'component_ids': [1],
+            'contact': 'partial',
+            'pad_ring_fraction': 0.90,
+            'pad_ring_angular_coverage': 0.30,
+        },
+        {
+            'layer': 'bot',
+            'component_ids': [1],
+            'contact': 'partial',
+            'pad_ring_fraction': 0.90,
+            'pad_ring_angular_coverage': 0.30,
+        },
+    ]
+
+    decision = _classify_drill(
+        drill_id=1,
+        contacts=contacts,
+        layer_names=['top', 'bot'],
+        radius_px=5.0,
+        small_radius_px=8.0,
+        large_radius_px=20.0,
+        connector_mode='infer',
+    )
+
+    assert decision['plated'] is False
+    assert decision['classification'] == 'likely_npth'
 
 
 def test_inferred_generic_drill_tolerates_rasterised_pad_ring_threshold():

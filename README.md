@@ -251,9 +251,11 @@ drill-identify.json  # per-hole choices and reasons
 
 For inferred generic drill files, a copper trace merely touching the hole is
 not enough evidence for plating. The classifier now records both the broader
-annulus contact fraction and a tight `pad_ring_fraction`; the tight ring has
-an outside diameter 5% larger than the drill and must be mostly copper
-(currently 80% or more) before that layer counts as having a pad/annulus.
+annulus contact fraction, a tight `pad_ring_fraction`, and
+`pad_ring_angular_coverage`; the tight ring has an outside diameter 5% larger
+than the drill, must be mostly copper (currently 80% or more), and that copper
+must cover most directions around the hole (currently 75% or more). This avoids
+treating a one-sided trace or copper sliver as a substantial pad/annulus.
 
 You can edit `drill-identify.json` by changing a drill's `plated` boolean,
 then regenerate the masks without changing the copper inputs:

@@ -30,6 +30,7 @@ from types import SimpleNamespace
 
 ALL_AROUND_COPPER_FRAC = 0.85
 PAD_RING_COPPER_FRAC = 0.80
+PAD_RING_ANGULAR_FRAC = 0.75
 
 
 def _contact_kind(frac: float, min_copper_frac: float = 0.10) -> str:
@@ -65,7 +66,10 @@ def _classify_drill(
     contacts_with_copper = [
         c for c in raw_contacts_with_copper
         if connector_mode == 'explicit'
-        or c.get('pad_ring_fraction', 0.0) >= PAD_RING_COPPER_FRAC
+        or (
+            c.get('pad_ring_fraction', 0.0) >= PAD_RING_COPPER_FRAC
+            and c.get('pad_ring_angular_coverage', 1.0) >= PAD_RING_ANGULAR_FRAC
+        )
     ]
     partial_contacts = [c for c in contacts_with_copper if c['contact'] == 'partial']
 
@@ -101,7 +105,7 @@ def _classify_drill(
             'drill': int(drill_id),
             'plated': False,
             'classification': 'likely_npth',
-            'reason': 'no complete copper pad ring within 5% of the drill diameter on any copper layer',
+            'reason': 'no substantial copper pad ring within 5% of the drill diameter on any copper layer',
         }
 
     if radius_px >= large_radius_px and len(layers_with_copper) <= 1:
@@ -170,14 +174,15 @@ def drill_annulus_contact_info(layer_lbl: np.ndarray,
                                prop,
                                gap_px: int = 1,
                                width_px: int = 4,
-                               min_copper_frac: float = 0.10) -> tuple[list[int], float, float]:
+                               min_copper_frac: float = 0.10) -> tuple[list[int], float, float, float]:
     """
     Return copper component ids that touch the drill barrel.
 
     This tests both a narrow annulus immediately outside the drill and a
     tight pad ring whose outside diameter is 5% larger than the drill.
     For inferred generic drills, that tight ring must be essentially all
-    copper before the contact is considered a real pad/annulus.
+    copper, and that copper must cover most angular directions around the
+    hole, before the contact is considered a real pad/annulus.
 
     Important:
       Do not test a big outer annulus. On plane layers, an unconnected
@@ -205,7 +210,7 @@ def drill_annulus_contact_info(layer_lbl: np.ndarray,
     annulus = (dist >= r0) & (dist <= r1)
 
     if not annulus.any():
-        return [], 0.0, 0.0
+        return [], 0.0, 0.0, 0.0
 
     local_layer_copper = layer_copper[y0:y1, x0:x1]
     local_copper = local_layer_copper & annulus
@@ -215,16 +220,26 @@ def drill_annulus_contact_info(layer_lbl: np.ndarray,
     pad_r1 = max(r + 1.0, r * 1.05)
     pad_ring = (dist > pad_r0) & (dist <= pad_r1)
     pad_frac = 0.0
+    pad_angular = 0.0
     if pad_ring.any():
-        pad_frac = float((local_layer_copper & pad_ring).sum() / pad_ring.sum())
+        pad_copper = local_layer_copper & pad_ring
+        pad_frac = float(pad_copper.sum() / pad_ring.sum())
+        if pad_copper.any():
+            angles = np.arctan2(yy - cy, xx - cx)
+            bins = np.floor(((angles + math.pi) / (2 * math.pi)) * 32).astype(int)
+            bins = np.clip(bins, 0, 31)
+            ring_bins = np.unique(bins[pad_ring])
+            copper_bins = np.unique(bins[pad_copper])
+            if len(ring_bins):
+                pad_angular = float(len(copper_bins) / len(ring_bins))
 
     if frac < min_copper_frac:
-        return [], float(frac), pad_frac
+        return [], float(frac), pad_frac, pad_angular
 
     ids = np.unique(layer_lbl[y0:y1, x0:x1][local_copper])
     ids = ids[ids != 0]
 
-    return [int(i) for i in ids], float(frac), pad_frac
+    return [int(i) for i in ids], float(frac), pad_frac, pad_angular
 
 
 def drill_annulus_contact_ids(layer_lbl: np.ndarray,
@@ -233,7 +248,7 @@ def drill_annulus_contact_ids(layer_lbl: np.ndarray,
                               gap_px: int = 1,
                               width_px: int = 4,
                               min_copper_frac: float = 0.10) -> list[int]:
-    ids, _, _ = drill_annulus_contact_info(
+    ids, _, _, _ = drill_annulus_contact_info(
         layer_lbl=layer_lbl,
         layer_copper=layer_copper,
         prop=prop,
@@ -342,7 +357,7 @@ def extract_nets(copper_layers: dict[str, Image.Image],
         contact_records = []
 
         for layer, layer_lbl in layer_labels.items():
-            ids, frac, pad_frac = drill_annulus_contact_info(
+            ids, frac, pad_frac, pad_angular = drill_annulus_contact_info(
                 layer_lbl=layer_lbl,
                 layer_copper=copper_masks[layer],
                 prop=prop,
@@ -355,7 +370,11 @@ def extract_nets(copper_layers: dict[str, Image.Image],
                 'component_ids': ids,
                 'copper_fraction': frac,
                 'pad_ring_fraction': pad_frac,
-                'pad_ring_contact': pad_frac >= PAD_RING_COPPER_FRAC,
+                'pad_ring_angular_coverage': pad_angular,
+                'pad_ring_contact': (
+                    pad_frac >= PAD_RING_COPPER_FRAC
+                    and pad_angular >= PAD_RING_ANGULAR_FRAC
+                ),
                 'contact': _contact_kind(frac),
             })
 
