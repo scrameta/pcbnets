@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import copy
+import filecmp
 import json
 import logging
 import pathlib
@@ -28,7 +30,7 @@ from .gerber import (
 from .masks import MASK_LAYERS, SILK_LAYERS, load_masks, threshold_mask
 from .mips import make_mips
 from .tiles import make_tiles
-from .nets import extract_nets, merge_nets
+from .nets import extract_nets, merge_nets_debug, explain_merge_path
 from .prepare import DEFAULT_OUTER_LAYERS, _shift_bool, prepare_masks
 from .render import build_grid_and_idmap
 
@@ -47,11 +49,12 @@ def _format_elapsed(seconds: float) -> str:
 class _Progress:
     """Timestamped progress reporter for long render operations."""
 
-    def __init__(self, total: int) -> None:
+    def __init__(self, total: int, label: str = 'render') -> None:
         self.total = total
         self.current = 0
         self.started = time.monotonic()
         self.step_started = self.started
+        self.label = label
         self.log = logging.getLogger('pcbnets.render')
 
     def step(self, message: str) -> None:
@@ -78,8 +81,8 @@ class _Progress:
         self.log.info('  previous step took %s',
                       _format_elapsed(now - self.step_started))
         elapsed = _format_elapsed(now - self.started)
-        self.log.info('  [%s/%s 100%% %s] render complete',
-                      self.total, self.total, elapsed)
+        self.log.info('  [%s/%s 100%% %s] %s complete',
+                      self.total, self.total, elapsed, self.label)
 
 
 def _configure_cli_logging() -> None:
@@ -200,6 +203,23 @@ def _resolve_via_name(directory: pathlib.Path, requested: str = 'auto') -> str:
     if (directory / f'{requested}.png').is_file():
         return requested
     return requested
+
+
+def _connector_mode(directory: pathlib.Path, via_name: str) -> str:
+    """Return how the selected vertical-connector mask should be interpreted."""
+    if via_name == 'NPTH':
+        return 'never'
+    if via_name == 'via':
+        via_path = directory / 'via.png'
+        drill_path = directory / 'drill.png'
+        pth_path = directory / 'PTH.png'
+        if (not pth_path.exists() and via_path.exists() and drill_path.exists()
+                and filecmp.cmp(via_path, drill_path, shallow=False)):
+            return 'infer'
+        return 'explicit'
+    if via_name in {'via', 'PTH'}:
+        return 'explicit'
+    return 'infer'
 
 
 def _parse_offset(spec: str) -> tuple[int, int]:
@@ -391,6 +411,48 @@ def _align_visual_masks(masks: dict[str, Image.Image],
     return corrections
 
 
+def _load_net_labels_for_render(
+    nets_dir: pathlib.Path,
+    layer_names: list[str],
+    arrs: dict[str, np.ndarray],
+) -> dict[str, np.ndarray]:
+    """Load ``pcbnets nets`` output and validate it can drive rendering."""
+    labels_path = nets_dir / 'net-labels.npz'
+    if not labels_path.exists():
+        raise FileNotFoundError(
+            f'missing {labels_path}; run `pcbnets nets ... -o {nets_dir}` first'
+        )
+
+    with np.load(labels_path) as data:
+        net_labels = {
+            name: data[name].astype(np.int32, copy=False)
+            for name in data.files
+        }
+
+    missing = [name for name in layer_names if name not in net_labels]
+    extra = [name for name in net_labels if name not in layer_names]
+    if missing or extra:
+        details = []
+        if missing:
+            details.append(f'missing layers: {", ".join(missing)}')
+        if extra:
+            details.append(f'unexpected layers: {", ".join(extra)}')
+        raise ValueError(
+            f'precomputed net labels in {nets_dir} do not match render layers '
+            f'({"; ".join(details)})'
+        )
+
+    for name in layer_names:
+        if net_labels[name].shape != arrs[name].shape:
+            raise ValueError(
+                f'precomputed net labels for {name} have shape '
+                f'{net_labels[name].shape}, expected {arrs[name].shape}'
+            )
+
+    # Preserve the render layer order rather than the archive's file order.
+    return {name: net_labels[name] for name in layer_names}
+
+
 def _print_report(report, drill_name: str) -> None:
     """Pretty-print the preparation report to the console.
 
@@ -436,6 +498,7 @@ def _run_pipeline(directory: pathlib.Path,
                   scale: float,
                   cols: int,
                   cache: bool,
+                  nets_dir: pathlib.Path | None,
                   prep_kwargs: dict,
                   auto_invert: bool,
                   auto_align: bool,
@@ -482,6 +545,7 @@ def _run_pipeline(directory: pathlib.Path,
         'layers': layer_names,
         'drill': drill_name,
         'via': via_name,
+        'connector_mode': _connector_mode(directory, via_name),
         'grow': drill_grow_px,
         'threshold': threshold,
         'sizes': {n: masks[n].size for n in masks
@@ -490,14 +554,26 @@ def _run_pipeline(directory: pathlib.Path,
     }
 
     if progress:
-        progress.step('loading cached nets or extracting/merging nets')
+        progress.step('loading precomputed/cached nets or extracting/merging nets')
     net_labels = None
-    if cache and cache_path.exists():
+    net_debug = None
+    if nets_dir is not None:
+        net_labels = _load_net_labels_for_render(
+            nets_dir=nets_dir,
+            layer_names=layer_names,
+            arrs=arrs,
+        )
+        logging.getLogger('pcbnets.render').info(
+            '  using precomputed net labels from %s', nets_dir
+        )
+
+    if net_labels is None and cache and cache_path.exists():
         try:
             with open(cache_path, 'rb') as fp:
                 cached = pickle.load(fp)
             if cached.get('key') == cache_key:
                 net_labels = cached['net_labels']
+                net_debug = cached.get('net_debug')
                 logging.getLogger('pcbnets.render').info('  using cached net labels from %s', cache_path.name)
         except Exception:
             net_labels = None
@@ -508,14 +584,20 @@ def _run_pipeline(directory: pathlib.Path,
             copper_layers=arrs,
             drill=via_arr,
             drill_grow_px=drill_grow_px,
+            connector_mode=_connector_mode(directory, via_name),
             progress=progress.detail if progress else None,
         )
         logging.getLogger('pcbnets.render').info('  merging via %s connector components...', len(result['drill_touches']))
-        net_labels = merge_nets(result['drill_touches'], result['layer_labels'])
+        net_labels, net_debug = merge_nets_debug(
+            result['drill_touches'],
+            result['layer_labels'],
+            result['drill_labels'],
+            result.get('drill_classifications'),
+        )
         if cache:
             try:
                 with open(cache_path, 'wb') as fp:
-                    pickle.dump({'key': cache_key, 'net_labels': net_labels}, fp)
+                    pickle.dump({'key': cache_key, 'net_labels': net_labels, 'net_debug': net_debug}, fp)
             except Exception as e:
                 logging.getLogger('pcbnets.render').warning('  (warning: cache write failed: %s)', e)
 
@@ -559,8 +641,10 @@ def _run_pipeline(directory: pathlib.Path,
     )
     meta['n_nets'] = check.n_nets
     meta['source_dir'] = str(directory)
+    meta['render_scale'] = scale
     meta['drill_name'] = drill_name
     meta['via_name'] = via_name
+    meta['connector_mode'] = _connector_mode(directory, via_name)
     meta['drill_grow_px'] = drill_grow_px
     meta['outer_layers'] = sorted(prep_kwargs.get('outer_layers', DEFAULT_OUTER_LAYERS))
     meta['corrections'] = {
@@ -678,12 +762,14 @@ def cmd_render(args: argparse.Namespace) -> int:
     logging.getLogger('pcbnets.render').info('  layers: %s', ', '.join(layers))
     logging.getLogger('pcbnets.render').info('  drill : %s', drill_name)
     logging.getLogger('pcbnets.render').info('  via   : %s', via_name)
+    logging.getLogger('pcbnets.render').info('  mode  : %s', _connector_mode(directory, via_name))
 
     progress = _Progress(total=9)
     grid, idmap, meta, masks, _ = _run_pipeline(
         directory, layers, drill_name, via_name,
         args.drill_grow, args.threshold, args.scale, args.cols,
         cache=not args.no_cache,
+        nets_dir=pathlib.Path(args.nets).resolve() if args.nets else None,
         prep_kwargs=overrides,
         auto_invert=not args.no_auto_invert,
         auto_align=args.auto_align,
@@ -693,6 +779,457 @@ def cmd_render(args: argparse.Namespace) -> int:
     _write_build(build_dir, grid, idmap, meta, masks)
     _write_mips_and_tiles(build_dir, progress=progress)
     progress.finish()
+    return 0
+
+
+def _load_prepared_net_inputs(args: argparse.Namespace) -> tuple[pathlib.Path, list[str], str, str, dict, dict[str, np.ndarray], np.ndarray, object]:
+    """Load and prepare masks for net-only/debug commands."""
+    directory = pathlib.Path(args.directory).resolve()
+    drill_name = _resolve_drill_name(directory, args.drill)
+    via_name = _resolve_via_name(directory, args.via)
+    layers = _resolve_layers(directory, args.layers, drill_name, via_name)
+    overrides = _collect_overrides(args)
+    extra = [] if drill_name == via_name else [drill_name]
+    masks = load_masks(directory, layers, via_name, args.threshold, extra_names=extra)
+    arrs, via_arr, report = prepare_masks(
+        masks=masks,
+        layer_names=layers,
+        drill_name=via_name,
+        auto_invert=not args.no_auto_invert,
+        auto_align=args.auto_align,
+        **overrides,
+    )
+    return directory, layers, drill_name, via_name, overrides, arrs, via_arr, report
+
+
+def _write_net_debug(out_dir: pathlib.Path,
+                     source_dir: pathlib.Path,
+                     layers: list[str],
+                     drill_name: str,
+                     via_name: str,
+                     connector_mode: str,
+                     threshold: int,
+                     layer_labels: dict[str, np.ndarray],
+                     net_labels: dict[str, np.ndarray],
+                     debug: dict) -> None:
+    """Write the reusable outputs of the net-finding stage."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(out_dir / 'layer-labels.npz', **layer_labels)
+    np.savez_compressed(out_dir / 'net-labels.npz', **net_labels)
+    manifest = {
+        'source_dir': str(source_dir),
+        'layers': layers,
+        'drill_name': drill_name,
+        'via_name': via_name,
+        'connector_mode': connector_mode,
+        'threshold': threshold,
+        'shapes': {
+            name: list(net_labels[name].shape)
+            for name in layers
+        },
+        **debug,
+    }
+    with open(out_dir / 'nets.json', 'w') as fp:
+        json.dump(manifest, fp, indent=2)
+        fp.write('\n')
+
+
+def cmd_nets(args: argparse.Namespace) -> int:
+    """Run only the net-finding stage and write debug artefacts."""
+    _configure_cli_logging()
+    out_dir = pathlib.Path(args.output).resolve()
+    directory, layers, drill_name, via_name, _, arrs, via_arr, report = _load_prepared_net_inputs(args)
+    logging.getLogger('pcbnets.render').info('finding nets from %s', directory)
+    logging.getLogger('pcbnets.render').info('  layers: %s', ', '.join(layers))
+    logging.getLogger('pcbnets.render').info('  drill : %s', drill_name)
+    logging.getLogger('pcbnets.render').info('  via   : %s', via_name)
+    logging.getLogger('pcbnets.render').info('  mode  : %s', _connector_mode(directory, via_name))
+    _print_report(report, via_name)
+
+    progress = _Progress(total=3, label='net extraction')
+    progress.step('extracting per-layer components and drill contacts')
+    result = extract_nets(
+        arrs,
+        via_arr,
+        drill_grow_px=args.drill_grow,
+        connector_mode=_connector_mode(directory, via_name),
+        progress=progress.detail,
+    )
+    progress.step('merging nets and building debug metadata')
+    net_labels, debug = merge_nets_debug(
+        result['drill_touches'],
+        result['layer_labels'],
+        result['drill_labels'],
+        result.get('drill_classifications'),
+    )
+    progress.step('writing net debug artefacts')
+    _write_net_debug(
+        out_dir=out_dir,
+        source_dir=directory,
+        layers=layers,
+        drill_name=drill_name,
+        via_name=via_name,
+        connector_mode=_connector_mode(directory, via_name),
+        threshold=args.threshold,
+        layer_labels=result['layer_labels'],
+        net_labels=net_labels,
+        debug=debug,
+    )
+    print(f'wrote net debug data to {out_dir}')
+    print('  layer-labels.npz  local per-layer connected components')
+    print('  net-labels.npz    board-wide merged net labels')
+    print('  nets.json         components, drill merge edges, merged groups')
+    progress.finish()
+    return 0
+
+
+def _decision_map_from_choices(path: pathlib.Path) -> dict[int, bool]:
+    data = json.loads(path.read_text())
+    decisions = data.get('drill_classifications', data.get('decisions', []))
+    return {
+        int(d['drill']): bool(d['plated'])
+        for d in decisions
+        if 'drill' in d and 'plated' in d
+    }
+
+
+def _split_drill_masks(drill_labels: np.ndarray,
+                       classifications: list[dict],
+                       overrides: dict[int, bool] | None = None
+                       ) -> tuple[np.ndarray, np.ndarray, list[dict]]:
+    overrides = overrides or {}
+    plated_ids: set[int] = set()
+    decisions: list[dict] = []
+    for decision in classifications:
+        drill_id = int(decision['drill'])
+        out = dict(decision)
+        if drill_id in overrides:
+            out['plated'] = bool(overrides[drill_id])
+            out['override'] = True
+            out['reason'] = (
+                f'user override from choices JSON: '
+                f'{"plated/PTH" if out["plated"] else "non-plated/NPTH"}'
+            )
+        else:
+            out['override'] = False
+        if out.get('plated'):
+            plated_ids.add(drill_id)
+        decisions.append(out)
+
+    pth = np.isin(drill_labels, list(plated_ids)) if plated_ids else np.zeros_like(drill_labels, dtype=bool)
+    npth = (drill_labels != 0) & ~pth
+    return pth, npth, decisions
+
+
+def _copy_pngs_for_drill_identify(src_dir: pathlib.Path, out_dir: pathlib.Path) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for src in sorted(src_dir.glob('*.png')):
+        shutil.copy2(src, out_dir / src.name)
+
+
+def _write_drill_identify_outputs(out_dir: pathlib.Path,
+                                  source_dir: pathlib.Path,
+                                  drill_name: str,
+                                  layer_names: list[str],
+                                  drill_labels: np.ndarray,
+                                  classifications: list[dict],
+                                  choices_path: pathlib.Path | None = None) -> None:
+    overrides = _decision_map_from_choices(choices_path) if choices_path else {}
+    pth, npth, decisions = _split_drill_masks(
+        drill_labels,
+        classifications,
+        overrides=overrides,
+    )
+
+    _bool_to_mask_image(pth).save(out_dir / 'PTH.png', optimize=True)
+    _bool_to_mask_image(pth).save(out_dir / 'via.png', optimize=True)
+    _bool_to_mask_image(npth).save(out_dir / 'NPTH.png', optimize=True)
+    _bool_to_mask_image(drill_labels != 0).save(out_dir / 'drill.png', optimize=True)
+
+    manifest = {
+        'source_dir': str(source_dir),
+        'drill_name': drill_name,
+        'layers': layer_names,
+        'outputs': {
+            'PTH': 'PTH.png',
+            'via': 'via.png',
+            'NPTH': 'NPTH.png',
+            'drill': 'drill.png',
+        },
+        'plated_count': int(sum(1 for d in decisions if d.get('plated'))),
+        'npth_count': int(sum(1 for d in decisions if not d.get('plated'))),
+        'choices_source': str(choices_path) if choices_path else None,
+        'drill_classifications': decisions,
+    }
+    with open(out_dir / 'drill-identify.json', 'w') as fp:
+        json.dump(manifest, fp, indent=2)
+        fp.write('\n')
+
+
+class GerbonaraMissingError(RuntimeError):
+    pass
+
+
+def _load_gerbonara_excellon(path: pathlib.Path):
+    try:
+        try:
+            from gerbonara import ExcellonFile
+        except ImportError:
+            from gerbonara.excellon import ExcellonFile
+    except ImportError as e:
+        raise GerbonaraMissingError(
+            'Excellon drill_identify mode requires gerbonara. '
+            'Install it with `pip install gerbonara`.'
+        ) from e
+
+    if hasattr(ExcellonFile, 'open'):
+        return ExcellonFile.open(path)
+    if hasattr(ExcellonFile, 'from_file'):
+        return ExcellonFile.from_file(path)
+    raise RuntimeError('unsupported gerbonara ExcellonFile API')
+
+
+def _save_gerbonara_file(obj, path: pathlib.Path) -> None:
+    if hasattr(obj, 'save'):
+        obj.save(path)
+        return
+    if hasattr(obj, 'write'):
+        obj.write(path)
+        return
+    if hasattr(obj, 'to_file'):
+        obj.to_file(path)
+        return
+    raise RuntimeError('unsupported gerbonara file save API')
+
+
+def _copy_excellon_with_objects(excellon, objects: list):
+    out = copy.copy(excellon)
+    out.objects = list(objects)
+    return out
+
+
+def _split_excellon_with_gerbonara(excellon_path: pathlib.Path,
+                                   out_dir: pathlib.Path,
+                                   choices_path: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
+    data = json.loads(choices_path.read_text())
+    decisions = data.get('drill_classifications', data.get('decisions', []))
+    object_decisions = {
+        int(d.get('source_object_index', d.get('object_index'))): bool(d['plated'])
+        for d in decisions
+        if (d.get('source_object_index', d.get('object_index')) is not None
+            and 'plated' in d)
+    }
+    if not object_decisions:
+        raise ValueError(
+            'choices JSON does not contain source_object_index/object_index fields; '
+            'cannot map decisions back to Excellon objects'
+        )
+
+    excellon = _load_gerbonara_excellon(excellon_path)
+    objects = list(getattr(excellon, 'objects'))
+    pth_objects = [
+        obj for idx, obj in enumerate(objects)
+        if object_decisions.get(idx, False)
+    ]
+    npth_objects = [
+        obj for idx, obj in enumerate(objects)
+        if idx in object_decisions and not object_decisions[idx]
+    ]
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    pth_path = out_dir / 'PTH.drl'
+    npth_path = out_dir / 'NPTH.drl'
+    _save_gerbonara_file(_copy_excellon_with_objects(excellon, pth_objects), pth_path)
+    _save_gerbonara_file(_copy_excellon_with_objects(excellon, npth_objects), npth_path)
+    return pth_path, npth_path
+
+
+def cmd_drill_identify(args: argparse.Namespace) -> int:
+    """Classify a generic drill mask into PTH/via and NPTH PNG masks."""
+    _configure_cli_logging()
+    directory = pathlib.Path(args.directory).resolve()
+    out_dir = pathlib.Path(args.output).resolve()
+    if not directory.is_dir():
+        print(f'{directory} is not a directory', file=sys.stderr)
+        return 1
+
+    if args.excellon:
+        if not args.choices:
+            print('--excellon requires --choices with object_index decisions', file=sys.stderr)
+            return 2
+        try:
+            pth_path, npth_path = _split_excellon_with_gerbonara(
+                pathlib.Path(args.excellon).resolve(),
+                out_dir,
+                pathlib.Path(args.choices).resolve(),
+            )
+        except (GerbonaraMissingError, ValueError, RuntimeError) as e:
+            print(str(e), file=sys.stderr)
+            return 2
+        print(f'wrote {pth_path}')
+        print(f'wrote {npth_path}')
+        return 0
+
+    if not any(directory.glob('*.png')):
+        print(
+            'drill_identify currently needs a PNG mask directory. '
+            'Run `pcbnets gerber ... -o pngs` first, then run '
+            '`pcbnets drill_identify pngs -o identified`.',
+            file=sys.stderr,
+        )
+        return 2
+
+    drill_name = _resolve_drill_name(directory, args.drill)
+    layers = _resolve_layers(directory, args.layers, drill_name, drill_name)
+    overrides = _collect_overrides(args)
+
+    logging.getLogger('pcbnets.render').info('identifying drill holes from %s', directory)
+    logging.getLogger('pcbnets.render').info('  layers: %s', ', '.join(layers))
+    logging.getLogger('pcbnets.render').info('  drill : %s', drill_name)
+
+    masks = load_masks(directory, layers, drill_name, args.threshold)
+    arrs, drill_arr, report = prepare_masks(
+        masks=masks,
+        layer_names=layers,
+        drill_name=drill_name,
+        auto_invert=not args.no_auto_invert,
+        auto_align=args.auto_align,
+        **overrides,
+    )
+    _print_report(report, drill_name)
+
+    progress = _Progress(total=3, label='drill identification')
+    progress.step('classifying drill components')
+    result = extract_nets(
+        arrs,
+        drill_arr,
+        connector_mode='infer',
+        progress=progress.detail,
+    )
+    progress.step('copying PNG inputs')
+    _copy_pngs_for_drill_identify(directory, out_dir)
+    progress.step('writing PTH/NPTH/via masks and choices JSON')
+    _write_drill_identify_outputs(
+        out_dir=out_dir,
+        source_dir=directory,
+        drill_name=drill_name,
+        layer_names=layers,
+        drill_labels=result['drill_labels'],
+        classifications=result['drill_classifications'],
+        choices_path=pathlib.Path(args.choices).resolve() if args.choices else None,
+    )
+    progress.finish()
+    print(f'wrote drill identification outputs to {out_dir}')
+    print('  PTH.png, via.png, NPTH.png, drill.png')
+    print('  drill-identify.json')
+    return 0
+
+
+def _parse_component_spec(spec: str, labels: dict[str, np.ndarray]) -> tuple[str, int]:
+    """Parse LAYER:COMPONENT or LAYER:X,Y into a local component node."""
+    try:
+        layer, rest = spec.split(':', 1)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f'expected LAYER:COMPONENT or LAYER:X,Y, got {spec!r}')
+    if layer not in labels:
+        raise argparse.ArgumentTypeError(f'unknown layer {layer!r}; available: {", ".join(labels)}')
+    if ',' in rest:
+        x_s, y_s = rest.split(',', 1)
+        x, y = int(x_s), int(y_s)
+        arr = labels[layer]
+        if y < 0 or x < 0 or y >= arr.shape[0] or x >= arr.shape[1]:
+            raise argparse.ArgumentTypeError(f'point {spec!r} is outside layer bounds')
+        component = int(arr[y, x])
+        if component == 0:
+            raise argparse.ArgumentTypeError(f'point {spec!r} is background, not copper')
+        return layer, component
+    component = int(rest)
+    if component <= 0:
+        raise argparse.ArgumentTypeError('component ids must be positive')
+    return layer, component
+
+
+def _debug_component_index(debug: dict) -> dict[tuple[str, int], dict]:
+    return {
+        (c['layer'], int(c['component'])): c
+        for c in debug.get('components', [])
+    }
+
+
+def _debug_drill_index(debug: dict) -> dict[int, dict]:
+    return {
+        int(d['drill']): d
+        for d in debug.get('drills', [])
+    }
+
+
+def _format_bbox(bbox: list | tuple | None) -> str:
+    if not bbox or len(bbox) < 4:
+        return 'bbox unavailable'
+    x0, y0, x1, y1 = [int(v) for v in bbox[:4]]
+    return f'bbox {x0},{y0}..{x1 - 1},{y1 - 1}'
+
+
+def _format_component_location(node: dict, components: dict[tuple[str, int], dict]) -> str:
+    comp = components.get((node['layer'], int(node['component'])))
+    if not comp:
+        return f'{node["layer"]}:{node["component"]} (location unavailable)'
+    bbox = comp.get('bbox')
+    if bbox and len(bbox) >= 4:
+        cx = (float(bbox[0]) + float(bbox[2]) - 1) / 2
+        cy = (float(bbox[1]) + float(bbox[3]) - 1) / 2
+        return (
+            f'{node["layer"]}:{node["component"]} '
+            f'@ approx {cx:.0f},{cy:.0f} ({_format_bbox(bbox)})'
+        )
+    return f'{node["layer"]}:{node["component"]} ({_format_bbox(None)})'
+
+
+def _format_drill_location(drill_id: int, drills: dict[int, dict]) -> str:
+    drill = drills.get(int(drill_id))
+    if not drill:
+        return f'drill {drill_id} (location unavailable; regenerate nets data with a newer pcbnets)'
+    centroid = drill.get('centroid')
+    if centroid and len(centroid) >= 2:
+        return (
+            f'drill {drill_id} @ {float(centroid[0]):.0f},{float(centroid[1]):.0f} '
+            f'({_format_bbox(drill.get("bbox"))})'
+        )
+    return f'drill {drill_id} ({_format_bbox(drill.get("bbox"))})'
+
+
+def cmd_explain(args: argparse.Namespace) -> int:
+    """Explain which drill contacts connect two local components."""
+    debug_dir = pathlib.Path(args.debug_dir).resolve()
+    labels_path = debug_dir / 'layer-labels.npz'
+    json_path = debug_dir / 'nets.json'
+    if not labels_path.exists() or not json_path.exists():
+        print(f'missing net debug files in {debug_dir}; run `pcbnets nets ... -o {debug_dir}` first', file=sys.stderr)
+        return 1
+
+    with np.load(labels_path) as data:
+        labels = {name: data[name] for name in data.files}
+    debug = json.loads(json_path.read_text())
+    try:
+        start = _parse_component_spec(args.start, labels)
+        end = _parse_component_spec(args.end, labels)
+    except argparse.ArgumentTypeError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    path = explain_merge_path(debug, start, end)
+    if not path:
+        print(f'{args.start} and {args.end} are not connected by recorded drill merge edges')
+        return 1
+
+    components = _debug_component_index(debug)
+    drills = _debug_drill_index(debug)
+    print(f'{start[0]}:{start[1]} connects to {end[0]}:{end[1]} through {len(path)} drill edge(s):')
+    for step in path:
+        a = step['from']
+        b = step['to']
+        print(f'  {_format_component_location(a, components)}')
+        print(f'    -- {_format_drill_location(step["drill"], drills)} --')
+        print(f'  {_format_component_location(b, components)}')
     return 0
 
 
@@ -714,6 +1251,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
                 scale=1.0,
                 cols=2,
                 no_cache=False,
+                nets=None,
                 no_auto_invert=False,
                 auto_align=False,
                 invert=[],
@@ -1175,6 +1713,7 @@ def cmd_all(args: argparse.Namespace) -> int:
         scale=args.scale,
         cols=args.cols,
         no_cache=False,
+        nets=args.nets,
         no_auto_invert=args.no_auto_invert,
         auto_align=args.auto_align,
         invert=args.invert or [],
@@ -1286,8 +1825,32 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument('--scale', type=float, default=1.0)
     pr.add_argument('--cols', type=int, default=2)
     pr.add_argument('--no-cache', action='store_true')
+    pr.add_argument('--nets',
+                    help='Use net-labels.npz from `pcbnets nets -o DIR` instead of extracting/merging again')
     _add_audit_flags(pr)
     pr.set_defaults(func=cmd_render)
+
+    pn = sub.add_parser('nets', help='Run net finding only and write debug data')
+    pn.add_argument('directory')
+    pn.add_argument('-o', '--output', default='./pcbnets-nets')
+    pn.add_argument('--layers', nargs='+')
+    pn.add_argument('--drill', default='auto',
+                    help='Physical drill-hole mask name (default: auto)')
+    pn.add_argument('--via', default='auto',
+                    help='Electrical vertical-connector mask name (default: auto: via, PTH, drill)')
+    pn.add_argument('--drill-grow', type=int, default=0, dest='drill_grow')
+    pn.add_argument('--threshold', type=int, default=0)
+    _add_audit_flags(pn)
+    pn.set_defaults(func=cmd_nets)
+
+    px = sub.add_parser('explain', help='Explain why two local components are merged')
+    px.add_argument('debug_dir',
+                    help='Directory written by `pcbnets nets`')
+    px.add_argument('--from', required=True, dest='start',
+                    help='Start as LAYER:COMPONENT or LAYER:X,Y')
+    px.add_argument('--to', required=True, dest='end',
+                    help='End as LAYER:COMPONENT or LAYER:X,Y')
+    px.set_defaults(func=cmd_explain)
 
     pa = sub.add_parser('audit', help='Detect polarity/alignment issues without rendering')
     pa.add_argument('directory')
@@ -1317,6 +1880,25 @@ def build_parser() -> argparse.ArgumentParser:
                         help='Auto-detect and apply F_Mask/B_Mask visual offsets')
     _add_audit_flags(palign, include_auto_align=False)
     palign.set_defaults(func=cmd_align)
+
+    pdrill = sub.add_parser(
+        'drill_identify',
+        aliases=['drill-identify'],
+        help='Classify generic drill holes into PTH/via and NPTH PNG masks',
+    )
+    pdrill.add_argument('directory')
+    pdrill.add_argument('-o', '--output', required=True,
+                        help='Output PNG directory with PTH.png, via.png, NPTH.png, drill.png, and drill-identify.json')
+    pdrill.add_argument('--choices',
+                        help='Existing drill-identify.json with edited plated decisions to apply')
+    pdrill.add_argument('--excellon',
+                        help='Split this Excellon drill file with gerbonara using object_index decisions from --choices')
+    pdrill.add_argument('--layers', nargs='+')
+    pdrill.add_argument('--drill', default='auto',
+                        help='Generic/physical drill-hole mask name (default: auto)')
+    pdrill.add_argument('--threshold', type=int, default=0)
+    _add_audit_flags(pdrill)
+    pdrill.set_defaults(func=cmd_drill_identify)
 
     ps = sub.add_parser('serve', help='Run the interactive viewer')
     ps.add_argument('build_dir')
@@ -1377,6 +1959,8 @@ def build_parser() -> argparse.ArgumentParser:
     pall.add_argument('--drill-grow', type=int, default=0, dest='drill_grow')
     pall.add_argument('--scale', type=float, default=1.0)
     pall.add_argument('--cols', type=int, default=2)
+    pall.add_argument('--nets',
+                      help='Use net-labels.npz from `pcbnets nets -o DIR` during render')
     _add_audit_flags(pall)
     pall.set_defaults(func=cmd_all)
 

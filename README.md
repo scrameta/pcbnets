@@ -38,14 +38,19 @@ pcbnets gerber ./my_kicad_gerbers -o ./pngs
 # 2. (Optional) Audit polarity and drill alignment
 pcbnets audit ./pngs -o audit.png
 
-# 3. Build the net map, grid, mip-maps, and tiles
-pcbnets render ./pngs -o ./build
+# 3. (Optional) Write net-finding debug data without rendering
+pcbnets drill_identify ./pngs -o ./pngs-identified
+pcbnets nets ./pngs -o ./nets-debug
+pcbnets explain ./nets-debug --from F_Cu:123,456 --to B_Cu:42
 
-# 4. Serve the interactive viewer
+# 4. Build the net map, grid, mip-maps, and tiles
+pcbnets render ./pngs -o ./build --nets ./nets-debug
+
+# 5. Serve the interactive viewer
 pcbnets serve ./build
 #   → http://127.0.0.1:8000
 
-# 5. (Optional) Bundle as static HTML for a web host
+# 6. (Optional) Bundle as static HTML for a web host
 pcbnets export ./build -o ./build-static --title "My Board v1.2"
 
 # Or zip the static bundle ready to upload/unzip
@@ -107,8 +112,12 @@ by some other route, you may need to align them manually.
 Rasterises every recognised Gerber/Excellon file in `<dir>` to a PNG
 mask. Each output is named after the canonical KiCad layer
 (`F_Cu.png`, `In1_Cu.png`, `B_Cu.png`, `F_Silkscreen.png`, `PTH.png`,
-etc). The `PTH` mask is also aliased to `drill.png` so the rest of the
-pipeline works without extra flags.
+etc). Drill outputs are also aliased for the downstream pipeline when they
+are explicit: `PTH.png` is copied to `via.png` as the preferred electrical
+connector mask, and `via.png`/`PTH.png` can be copied to `drill.png` as the
+physical-hole mask when no generic drill file exists. A lone generic drill
+file remains `drill.png`; the net-finding stage then infers which drill
+blobs are electrical.
 
 Detection writes (or reads) `layers.json` in the source directory:
 
@@ -206,6 +215,7 @@ Key options:
 | `--threshold`        | `0`     | Pixel value above which a mask pixel counts as "set"                 |
 | `--scale`            | `1.0`   | Downsample factor for the rendered grid                              |
 | `--cols`             | `2`     | Layer tiles per row in the grid                                      |
+| `--nets DIR`         | —       | Reuse `net-labels.npz` from `pcbnets nets -o DIR` instead of extracting/merging again |
 | `--no-cache`         | off     | Skip the per-directory cache                                         |
 
 Polarity / alignment options (see "Polarity and alignment" below):
@@ -218,6 +228,91 @@ Polarity / alignment options (see "Polarity and alignment" below):
 | `--no-invert LAYER`  | —       | Force-do-not-invert this layer (overrides auto)               |
 | `--offset LAYER DY,DX` | —     | Manually shift a layer by (dy, dx) pixels                     |
 | `--outer LAYER ...`  | F_Cu B_Cu | Override which layers are treated as outer                 |
+
+### `pcbnets drill_identify <png_dir>`
+
+Classifies a generic drill mask into explicit plated and non-plated masks
+before net extraction:
+
+```bash
+pcbnets drill_identify ./pngs -o ./pngs-identified
+pcbnets nets ./pngs-identified -o ./nets-debug
+```
+
+The output directory is a copy of the input PNG directory with regenerated:
+
+```
+PTH.png              # holes classified as plated/electrical
+via.png              # alias of PTH.png for connectivity
+NPTH.png             # holes classified as non-plated/mechanical
+drill.png            # all physical holes
+drill-identify.json  # per-hole choices and reasons
+```
+
+You can edit `drill-identify.json` by changing a drill's `plated` boolean,
+then regenerate the masks without changing the copper inputs:
+
+```bash
+pcbnets drill_identify ./pngs -o ./pngs-identified --choices ./pngs-identified/drill-identify.json
+```
+
+For vector drill-file regeneration, `drill_identify` also has an Excellon
+split mode backed by Gerbonara. Install the optional dependency with
+`pip install pcbnets[excellon]`, then provide a choices JSON whose decisions
+contain `object_index` or `source_object_index` fields mapping back to the
+Gerbonara Excellon objects:
+
+```bash
+pcbnets drill_identify ./gerbers -o ./gerbers-identified \
+  --excellon ./gerbers/all_drills.drl \
+  --choices ./drill-object-choices.json
+```
+
+This writes `PTH.drl` and `NPTH.drl`. PNG-level choices are still useful for
+mask regeneration, but they do not map back to Excellon objects unless your
+choices JSON includes the object indexes.
+
+### `pcbnets nets <dir>` and `pcbnets explain <debug_dir>`
+
+`pcbnets nets` runs the net-finding stage without building the viewer. It
+writes reusable debug artefacts that can also be consumed by
+`pcbnets render --nets <debug_dir>`:
+
+```
+nets-debug/
+├── layer-labels.npz    # per-layer connected components before via/drill merging
+├── net-labels.npz      # final board-wide merged net labels
+└── nets.json           # component stats, per-drill plated/NPTH decisions, drill contacts, and merged groups
+```
+
+This splits the connectivity pass from rendering so unexpected shorts can
+be debugged directly. To find why two unmerged per-layer copper islands
+ended up in one final net, point `pcbnets explain` at the debug directory:
+
+```bash
+# Coordinates are X,Y pixels in the original mask coordinate frame.
+pcbnets explain ./nets-debug --from F_Cu:1234,567 --to B_Cu:42
+
+# Or address local connected-component ids directly.
+pcbnets explain ./nets-debug --from F_Cu:18 --to In1_Cu:7
+```
+
+The output is a shortest drill-by-drill path, for example:
+
+```
+F_Cu:18 connects to In1_Cu:7 through 1 drill edge(s):
+  F_Cu:18 @ approx 1220,560 (bbox 1180,520..1260,600)
+    -- drill 203 @ 1240,580 (bbox 1234,574..1246,586) --
+  In1_Cu:7 @ approx 1240,580 (bbox 1202,542..1282,622)
+```
+
+The interactive viewer also shows the last clicked coordinate in the sidebar
+as `LAYER:X,Y`, which can be copied directly into `pcbnets explain --from`
+or `--to`.
+
+Those coordinates and bboxes are pixel coordinates in the source PNGs, so you
+can inspect the listed points directly in `F_Cu.png`, `In1_Cu.png`, `via.png`,
+and the other input masks.
 
 ### `pcbnets serve <build_dir>`
 
@@ -353,8 +448,12 @@ for w in check.warnings:
    alignment, otherwise bail with an actionable error.
 4. **Connected components** (4-connectivity) per layer → each isolated
    piece of copper gets a local id.
-5. **Drill components** found the same way. `PTH`/`drill` is used for
-   electrical connectivity; `NPTH` is not used to merge nets.
+5. **Connector components** found the same way. `via.png` and `PTH.png` are
+   treated as explicit electrical connectors. `NPTH.png` never connects.
+   Generic `drill.png` is inferred hole-by-hole: copper pads/annuli on both
+   outer layers or via-like partial annular contact are considered
+   plated/electrical, while no copper contact, large isolated holes, and
+   one-sided outer copper contact are treated as NPTH or ambiguous/likely NPTH.
 6. **Barrel contact test**: for each drill, sample a narrow annulus just
    outside the hole and record which `(layer, id)` copper regions actually
    reach the hole wall. This avoids treating mechanical holes or anti-pads
