@@ -29,7 +29,7 @@ import math
 from types import SimpleNamespace
 
 ALL_AROUND_COPPER_FRAC = 0.85
-PAD_RING_COPPER_FRAC = 0.95
+PAD_RING_COPPER_FRAC = 0.80
 
 
 def _contact_kind(frac: float, min_copper_frac: float = 0.10) -> str:

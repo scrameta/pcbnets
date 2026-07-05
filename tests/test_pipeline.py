@@ -142,6 +142,38 @@ def test_inferred_generic_drill_rejects_trace_touches_without_complete_pad_ring(
     assert not any(c['pad_ring_contact'] for c in contacts)
 
 
+def test_inferred_generic_drill_tolerates_rasterised_pad_ring_threshold():
+    from pcbnets.nets import _classify_drill
+
+    contacts = [
+        {
+            'layer': 'top',
+            'component_ids': [1],
+            'contact': 'all_around',
+            'pad_ring_fraction': 0.84,
+        },
+        {
+            'layer': 'bot',
+            'component_ids': [1],
+            'contact': 'all_around',
+            'pad_ring_fraction': 0.84,
+        },
+    ]
+
+    decision = _classify_drill(
+        drill_id=1,
+        contacts=contacts,
+        layer_names=['top', 'bot'],
+        radius_px=5.0,
+        small_radius_px=8.0,
+        large_radius_px=20.0,
+        connector_mode='infer',
+    )
+
+    assert decision['plated'] is True
+    assert decision['classification'] == 'likely_pth'
+
+
 def test_inferred_generic_drill_connects_top_and_bottom_annular_pads():
     """Generic drill fallback treats copper on both outer sides as likely PTH."""
     layers = {
