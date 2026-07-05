@@ -294,6 +294,12 @@ masks. If the input is only PNGs and no `--excellon` file is supplied, vector
 Gerber/Excellon outputs are skipped because there is no source drill file to
 split.
 
+When `--excellon` is used, each `drill-identify.json` decision also includes
+`source_object_index`, `source_x`, and `source_y` where gerbonara can expose
+them. Those are the original Excellon drill coordinates, so they are usually
+the easiest way to jump from a pcbnets drill id/centroid back to CAD/Gerber
+space without manually reversing the PNG rasterisation transform.
+
 ### `pcbnets nets <dir>` and `pcbnets explain <debug_dir>`
 
 `pcbnets nets` runs the net-finding stage without building the viewer. It

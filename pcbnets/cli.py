@@ -1076,9 +1076,10 @@ def _object_xy(obj) -> tuple[float, float] | None:
     return None
 
 
-def _infer_excellon_object_decisions(excellon_path: pathlib.Path,
-                                     classifications: list[dict]
-                                     ) -> tuple[dict[int, bool], dict[int, int]]:
+def _infer_excellon_object_decisions(
+    excellon_path: pathlib.Path,
+    classifications: list[dict],
+) -> tuple[dict[int, bool], dict[int, int], dict[int, tuple[float, float]]]:
     excellon = _load_gerbonara_excellon(excellon_path)
     objects = list(getattr(excellon, 'objects'))
     if len(objects) != len(classifications):
@@ -1103,10 +1104,15 @@ def _infer_excellon_object_decisions(excellon_path: pathlib.Path,
     sorted_classifications = sorted(classifications, key=lambda d: int(d['drill']))
     object_decisions: dict[int, bool] = {}
     drill_to_object: dict[int, int] = {}
+    drill_to_xy: dict[int, tuple[float, float]] = {}
     for decision, object_index in zip(sorted_classifications, sorted_object_indexes):
+        drill_id = int(decision['drill'])
         object_decisions[int(object_index)] = bool(decision['plated'])
-        drill_to_object[int(decision['drill'])] = int(object_index)
-    return object_decisions, drill_to_object
+        drill_to_object[drill_id] = int(object_index)
+        xy = _object_xy(objects[object_index])
+        if xy is not None:
+            drill_to_xy[drill_id] = xy
+    return object_decisions, drill_to_object, drill_to_xy
 
 
 def cmd_drill_identify(args: argparse.Namespace) -> int:
@@ -1184,7 +1190,7 @@ def cmd_drill_identify(args: argparse.Namespace) -> int:
     excellon_object_decisions = None
     if args.excellon and not args.choices:
         try:
-            excellon_object_decisions, drill_to_object = _infer_excellon_object_decisions(
+            excellon_object_decisions, drill_to_object, drill_to_xy = _infer_excellon_object_decisions(
                 pathlib.Path(args.excellon).resolve(),
                 classifications,
             )
@@ -1197,6 +1203,14 @@ def cmd_drill_identify(args: argparse.Namespace) -> int:
             {
                 **decision,
                 'source_object_index': drill_to_object.get(int(decision['drill'])),
+                'source_x': (
+                    drill_to_xy[int(decision['drill'])][0]
+                    if int(decision['drill']) in drill_to_xy else None
+                ),
+                'source_y': (
+                    drill_to_xy[int(decision['drill'])][1]
+                    if int(decision['drill']) in drill_to_xy else None
+                ),
             }
             for decision in classifications
         ]

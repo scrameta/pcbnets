@@ -500,7 +500,8 @@ def test_drill_identify_excellon_without_choices_writes_excellon_splits(tmp_path
     assert (out / 'PTH.drl').read_text() == 'plated-hole'
     assert (out / 'NPTH.drl').read_text() == ''
     assert manifest['drill_classifications'][0]['source_object_index'] == 0
-
+    assert manifest['drill_classifications'][0]['source_x'] == 10
+    assert manifest['drill_classifications'][0]['source_y'] == 30
 
 
 def test_split_excellon_with_gerbonara_uses_object_index_choices(tmp_path, monkeypatch):
