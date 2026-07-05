@@ -882,6 +882,153 @@ def cmd_nets(args: argparse.Namespace) -> int:
     return 0
 
 
+def _decision_map_from_choices(path: pathlib.Path) -> dict[int, bool]:
+    data = json.loads(path.read_text())
+    decisions = data.get('drill_classifications', data.get('decisions', []))
+    return {
+        int(d['drill']): bool(d['plated'])
+        for d in decisions
+        if 'drill' in d and 'plated' in d
+    }
+
+
+def _split_drill_masks(drill_labels: np.ndarray,
+                       classifications: list[dict],
+                       overrides: dict[int, bool] | None = None
+                       ) -> tuple[np.ndarray, np.ndarray, list[dict]]:
+    overrides = overrides or {}
+    plated_ids: set[int] = set()
+    decisions: list[dict] = []
+    for decision in classifications:
+        drill_id = int(decision['drill'])
+        out = dict(decision)
+        if drill_id in overrides:
+            out['plated'] = bool(overrides[drill_id])
+            out['override'] = True
+            out['reason'] = (
+                f'user override from choices JSON: '
+                f'{"plated/PTH" if out["plated"] else "non-plated/NPTH"}'
+            )
+        else:
+            out['override'] = False
+        if out.get('plated'):
+            plated_ids.add(drill_id)
+        decisions.append(out)
+
+    pth = np.isin(drill_labels, list(plated_ids)) if plated_ids else np.zeros_like(drill_labels, dtype=bool)
+    npth = (drill_labels != 0) & ~pth
+    return pth, npth, decisions
+
+
+def _copy_pngs_for_drill_identify(src_dir: pathlib.Path, out_dir: pathlib.Path) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for src in sorted(src_dir.glob('*.png')):
+        shutil.copy2(src, out_dir / src.name)
+
+
+def _write_drill_identify_outputs(out_dir: pathlib.Path,
+                                  source_dir: pathlib.Path,
+                                  drill_name: str,
+                                  layer_names: list[str],
+                                  drill_labels: np.ndarray,
+                                  classifications: list[dict],
+                                  choices_path: pathlib.Path | None = None) -> None:
+    overrides = _decision_map_from_choices(choices_path) if choices_path else {}
+    pth, npth, decisions = _split_drill_masks(
+        drill_labels,
+        classifications,
+        overrides=overrides,
+    )
+
+    _bool_to_mask_image(pth).save(out_dir / 'PTH.png', optimize=True)
+    _bool_to_mask_image(pth).save(out_dir / 'via.png', optimize=True)
+    _bool_to_mask_image(npth).save(out_dir / 'NPTH.png', optimize=True)
+    _bool_to_mask_image(drill_labels != 0).save(out_dir / 'drill.png', optimize=True)
+
+    manifest = {
+        'source_dir': str(source_dir),
+        'drill_name': drill_name,
+        'layers': layer_names,
+        'outputs': {
+            'PTH': 'PTH.png',
+            'via': 'via.png',
+            'NPTH': 'NPTH.png',
+            'drill': 'drill.png',
+        },
+        'plated_count': int(sum(1 for d in decisions if d.get('plated'))),
+        'npth_count': int(sum(1 for d in decisions if not d.get('plated'))),
+        'choices_source': str(choices_path) if choices_path else None,
+        'drill_classifications': decisions,
+    }
+    with open(out_dir / 'drill-identify.json', 'w') as fp:
+        json.dump(manifest, fp, indent=2)
+        fp.write('\n')
+
+
+def cmd_drill_identify(args: argparse.Namespace) -> int:
+    """Classify a generic drill mask into PTH/via and NPTH PNG masks."""
+    _configure_cli_logging()
+    directory = pathlib.Path(args.directory).resolve()
+    out_dir = pathlib.Path(args.output).resolve()
+    if not directory.is_dir():
+        print(f'{directory} is not a directory', file=sys.stderr)
+        return 1
+
+    if not any(directory.glob('*.png')):
+        print(
+            'drill_identify currently needs a PNG mask directory. '
+            'Run `pcbnets gerber ... -o pngs` first, then run '
+            '`pcbnets drill_identify pngs -o identified`.',
+            file=sys.stderr,
+        )
+        return 2
+
+    drill_name = _resolve_drill_name(directory, args.drill)
+    layers = _resolve_layers(directory, args.layers, drill_name, drill_name)
+    overrides = _collect_overrides(args)
+
+    logging.getLogger('pcbnets.render').info('identifying drill holes from %s', directory)
+    logging.getLogger('pcbnets.render').info('  layers: %s', ', '.join(layers))
+    logging.getLogger('pcbnets.render').info('  drill : %s', drill_name)
+
+    masks = load_masks(directory, layers, drill_name, args.threshold)
+    arrs, drill_arr, report = prepare_masks(
+        masks=masks,
+        layer_names=layers,
+        drill_name=drill_name,
+        auto_invert=not args.no_auto_invert,
+        auto_align=args.auto_align,
+        **overrides,
+    )
+    _print_report(report, drill_name)
+
+    progress = _Progress(total=3, label='drill identification')
+    progress.step('classifying drill components')
+    result = extract_nets(
+        arrs,
+        drill_arr,
+        connector_mode='infer',
+        progress=progress.detail,
+    )
+    progress.step('copying PNG inputs')
+    _copy_pngs_for_drill_identify(directory, out_dir)
+    progress.step('writing PTH/NPTH/via masks and choices JSON')
+    _write_drill_identify_outputs(
+        out_dir=out_dir,
+        source_dir=directory,
+        drill_name=drill_name,
+        layer_names=layers,
+        drill_labels=result['drill_labels'],
+        classifications=result['drill_classifications'],
+        choices_path=pathlib.Path(args.choices).resolve() if args.choices else None,
+    )
+    progress.finish()
+    print(f'wrote drill identification outputs to {out_dir}')
+    print('  PTH.png, via.png, NPTH.png, drill.png')
+    print('  drill-identify.json')
+    return 0
+
+
 def _parse_component_spec(spec: str, labels: dict[str, np.ndarray]) -> tuple[str, int]:
     """Parse LAYER:COMPONENT or LAYER:X,Y into a local component node."""
     try:
@@ -1637,6 +1784,23 @@ def build_parser() -> argparse.ArgumentParser:
                         help='Auto-detect and apply F_Mask/B_Mask visual offsets')
     _add_audit_flags(palign, include_auto_align=False)
     palign.set_defaults(func=cmd_align)
+
+    pdrill = sub.add_parser(
+        'drill_identify',
+        aliases=['drill-identify'],
+        help='Classify generic drill holes into PTH/via and NPTH PNG masks',
+    )
+    pdrill.add_argument('directory')
+    pdrill.add_argument('-o', '--output', required=True,
+                        help='Output PNG directory with PTH.png, via.png, NPTH.png, drill.png, and drill-identify.json')
+    pdrill.add_argument('--choices',
+                        help='Existing drill-identify.json with edited plated decisions to apply')
+    pdrill.add_argument('--layers', nargs='+')
+    pdrill.add_argument('--drill', default='auto',
+                        help='Generic/physical drill-hole mask name (default: auto)')
+    pdrill.add_argument('--threshold', type=int, default=0)
+    _add_audit_flags(pdrill)
+    pdrill.set_defaults(func=cmd_drill_identify)
 
     ps = sub.add_parser('serve', help='Run the interactive viewer')
     ps.add_argument('build_dir')

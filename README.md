@@ -39,6 +39,7 @@ pcbnets gerber ./my_kicad_gerbers -o ./pngs
 pcbnets audit ./pngs -o audit.png
 
 # 3. (Optional) Write net-finding debug data without rendering
+pcbnets drill_identify ./pngs -o ./pngs-identified
 pcbnets nets ./pngs -o ./nets-debug
 pcbnets explain ./nets-debug --from F_Cu:123,456 --to B_Cu:42
 
@@ -227,6 +228,33 @@ Polarity / alignment options (see "Polarity and alignment" below):
 | `--no-invert LAYER`  | —       | Force-do-not-invert this layer (overrides auto)               |
 | `--offset LAYER DY,DX` | —     | Manually shift a layer by (dy, dx) pixels                     |
 | `--outer LAYER ...`  | F_Cu B_Cu | Override which layers are treated as outer                 |
+
+### `pcbnets drill_identify <png_dir>`
+
+Classifies a generic drill mask into explicit plated and non-plated masks
+before net extraction:
+
+```bash
+pcbnets drill_identify ./pngs -o ./pngs-identified
+pcbnets nets ./pngs-identified -o ./nets-debug
+```
+
+The output directory is a copy of the input PNG directory with regenerated:
+
+```
+PTH.png              # holes classified as plated/electrical
+via.png              # alias of PTH.png for connectivity
+NPTH.png             # holes classified as non-plated/mechanical
+drill.png            # all physical holes
+drill-identify.json  # per-hole choices and reasons
+```
+
+You can edit `drill-identify.json` by changing a drill's `plated` boolean,
+then regenerate the masks without changing the copper inputs:
+
+```bash
+pcbnets drill_identify ./pngs -o ./pngs-identified --choices ./pngs-identified/drill-identify.json
+```
 
 ### `pcbnets nets <dir>` and `pcbnets explain <debug_dir>`
 

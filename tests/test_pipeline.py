@@ -295,6 +295,78 @@ def test_load_net_labels_for_render_rejects_shape_mismatch(tmp_path):
         _load_net_labels_for_render(tmp_path, ['top'], arrs)
 
 
+def test_drill_identify_writes_split_masks_and_choices(tmp_path):
+    import argparse
+    import json
+    from pcbnets.cli import cmd_drill_identify
+
+    src = tmp_path / 'src'
+    out = tmp_path / 'out'
+    src.mkdir()
+    make_mask(w=80, h=80, shapes=[
+        ('rect', 20, 15, 50, 25),
+    ]).save(src / 'F_Cu.png')
+    make_mask(w=80, h=80, shapes=[
+        ('rect', 0, 15, 20, 25),
+    ]).save(src / 'B_Cu.png')
+    make_mask(w=80, h=80, shapes=[
+        ('ellipse', 15, 15, 25, 25),
+        ('ellipse', 55, 55, 65, 65),
+    ]).save(src / 'drill.png')
+
+    args = argparse.Namespace(
+        directory=str(src),
+        output=str(out),
+        choices=None,
+        layers=None,
+        drill='auto',
+        threshold=0,
+        no_auto_invert=False,
+        auto_align=False,
+        invert=[],
+        no_invert=[],
+        offset=[],
+        outer=None,
+    )
+
+    assert cmd_drill_identify(args) == 0
+
+    manifest = json.loads((out / 'drill-identify.json').read_text())
+    assert manifest['plated_count'] == 1
+    assert manifest['npth_count'] == 1
+    assert (out / 'PTH.png').exists()
+    assert (out / 'via.png').exists()
+    assert (out / 'NPTH.png').exists()
+
+    pth = np.asarray(Image.open(out / 'PTH.png').convert('L')) > 0
+    npth = np.asarray(Image.open(out / 'NPTH.png').convert('L')) > 0
+    assert pth[20, 20]
+    assert not pth[60, 60]
+    assert npth[60, 60]
+
+
+def test_drill_identify_choices_override_masks(tmp_path):
+    from pcbnets.cli import _split_drill_masks
+
+    labels = np.array([[0, 1, 2]], dtype=np.int32)
+    classifications = [
+        {'drill': 1, 'plated': True, 'classification': 'likely_pth'},
+        {'drill': 2, 'plated': False, 'classification': 'likely_npth'},
+    ]
+
+    pth, npth, decisions = _split_drill_masks(
+        labels,
+        classifications,
+        overrides={1: False, 2: True},
+    )
+
+    assert not pth[0, 1]
+    assert pth[0, 2]
+    assert npth[0, 1]
+    assert decisions[0]['override'] is True
+    assert decisions[1]['override'] is True
+
+
 def test_id_encoding_roundtrip():
     """Net IDs encoded into RGB should decode back exactly."""
     labels = {'top': np.array([[1, 2, 300], [65536, 16777215, 0]], dtype=np.int32)}
