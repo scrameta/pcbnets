@@ -1475,10 +1475,15 @@ function drawVectorAlpha(ctx, img, p, mirror, colour, alpha, mode = 'alpha') {
   if (!img || !rectVisible(r)) return;
 
   const crop = currentCropForTile({...p, x: 0, y: 0});
-  const sx = crop.x * img.width / Math.max(1, p.w);
-  const sy = crop.y * img.height / Math.max(1, p.h);
-  const sw = crop.w * img.width / Math.max(1, p.w);
-  const sh = crop.h * img.height / Math.max(1, p.h);
+  // Draw the whole SVG scaled into board coordinates and use the destination
+  // offset for cropping. This preserves the SVG viewBox/origin exactly as the
+  // browser interprets it instead of sampling a source rectangle from the
+  // image's rounded natural pixel size, which can shift artwork relative to
+  // the PNG idmap.
+  const dx = -crop.x * r.w / Math.max(1, crop.w);
+  const dy = -crop.y * r.h / Math.max(1, crop.h);
+  const dw = p.w * r.w / Math.max(1, crop.w);
+  const dh = p.h * r.h / Math.max(1, crop.h);
 
   const off = document.createElement('canvas');
   off.width = Math.max(1, Math.ceil(r.w * renderDpr));
@@ -1498,7 +1503,7 @@ function drawVectorAlpha(ctx, img, p, mirror, colour, alpha, mode = 'alpha') {
     octx.translate(r.w, 0);
     octx.scale(-1, 1);
   }
-  octx.drawImage(img, sx, sy, sw, sh, 0, 0, r.w, r.h);
+  octx.drawImage(img, dx, dy, dw, dh);
 
   if (mode !== 'maskfilm') {
     octx.globalCompositeOperation = 'source-in';
