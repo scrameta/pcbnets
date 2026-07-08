@@ -254,11 +254,51 @@ def _format_elapsed(seconds: float) -> str:
     return f'{minutes}m{secs:02d}s'
 
 
+# gerbv's Cairo SVG backend renders every loaded file into one flattened
+# <svg>, tagging the non-selected layers (foreground alpha 00) as fully
+# transparent paths rather than omitting them. It also never emits the
+# --background as a drawable rect, so SVG output is white-on-transparent
+# regardless of the PNG background hack. For a per-layer asset we want only
+# the selected layer's geometry and a clean transparent canvas (correct for
+# compositing later), so we drop the zero-opacity paths post-export.
+#
+# Both path kinds Cairo emits are matched:
+#   filled flashes:   " stroke:none;fill-rule:evenodd;fill:...;fill-opacity:0;"
+#   stroked contours: "fill:none;...;stroke:...;stroke-opacity:0;..."
+# The negative lookahead keeps partial opacities (e.g. 0.5) untouched.
+_SVG_PATH_RE = re.compile(r'<path\b[^>]*/>', re.DOTALL)
+_SVG_CLEAR_RE = re.compile(r'(?:stroke|fill)-opacity:0(?![.\d])')
+
+
+def _strip_clear_paths(svg_path: pathlib.Path) -> tuple[int, int]:
+    """Remove fully-transparent <path> elements from an SVG in place.
+
+    Returns ``(removed, kept)`` path counts. Background stays transparent so
+    the layer composites cleanly; foreground geometry (opacity 1) is retained.
+    """
+    text = svg_path.read_text()
+    removed = 0
+
+    def repl(m: re.Match) -> str:
+        nonlocal removed
+        if _SVG_CLEAR_RE.search(m.group(0)):
+            removed += 1
+            return ''
+        return m.group(0)
+
+    cleaned = _SVG_PATH_RE.sub(repl, text)
+    kept = cleaned.count('<path')
+    if removed:
+        svg_path.write_text(cleaned)
+    return removed, kept
+
+
 def _rasterise_one(
                    all_sources: list[pathlib.Path],
                    selected_src: int,
                    output: pathlib.Path,
                    dpi: int,
+                   export: str = 'png',
                    progress_interval: float = 30.0) -> None:
     """Run gerbv on all these files, just outputting one
        Done this way to get alignment
@@ -272,10 +312,18 @@ def _rasterise_one(
             foregrounds.append("--foreground=#FFFFFF00")
     cmd = [
         'gerbv',
-        '--export=png',
+        f'--export={export}',
         f'--output={output}',
-        f'--dpi={dpi}x{dpi}',
-        '--background=#000000',
+    ]
+    # --dpi is a raster concept; the SVG backend ignores it and warns.
+    if export == 'png':
+        cmd.append(f'--dpi={dpi}x{dpi}')
+    # --background paints the PNG canvas black (white=copper convention).
+    # gerbv's SVG backend never emits it as a drawable rect, so it is a
+    # no-op there and we deliberately leave the SVG canvas transparent for
+    # clean compositing.
+    cmd.append('--background=#000000')
+    cmd += [
         *foregrounds,
         '--border=0',
         *sources,
@@ -342,16 +390,24 @@ def rasterise(
     mapping: dict[str, str],
     output_dir: pathlib.Path,
     dpi: int = 1000,
-    layers: Iterable[str] | None = None
+    layers: Iterable[str] | None = None,
+    svg: bool = True,
 ) -> list[pathlib.Path]:
-    """Create an aligned PNG for each layer using gerbv
+    """Create an aligned PNG (and optionally SVG) for each layer using gerbv.
 
     Output PNGs are named ``{canonical_name}.png`` in ``output_dir``. The
     electrical drill mask is also aliased to ``via.png`` where possible so
     the render step can distinguish physical holes from electrical vertical
     connectors.
 
-    Returns the list of paths written.
+    When ``svg`` is true, a matching ``{canonical_name}.svg`` is also emitted
+    from the same aligned multi-file gerbv invocation, so the SVG shares the
+    PNG's coordinate window. gerbv flattens all loaded layers into one SVG and
+    tags the non-selected ones as transparent paths; those are stripped so each
+    SVG contains only its own geometry on a transparent canvas (ready to tint
+    and composite downstream). The white=copper convention matches the PNGs.
+
+    Returns the list of paths written (PNGs and SVGs).
     """
     check_gerbv()
     source_dir = pathlib.Path(source_dir)
@@ -393,6 +449,21 @@ def rasterise(
         log.info('    → %s×%s px (%s)',
                  size[0], size[1], _format_elapsed(time.monotonic() - started))
         written.append(out)
+
+        if svg:
+            svg_out = output_dir / f'{name}.svg'
+            svg_started = time.monotonic()
+            log.info('  rasterising %s.svg from %s', name, fname)
+            try:
+                _rasterise_one(sources, tgt_i, svg_out, dpi, export='svg')
+            except RuntimeError as e:
+                log.error('  ! %s', e)
+            else:
+                removed, kept = _strip_clear_paths(svg_out)
+                log.info('    → svg: stripped %d transparent paths, kept %d (%s)',
+                         removed, kept,
+                         _format_elapsed(time.monotonic() - svg_started))
+                written.append(svg_out)
 
     # Convenience aliases for downstream use:
     #   via.png   = preferred electrical connectivity mask
