@@ -26,6 +26,7 @@ dependencies = [
     "scipy>=1.10",
     "pillow>=9.0",
     "flask>=2.2",
+    "cairosvg>=2.7",
 ]
 
 [project.optional-dependencies]

@@ -2,10 +2,9 @@
 
 Detects which files in a directory map to which KiCad-style layers,
 writes a ``layers.json`` so the mapping is inspectable and editable,
-and rasterises each file with ``gerbv``.  The normal path estimates a
-common Gerber coordinate crop and renders every layer into that same
-origin/window, so modern KiCad/Altium layers stay aligned without producing
-enormous origin-to-board PNGs.
+and exports each file to SVG with ``gerbv``. PNG masks are then rasterised
+from those SVGs, so vector and raster outputs share the exact same geometry
+and avoid backend-specific offsets.
 
 gerbv is a runtime dependency only for this module; the rest of pcbnets
 works on any PNG masks regardless of how they were produced.
@@ -13,6 +12,7 @@ works on any PNG masks regardless of how they were produced.
 
 from __future__ import annotations
 
+import importlib
 import json
 import logging
 import pathlib
@@ -254,18 +254,11 @@ def _format_elapsed(seconds: float) -> str:
     return f'{minutes}m{secs:02d}s'
 
 
-# SVG export needs a different strategy from PNG.
-#
-# The PNG path loads every layer at once and selects one via foreground alpha
-# (FFFFFFFF vs FFFFFF00); gerbv's raster compositor honours that alpha, so the
-# non-selected layers render as invisible pixels and alignment is free.
-#
 # gerbv's Cairo *SVG* backend does NOT honour per-file foreground alpha: it
 # draws every loaded layer opaque and flattens them into one identical file
 # (every layer's SVG came out byte-for-byte the same, an OR-merge with no way
-# to tell paths apart). So the alpha trick cannot produce per-layer SVGs.
-#
-# Instead we render each layer's SVG from its *single* source file. A lone file
+# to tell paths apart). So we render each layer's SVG from its *single* source
+# file. A lone file
 # with no window makes gerbv emit an empty SVG (degenerate extent), so we pin an
 # explicit --origin and --window_inch derived once from the all-loaded render.
 # With identical origin+window, gerbv emits an identical viewBox and transform
@@ -410,62 +403,27 @@ def _optimise_svg(svg: str, precision: int = 3) -> tuple[str, int, int]:
     return '\n'.join(parts), n_in, len(plain) + len(transformed)
 
 
-def _rasterise_one(
+def _export_one_svg(
                    all_sources: list[pathlib.Path],
                    selected_src: int,
                    output: pathlib.Path,
-                   dpi: int,
-                   export: str = 'png',
-                   window: tuple[float, float, float, float] | None = None,
+                   window: tuple[float, float, float, float],
                    progress_interval: float = 30.0) -> None:
-    """Render one layer with gerbv.
-
-    Two modes:
-
-    * ``export='png'`` (window=None): loads *all* ``all_sources`` and selects
-      ``selected_src`` via foreground alpha. All layers share one origin/window
-      so the PNGs stay aligned. This is the original, unchanged behaviour.
-
-    * ``export='svg'`` (window given): loads *only* ``all_sources[selected_src]``
-      and pins ``--origin``/``--window_inch`` from ``window`` (origin_x,
-      origin_y, width_in, height_in). Single-file load avoids gerbv's SVG
-      flatten; the pinned window keeps every layer in the same frame.
-    """
-    if export == 'svg':
-        if window is None:
-            raise ValueError('svg export requires a window')
-        sources = [str(all_sources[selected_src])]
-        foregrounds = ['--foreground=#FFFFFFFF']
-    else:
-        sources = [str(x) for x in all_sources]
-        foregrounds = []
-        for i, _src in enumerate(all_sources):
-            if i == selected_src:
-                foregrounds.append('--foreground=#FFFFFFFF')
-            else:
-                foregrounds.append('--foreground=#FFFFFF00')
-
+    """Export one layer SVG with gerbv in the shared coordinate frame."""
+    ox, oy, w_in, h_in = window
     cmd = [
         'gerbv',
-        f'--export={export}',
+        '--export=svg',
         f'--output={output}',
-    ]
-    if export == 'png':
-        # --dpi is a raster concept; the SVG backend ignores it and warns.
-        cmd.append(f'--dpi={dpi}x{dpi}')
-    else:
-        ox, oy, w_in, h_in = window
         # Pin the frame so every single-file layer shares one viewBox/transform.
-        cmd.append(f'--origin={ox:.6f}x{oy:.6f}')
-        cmd.append(f'--window_inch={w_in:.6f}x{h_in:.6f}')
-    # --background paints the PNG canvas black (white=copper convention).
-    # gerbv's SVG backend never emits it as a drawable rect, so it is a no-op
-    # there and the SVG canvas stays transparent for clean compositing.
-    cmd.append('--background=#000000')
-    cmd += [
-        *foregrounds,
+        f'--origin={ox:.6f}x{oy:.6f}',
+        f'--window_inch={w_in:.6f}x{h_in:.6f}',
+        # gerbv's SVG backend does not emit a background rect; keep the SVG
+        # transparent and add the black mask background during SVG→PNG.
+        '--background=#000000',
+        '--foreground=#FFFFFFFF',
         '--border=0',
-        *sources,
+        str(all_sources[selected_src]),
     ]
     started = time.monotonic()
     next_progress = started + progress_interval
@@ -479,7 +437,7 @@ def _rasterise_one(
         now = time.monotonic()
         if now >= next_progress:
             log.info(
-                '    still rasterising %s in gerbv (%s elapsed)',
+                '    still exporting %s in gerbv (%s elapsed)',
                 output.name,
                 _format_elapsed(now - started),
             )
@@ -496,6 +454,28 @@ def _rasterise_one(
         )
     if stdout.strip():
         log.debug('gerbv stdout for %s:\n%s', output.name, stdout.strip())
+
+
+def _rasterise_svg_to_png(svg_path: pathlib.Path, png_path: pathlib.Path,
+                          window: tuple[float, float, float, float],
+                          dpi: int) -> tuple[int, int]:
+    """Rasterise an SVG layer to a black-background PNG at ``dpi``."""
+    cairosvg = importlib.import_module('cairosvg')
+    _ox, _oy, w_in, h_in = window
+    width = max(1, round(w_in * dpi))
+    height = max(1, round(h_in * dpi))
+    cairosvg.svg2png(
+        url=str(svg_path),
+        write_to=str(png_path),
+        output_width=width,
+        output_height=height,
+        background_color='black',
+    )
+    if not png_path.exists():
+        raise RuntimeError(
+            f'SVG rasterizer claimed success but {png_path} was not written'
+        )
+    return width, height
 
 
 def _write_drill_aliases(output_dir: pathlib.Path,
@@ -532,19 +512,17 @@ def rasterise(
     layers: Iterable[str] | None = None,
     svg: bool = True,
 ) -> list[pathlib.Path]:
-    """Create an aligned PNG (and optionally SVG) for each layer using gerbv.
+    """Create aligned SVGs and PNGs for each layer using gerbv plus CairoSVG.
 
     Output PNGs are named ``{canonical_name}.png`` in ``output_dir``. The
     electrical drill mask is also aliased to ``via.png`` where possible so
     the render step can distinguish physical holes from electrical vertical
     connectors.
 
-    When ``svg`` is true, a matching ``{canonical_name}.svg`` is also emitted
-    from the same aligned multi-file gerbv invocation, so the SVG shares the
-    PNG's coordinate window. gerbv flattens all loaded layers into one SVG and
-    tags the non-selected ones as transparent paths; those are stripped so each
-    SVG contains only its own geometry on a transparent canvas (ready to tint
-    and composite downstream). The white=copper convention matches the PNGs.
+    gerbv is only used to emit SVG. Each PNG is rasterised from that SVG, so
+    the raster and vector outputs share one geometry path. When ``svg`` is
+    false, the intermediate SVGs are removed after PNG creation. The
+    white=copper convention matches the SVGs; PNGs get a black background.
 
     Returns the list of paths written (PNGs and SVGs).
     """
@@ -558,10 +536,9 @@ def rasterise(
     if not targets:
         return []
 
-    # Pass 1: render each file.  In the normal modern-Gerber path every
-    # layer is rendered into the same origin/window, so CAD coordinates stay
-    # aligned while the output is cropped close to the board instead of to
-    # absolute origin 0,0.
+    # Pass 1: export each file as SVG in one shared origin/window, then
+    # rasterise those SVGs to PNG. This avoids small offsets between gerbv
+    # backend implementations because gerbv never writes PNG directly.
     written: list[pathlib.Path] = []
     rendered_sizes: dict[str, tuple[int, int]] = {}
     sources = []
@@ -578,7 +555,7 @@ def rasterise(
     # per-layer render is then pinned to this same origin/window and comes out
     # with an identical viewBox, so the layers register for compositing.
     svg_window: tuple[float, float, float, float] | None = None
-    if svg and sources:
+    if sources:
         probe = output_dir / '_window_probe.svg'
         try:
             _rasterise_all_svg(sources, probe)
@@ -586,8 +563,8 @@ def rasterise(
             log.info('  svg window: origin %.4f,%.4f  %.4f×%.4f in',
                      *svg_window)
         except RuntimeError as e:
-            log.error('  ! could not establish SVG window, skipping SVG: %s', e)
-            svg = False
+            log.error('  ! could not establish SVG window: %s', e)
+            return written
         finally:
             if probe.exists():
                 probe.unlink()
@@ -599,36 +576,39 @@ def rasterise(
             log.warning('  warning: %s not found (skipping %s)', src, name)
             continue
         out = output_dir / f'{name}.png'
+        svg_out = output_dir / f'{name}.svg'
         started = time.monotonic()
-        log.info('  rasterising %s.png from %s', name, fname)
+        log.info('  exporting %s.svg from %s', name, fname)
         try:
-            _rasterise_one(sources, tgt_i, out, dpi)
+            assert svg_window is not None
+            _export_one_svg(sources, tgt_i, svg_out, svg_window)
         except RuntimeError as e:
             log.error('  ! %s', e)
+            continue
+
+        raw = svg_out.read_text()
+        opt, n_in, n_out = _optimise_svg(raw)
+        svg_out.write_text(opt)
+        log.info('    → svg: %d→%d nodes, %.1f→%.1f MB',
+                 n_in, n_out, len(raw) / 1e6, len(opt) / 1e6)
+
+        log.info('  rasterising %s.png from %s.svg', name, name)
+        try:
+            _rasterise_svg_to_png(svg_out, out, svg_window, dpi)
+        except (ImportError, RuntimeError) as e:
+            log.error('  ! SVG→PNG rasterisation failed: %s', e)
+            if not svg:
+                svg_out.unlink(missing_ok=True)
             continue
         size = Image.open(out).size
         rendered_sizes[name] = size
         log.info('    → %s×%s px (%s)',
                  size[0], size[1], _format_elapsed(time.monotonic() - started))
         written.append(out)
-
-        if svg and svg_window is not None:
-            svg_out = output_dir / f'{name}.svg'
-            svg_started = time.monotonic()
-            log.info('  rasterising %s.svg from %s', name, fname)
-            try:
-                _rasterise_one(sources, tgt_i, svg_out, dpi,
-                               export='svg', window=svg_window)
-            except RuntimeError as e:
-                log.error('  ! %s', e)
-            else:
-                raw = svg_out.read_text()
-                opt, n_in, n_out = _optimise_svg(raw)
-                svg_out.write_text(opt)
-                log.info('    → svg: %d→%d nodes, %.1f→%.1f MB (%s)',
-                         n_in, n_out, len(raw) / 1e6, len(opt) / 1e6,
-                         _format_elapsed(time.monotonic() - svg_started))
-                written.append(svg_out)
+        if svg:
+            written.append(svg_out)
+        else:
+            svg_out.unlink(missing_ok=True)
 
     # Convenience aliases for downstream use:
     #   via.png   = preferred electrical connectivity mask
