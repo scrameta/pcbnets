@@ -332,6 +332,84 @@ def _rasterise_all_svg(all_sources: list[pathlib.Path],
         )
 
 
+# gerbv emits one <path> per aperture flash/draw — tens of thousands per layer.
+# Browser pan/zoom cost scales with DOM node count, so a dense layer stutters
+# and forces a raster tile+mipmap pyramid. Collapsing all same-styled paths into
+# one <path> each drops node count ~1000x (e.g. 22k -> ~16), which makes a single
+# vector layer smooth enough to replace the whole tile pyramid, with resolution-
+# independent zoom. Verified geometrically identical to gerbv output (differences
+# limited to sub-pixel edge anti-aliasing).
+#
+# gerbv mixes two coordinate spaces: filled flashes are pre-baked into point
+# space (no transform); stroked draws are in inch space with a per-path
+# matrix(72,...) transform. They must stay separate — fills outside, strokes
+# inside one hoisted <g transform> — or the fills get double-transformed.
+_OPT_PATH_RE = re.compile(
+    r'<path\s+style="([^"]*)"\s+d="([^"]*?)"\s*'
+    r'(?:transform="(matrix\([^)]*\))")?\s*/>',
+    re.DOTALL)
+_OPT_HDR_RE = re.compile(r'<svg\b[^>]*>')
+_OPT_VB_RE = re.compile(r'viewBox="([^"]*)"')
+_OPT_W_RE = re.compile(r'width="([\d.]+)pt"')
+_OPT_H_RE = re.compile(r'height="([\d.]+)pt"')
+_OPT_NUM_RE = re.compile(r'-?\d+\.\d+')
+
+
+def _optimise_svg(svg: str, precision: int = 3) -> tuple[str, int, int]:
+    """Collapse gerbv per-aperture <path> nodes into one <path> per style.
+
+    Returns ``(optimised_svg, nodes_in, nodes_out)``. Geometry is unchanged;
+    only paint-order within a style and coordinate precision differ, both
+    below the visible threshold for a copper viewer.
+    """
+    hdr_m = _OPT_HDR_RE.search(svg)
+    if not hdr_m:
+        return svg, 0, 0
+    hdr = hdr_m.group(0)
+    vb_m = _OPT_VB_RE.search(hdr)
+    w_m = _OPT_W_RE.search(hdr)
+    h_m = _OPT_H_RE.search(hdr)
+    vb = vb_m.group(1) if vb_m else '0 0 0 0'
+
+    transformed: dict[str, list[str]] = {}
+    plain: dict[str, list[str]] = {}
+    the_matrix: str | None = None
+    n_in = 0
+    for m in _OPT_PATH_RE.finditer(svg):
+        style, d, mat = m.group(1).strip(), m.group(2), m.group(3)
+        n_in += 1
+        if mat:
+            the_matrix = mat
+            transformed.setdefault(style, []).append(d)
+        else:
+            plain.setdefault(style, []).append(d)
+
+    def rnd(t: str) -> str:
+        return _OPT_NUM_RE.sub(
+            lambda x: f'{float(x.group()):.{precision}f}', t)
+
+    parts = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{vb}"'
+             + (f' width="{w_m.group(1)}pt"' if w_m else '')
+             + (f' height="{h_m.group(1)}pt"' if h_m else '') + '>']
+    for style, ds in plain.items():
+        # gerbv emits each filled flash/region as a separate evenodd path.
+        # Concatenating many evenodd subpaths into one `d` makes the rule count
+        # crossings ACROSS formerly-separate shapes, so overlaps cancel and tear
+        # phantom holes in copper pours (power/ground planes lose ~4% fill).
+        # nonzero winding unions overlapping same-wound fills while still
+        # subtracting opposite-wound clearance holes — verified pixel-identical
+        # to gerbv's per-path output on solid planes.
+        merged_style = style.replace('fill-rule:evenodd', 'fill-rule:nonzero')
+        parts.append(f'<path style="{merged_style}" d="{rnd(" ".join(ds))}"/>')
+    if transformed:
+        parts.append(f'<g transform="{the_matrix}">')
+        for style, ds in transformed.items():
+            parts.append(f'<path style="{style}" d="{rnd(" ".join(ds))}"/>')
+        parts.append('</g>')
+    parts.append('</svg>')
+    return '\n'.join(parts), n_in, len(plain) + len(transformed)
+
+
 def _rasterise_one(
                    all_sources: list[pathlib.Path],
                    selected_src: int,
@@ -544,8 +622,11 @@ def rasterise(
             except RuntimeError as e:
                 log.error('  ! %s', e)
             else:
-                npaths = svg_out.read_text().count('<path')
-                log.info('    → svg: %d paths (%s)', npaths,
+                raw = svg_out.read_text()
+                opt, n_in, n_out = _optimise_svg(raw)
+                svg_out.write_text(opt)
+                log.info('    → svg: %d→%d nodes, %.1f→%.1f MB (%s)',
+                         n_in, n_out, len(raw) / 1e6, len(opt) / 1e6,
                          _format_elapsed(time.monotonic() - svg_started))
                 written.append(svg_out)
 
