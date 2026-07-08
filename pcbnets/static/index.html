@@ -1525,8 +1525,68 @@ function alphaTintedImage(img, colour, alpha, outW, outH, sourceLevel) {
   return off;
 }
 
+function drawSvgCropToOffscreen(img, p, mirror) {
+  const r = tileScreenRect(p);
+  if (!rectVisible(r)) return null;
+  const crop = currentCropForTile({...p, x: 0, y: 0});
+  const off = document.createElement('canvas');
+  off.width = Math.max(1, Math.ceil(r.w * renderDpr));
+  off.height = Math.max(1, Math.ceil(r.h * renderDpr));
+  const octx = off.getContext('2d');
+  octx.setTransform(renderDpr, 0, 0, renderDpr, 0, 0);
+  if (mirror) {
+    octx.translate(r.w, 0);
+    octx.scale(-1, 1);
+  }
+  octx.drawImage(img, crop.x, crop.y, crop.w, crop.h, 0, 0, r.w, r.h);
+  return {canvas: off, rect: r};
+}
+
+function drawSvgAlphaToTile(ctx, img, p, mirror, colour, alpha) {
+  const rendered = drawSvgCropToOffscreen(img, p, mirror);
+  if (!rendered) return;
+  const {canvas, rect} = rendered;
+  const octx = canvas.getContext('2d');
+  const [r, g, b] = parseHexColour(colour);
+  octx.setTransform(1, 0, 0, 1, 0, 0);
+  octx.globalCompositeOperation = 'source-in';
+  octx.globalAlpha = alpha;
+  octx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+  octx.fillRect(0, 0, canvas.width, canvas.height);
+  octx.globalAlpha = 1;
+  octx.globalCompositeOperation = 'source-over';
+
+  ctx.drawImage(canvas, rect.x, rect.y, canvas.width / renderDpr, canvas.height / renderDpr);
+}
+
+function drawSvgMaskFilmToTile(ctx, img, p, mirror, colour, alpha) {
+  const rendered = drawSvgCropToOffscreen(img, p, mirror);
+  if (!rendered) return;
+  const {canvas, rect} = rendered;
+  const opening = canvas;
+  const [r, g, b] = parseHexColour(colour);
+
+  const film = document.createElement('canvas');
+  film.width = opening.width;
+  film.height = opening.height;
+  const fctx = film.getContext('2d');
+  fctx.globalAlpha = alpha;
+  fctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+  fctx.fillRect(0, 0, film.width, film.height);
+  fctx.globalAlpha = 1;
+  fctx.globalCompositeOperation = 'destination-out';
+  fctx.drawImage(opening, 0, 0);
+  fctx.globalCompositeOperation = 'source-over';
+
+  ctx.drawImage(film, rect.x, rect.y, film.width / renderDpr, film.height / renderDpr);
+}
+
 function drawAlphaTintedSvg(ctx, img, p, mirror, colour, alpha) {
   const crop = currentCropForTile({...p, x: 0, y: 0});
+  if (img._pcbnetsVector) {
+    drawSvgAlphaToTile(ctx, img, p, mirror, colour, alpha);
+    return;
+  }
   const off = alphaTintedImage(img, colour, alpha, p.w, p.h, 1);
   drawImageToTile(ctx, off, crop, p, mirror, 1);
 }
@@ -1595,9 +1655,7 @@ function drawSolderMaskFilm(ctx, openingImg, p, mirror, colour, alpha) {
   const name = openingImg && openingImg._pcbnetsName;
   const svg = name ? vectorImageStatus(name) : {state: 'missing', img: null};
   if (svg.img) {
-    const crop = currentCropForTile({...p, x: 0, y: 0});
-    const film = solderMaskFilm(svg.img, p, colour, alpha, 1);
-    drawImageToTile(ctx, film, crop, p, mirror, 1);
+    drawSvgMaskFilmToTile(ctx, svg.img, p, mirror, colour, alpha);
     return;
   }
   if (svg.state === 'pending') return;

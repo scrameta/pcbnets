@@ -705,6 +705,14 @@ def _write_build(build_dir: pathlib.Path,
     logging.getLogger('pcbnets.render').info('  wrote %s/grid.png, idmap.png, meta.json', build_dir)
 
 
+def _optimise_svg_text(text: str) -> str:
+    """Apply safe, dependency-free minification to generated SVG text."""
+    text = re.sub(r'<!--.*?-->', '', text, flags=re.DOTALL)
+    text = re.sub(r'>\s+<', '><', text)
+    text = re.sub(r'\s{2,}', ' ', text)
+    return text.strip() + '\n'
+
+
 def _copy_visual_svgs(src_dir: pathlib.Path,
                       build_dir: pathlib.Path,
                       layers: Iterable[str],
@@ -731,9 +739,22 @@ def _copy_visual_svgs(src_dir: pathlib.Path,
         if not src.is_file():
             continue
         dst = build_dir / f'{name}.svg'
-        shutil.copy2(src, dst)
+        original_size = src.stat().st_size
+        try:
+            text = src.read_text()
+            optimised = _optimise_svg_text(text)
+            dst.write_text(optimised)
+            shutil.copystat(src, dst)
+            saved = original_size - dst.stat().st_size
+        except UnicodeDecodeError:
+            shutil.copy2(src, dst)
+            saved = 0
         written.append(dst)
-        log.info('  copied %s.svg', name)
+        if saved > 0:
+            log.info('  copied optimised %s.svg (saved %.1f KiB)',
+                     name, saved / 1024)
+        else:
+            log.info('  copied %s.svg', name)
     return written
 
 
