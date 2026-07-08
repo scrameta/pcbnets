@@ -1553,11 +1553,22 @@ function vectorBoardRect(name, img, p) {
     w: svgBox.w / 256,
     h: svgBox.h / 256,
   };
+  const svgCentre = {
+    x: (svgNorm.x + svgNorm.w / 2) * p.w,
+    y: (svgNorm.y + svgNorm.h / 2) * p.h,
+  };
+  const targetCentre = {
+    x: target.x + target.w / 2,
+    y: target.y + target.h / 2,
+  };
+  // Only translate the SVG canvas. Scaling to bbox dimensions can distort the
+  // SVG relative to itself when drill holes/keepouts are present in one source
+  // but not the other, so preserve the original board-scale SVG geometry.
   const rect = {
-    x: target.x - svgNorm.x * target.w / svgNorm.w,
-    y: target.y - svgNorm.y * target.h / svgNorm.h,
-    w: target.w / svgNorm.w,
-    h: target.h / svgNorm.h,
+    x: targetCentre.x - svgCentre.x,
+    y: targetCentre.y - svgCentre.y,
+    w: p.w,
+    h: p.h,
   };
   vectorAlignmentCache.set(key, rect);
   return rect;
