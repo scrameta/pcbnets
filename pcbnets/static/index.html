@@ -245,6 +245,7 @@ let tileGrids = new Map([[1, [16, 16]], [2, [8, 8]], [4, [4, 4]], [8, [2, 2]]]);
 let tilePathTemplate = 'mips/{level}/tiles/{name}_{tx}_{ty}.png';
 
 const imageMipCache = new Map();       // key: name:level -> HTMLImageElement | Promise | null
+const vectorImageCache = new Map();    // key: name -> HTMLImageElement | Promise | null
 const idmapMipCache = new Map();       // level -> {level, width, height, data} | {promise}
 const tileImageCache = new Map();      // key: name:level:tx:ty -> HTMLImageElement | Promise | null
 const processedTileCache = new Map();  // key: mode:name:level:tx:ty:colour:alpha -> canvas
@@ -320,6 +321,10 @@ function mipPath(name, level) {
     .replaceAll('{level}', String(level))
     .replaceAll('{name}', name);
   return path.startsWith('./') || path.startsWith('/') ? path : './' + path;
+}
+
+function vectorPath(name) {
+  return './' + name + '.svg';
 }
 
 function isTiledLevel(level) {
@@ -432,6 +437,38 @@ function initialMipLevel() {
 
 function layerRef(name) {
   return {_pcbnetsName: name, _pcbnetsPlaceholder: true};
+}
+
+function loadedVectorImage(name) {
+  const cached = vectorImageCache.get(name);
+  return cached instanceof HTMLImageElement ? cached : null;
+}
+
+function requestVectorImage(name) {
+  if (!name) return null;
+  const cached = vectorImageCache.get(name);
+  if (cached instanceof HTMLImageElement || cached === null) return cached;
+  if (cached) return null;
+
+  const promise = loadImage(vectorPath(name))
+    .then(img => {
+      img._pcbnetsName = name;
+      img._pcbnetsVector = true;
+      vectorImageCache.set(name, img);
+      redraw();
+      return img;
+    })
+    .catch(() => {
+      vectorImageCache.set(name, null);
+      redraw();
+      return null;
+    });
+  vectorImageCache.set(name, promise);
+  return null;
+}
+
+function resolveVectorImage(name) {
+  return loadedVectorImage(name) || requestVectorImage(name);
 }
 
 function loadedImageMip(name, level) {
@@ -1324,15 +1361,15 @@ function drawDisplay() {
 
       if (maskImg) {
         fillTile(ctx, p, mirror, '#050505');
-        drawTintedGridCrop(ctx, name, p, '#c79a32', 0.92, mirror); // copper: gold
+        drawTintedLayer(ctx, name, p, '#c79a32', 0.92, mirror); // copper: gold
         drawSolderMaskFilm(ctx, maskImg, p, mirror, '#123d25', 0.94);
       } else {
         fillTile(ctx, p, mirror, '#123d25');
-        drawTintedGridCrop(ctx, name, p, '#c79a32', 0.88, mirror); // copper: gold
+        drawTintedLayer(ctx, name, p, '#c79a32', 0.88, mirror); // copper: gold
       }
     } else {
       fillTile(ctx, p, mirror, '#050505');
-      drawTintedGridCrop(ctx, name, p, '#a9b0b8', 0.95, mirror); // inner copper: silver
+      drawTintedLayer(ctx, name, p, '#a9b0b8', 0.95, mirror); // inner copper: silver
     }
   }
 }
@@ -1442,6 +1479,19 @@ function drawTintedGridCrop(ctx, name, p, colour, alpha, mirror) {
   }
 }
 
+function drawTintedLayer(ctx, name, p, colour, alpha, mirror) {
+  const svgImg = resolveVectorImage(name);
+  if (svgImg instanceof HTMLImageElement) {
+    drawAlphaTintedSvg(ctx, svgImg, p, mirror, colour, alpha);
+    return;
+  }
+
+  // Backward-compatible fallback for older build directories that only include
+  // PNG atlases/mips. New builds copy the source SVG layers and take the path
+  // above, avoiding PNG visual tiles entirely.
+  drawTintedGridCrop(ctx, name, p, colour, alpha, mirror);
+}
+
 function imageCacheKey(img, fallbackName, sourceLevel) {
   // Do not key only by img.src: generated/lazy layer references and some
   // browser states can leave src empty or non-unique. Include the logical
@@ -1481,8 +1531,20 @@ function alphaTintedImage(img, colour, alpha, outW, outH, sourceLevel) {
   return off;
 }
 
+function drawAlphaTintedSvg(ctx, img, p, mirror, colour, alpha) {
+  const crop = currentCropForTile({...p, x: 0, y: 0});
+  const off = alphaTintedImage(img, colour, alpha, p.w, p.h, 1);
+  drawImageToTile(ctx, off, crop, p, mirror, 1);
+}
+
 function drawAlphaTintedImage(ctx, img, p, mirror, colour, alpha) {
   const name = img && img._pcbnetsName;
+  const svgImg = name ? resolveVectorImage(name) : null;
+  if (svgImg instanceof HTMLImageElement) {
+    drawAlphaTintedSvg(ctx, svgImg, p, mirror, colour, alpha);
+    return;
+  }
+
   const desiredLevel = currentMipLevel();
   const crop = currentCropForTile({...p, x: 0, y: 0});
 
@@ -1536,6 +1598,14 @@ function solderMaskFilm(openingImg, p, colour, alpha, sourceLevel) {
 
 function drawSolderMaskFilm(ctx, openingImg, p, mirror, colour, alpha) {
   const name = openingImg && openingImg._pcbnetsName;
+  const svgImg = name ? resolveVectorImage(name) : null;
+  if (svgImg instanceof HTMLImageElement) {
+    const crop = currentCropForTile({...p, x: 0, y: 0});
+    const film = solderMaskFilm(svgImg, p, colour, alpha, 1);
+    drawImageToTile(ctx, film, crop, p, mirror, 1);
+    return;
+  }
+
   const desiredLevel = currentMipLevel();
   const crop = currentCropForTile({...p, x: 0, y: 0});
 

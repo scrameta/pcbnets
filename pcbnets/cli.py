@@ -705,6 +705,38 @@ def _write_build(build_dir: pathlib.Path,
     logging.getLogger('pcbnets.render').info('  wrote %s/grid.png, idmap.png, meta.json', build_dir)
 
 
+def _copy_visual_svgs(src_dir: pathlib.Path,
+                      build_dir: pathlib.Path,
+                      layers: Iterable[str],
+                      meta: dict) -> list[pathlib.Path]:
+    """Copy source SVG layer artwork used by the web viewer.
+
+    The interactive viewer still relies on the generated PNG idmap and idmap
+    mips/tiles for picking and highlighting, but visual copper, mask, silk, and
+    hole artwork can be drawn directly from the white-on-transparent SVGs.
+    """
+    names: set[str] = set(layers)
+    names.update(meta.get('silk_layers', []))
+    names.update(meta.get('mask_layers', []))
+    names.update(meta.get('drill_layers', []))
+    names.update(meta.get('hole_layers', []))
+    if meta.get('drill_name'):
+        names.add(str(meta['drill_name']))
+    names.add('drill')
+
+    written: list[pathlib.Path] = []
+    log = logging.getLogger('pcbnets.render')
+    for name in sorted(n for n in names if n):
+        src = src_dir / f'{name}.svg'
+        if not src.is_file():
+            continue
+        dst = build_dir / f'{name}.svg'
+        shutil.copy2(src, dst)
+        written.append(dst)
+        log.info('  copied %s.svg', name)
+    return written
+
+
 def _write_mips_and_tiles(build_dir: pathlib.Path,
                            progress: _Progress | None = None) -> None:
     """Create all progressive-loading assets expected by the web viewer."""
@@ -785,6 +817,7 @@ def cmd_render(args: argparse.Namespace) -> int:
     )
     progress.step('writing build artifacts')
     _write_build(build_dir, grid, idmap, meta, masks)
+    _copy_visual_svgs(directory, build_dir, layers, meta)
     _write_mips_and_tiles(build_dir, progress=progress)
     progress.finish()
     return 0
@@ -1487,20 +1520,29 @@ def _bundle_file_names(build_dir: pathlib.Path) -> list[str]:
     """List build artefacts needed by the static HTML viewer."""
     names = _validate_build_dir(build_dir)
 
-    # The viewer always needs the generated grid/id map/metadata.  Visual
-    # overlay PNGs are optional and named in meta.json, but include the known
-    # layer names as a fallback for older build dirs.
+    # The viewer always needs the generated grid/id map/metadata.  Visual SVGs
+    # are preferred for copper/mask/silk artwork; visual overlay PNGs remain as
+    # a fallback for older build dirs.
     visual_names: set[str] = set()
     try:
         meta = json.loads((build_dir / 'meta.json').read_text())
+        visual_names.update(meta.get('layers', []))
         visual_names.update(meta.get('silk_layers', []))
         visual_names.update(meta.get('mask_layers', []))
+        visual_names.update(meta.get('drill_layers', []))
+        visual_names.update(meta.get('hole_layers', []))
+        if meta.get('drill_name'):
+            visual_names.add(str(meta['drill_name']))
     except Exception:
         # Keep packaging useful even if metadata has a non-fatal issue.
         pass
     visual_names.update((*SILK_LAYERS, *MASK_LAYERS))
+    visual_names.add('drill')
 
     for visual_name in sorted(visual_names):
+        svg = f'{visual_name}.svg'
+        if (build_dir / svg).exists():
+            names.append(svg)
         png = f'{visual_name}.png'
         if (build_dir / png).exists():
             names.append(png)
