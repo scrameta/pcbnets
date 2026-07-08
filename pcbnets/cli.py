@@ -681,6 +681,36 @@ def _run_pipeline(directory: pathlib.Path,
     return grid, idmap, meta, masks, report
 
 
+
+def _optimise_svg_text(text: str) -> str:
+    """Apply a conservative, dependency-free SVG minification pass.
+
+    Viewer SVGs are drawn into the same board-space rectangle as the PNG
+    idmap.  Some exporters round SVG width/height differently from the raster
+    PNG dimensions; the browser's default ``preserveAspectRatio="xMidYMid
+    meet"`` then letterboxes the drawing, which shows up as a systematic
+    offset against the idmap.  Disabling aspect-ratio preservation keeps the
+    SVG viewport mapped exactly onto the idmap rectangle.
+    """
+    text = re.sub(r'<!--.*?-->', '', text, flags=re.S)
+    text = re.sub(r'(<svg\b(?![^>]*\bpreserveAspectRatio=))',
+                  r'\1 preserveAspectRatio="none"', text, count=1, flags=re.I)
+    text = re.sub(r'>\s+<', '><', text)
+    text = re.sub(r'\s{2,}', ' ', text)
+    return text.strip() + '\n'
+
+def _copy_visual_svgs(src_dir: pathlib.Path, build_dir: pathlib.Path, names: Iterable[str]) -> None:
+    log = logging.getLogger('pcbnets.render')
+    for name in sorted(set(names)):
+        src = src_dir / f'{name}.svg'
+        if not src.exists():
+            continue
+        dst = build_dir / f'{name}.svg'
+        raw = src.read_text(encoding='utf-8')
+        optimised = _optimise_svg_text(raw)
+        dst.write_text(optimised, encoding='utf-8')
+        log.info('  wrote %s.svg (%.1f%%)', name, len(optimised) * 100 / max(1, len(raw)))
+
 def _write_build(build_dir: pathlib.Path,
                  grid: Image.Image,
                  idmap: Image.Image,
@@ -785,6 +815,9 @@ def cmd_render(args: argparse.Namespace) -> int:
     )
     progress.step('writing build artifacts')
     _write_build(build_dir, grid, idmap, meta, masks)
+    svg_names = set(layers) | set(SILK_LAYERS) | set(MASK_LAYERS) | {'PTH', 'NPTH', drill_name, via_name}
+    progress.detail('copying visual SVGs when available')
+    _copy_visual_svgs(directory, build_dir, svg_names)
     _write_mips_and_tiles(build_dir, progress=progress)
     progress.finish()
     return 0
@@ -1487,23 +1520,31 @@ def _bundle_file_names(build_dir: pathlib.Path) -> list[str]:
     """List build artefacts needed by the static HTML viewer."""
     names = _validate_build_dir(build_dir)
 
-    # The viewer always needs the generated grid/id map/metadata.  Visual
-    # overlay PNGs are optional and named in meta.json, but include the known
-    # layer names as a fallback for older build dirs.
+    # The viewer prefers visual SVGs when present and keeps generated PNG
+    # mips/tiles for idmap picking/highlighting and legacy visual fallback.
     visual_names: set[str] = set()
     try:
         meta = json.loads((build_dir / 'meta.json').read_text())
+        visual_names.update(meta.get('layers', []))
         visual_names.update(meta.get('silk_layers', []))
         visual_names.update(meta.get('mask_layers', []))
+        visual_names.update(meta.get('drill_layers', []))
+        visual_names.update(meta.get('hole_layers', []))
+        if meta.get('drill_name'):
+            visual_names.add(str(meta['drill_name']))
     except Exception:
         # Keep packaging useful even if metadata has a non-fatal issue.
         pass
     visual_names.update((*SILK_LAYERS, *MASK_LAYERS))
+    visual_names.add('drill')
 
     for visual_name in sorted(visual_names):
         png = f'{visual_name}.png'
         if (build_dir / png).exists():
             names.append(png)
+        svg = f'{visual_name}.svg'
+        if (build_dir / svg).exists():
+            names.append(svg)
 
     return names
 
