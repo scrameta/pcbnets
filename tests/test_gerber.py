@@ -26,6 +26,48 @@ def touch(p: pathlib.Path) -> None:
     p.write_text('')
 
 
+def test_svg_optimise_preserves_evenodd_plane_paths():
+    """Evenodd plane paths must not be merged into a solid white fill."""
+    from pcbnets.gerber import _optimise_svg
+
+    svg = (
+        '<svg width="10pt" height="10pt" viewBox="0 0 10 10">'
+        '<path style="fill:#ffffff;fill-rule:evenodd" '
+        'd="M0 0 H10 V10 H0 Z M4 4 H6 V6 H4 Z"/>'
+        '<path style="fill:#ffffff;fill-rule:evenodd" '
+        'd="M1 1 H2 V2 H1 Z"/>'
+        '</svg>'
+    )
+
+    optimised, nodes_in, nodes_out = _optimise_svg(svg)
+
+    assert nodes_in == 2
+    assert nodes_out == 2
+    assert optimised.count('<path style="fill:#ffffff;fill-rule:evenodd"') == 2
+    assert 'fill-rule:nonzero' not in optimised
+
+
+def test_svg_optimise_preserves_plain_compound_fill_paths():
+    """Plain compound fills such as annular rings must stay hollow."""
+    from pcbnets.gerber import _optimise_svg
+
+    svg = (
+        '<svg width="10pt" height="10pt" viewBox="0 0 10 10">'
+        '<path style="fill:#ffffff" '
+        'd="M0 0 H10 V10 H0 Z M4 4 H6 V6 H4 Z"/>'
+        '<path style="fill:#ffffff" '
+        'd="M1 1 H2 V2 H1 Z"/>'
+        '</svg>'
+    )
+
+    optimised, nodes_in, nodes_out = _optimise_svg(svg)
+
+    assert nodes_in == 2
+    assert nodes_out == 2
+    assert optimised.count('<path style="fill:#ffffff"') == 2
+    assert 'M0 0 H10 V10 H0 Z M4 4 H6 V6 H4 Z M1 1' not in optimised
+
+
 def test_detect_kicad_modern_4_layer(tmp_path):
     """KiCad-style filenames with underscores."""
     for f in ['myboard-F_Cu.gbr', 'myboard-In1_Cu.gbr',

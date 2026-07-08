@@ -385,22 +385,22 @@ def _optimise_svg(svg: str, precision: int = 3) -> tuple[str, int, int]:
              + (f' width="{w_m.group(1)}pt"' if w_m else '')
              + (f' height="{h_m.group(1)}pt"' if h_m else '') + '>']
     for style, ds in plain.items():
-        # gerbv emits each filled flash/region as a separate evenodd path.
-        # Concatenating many evenodd subpaths into one `d` makes the rule count
-        # crossings ACROSS formerly-separate shapes, so overlaps cancel and tear
-        # phantom holes in copper pours (power/ground planes lose ~4% fill).
-        # nonzero winding unions overlapping same-wound fills while still
-        # subtracting opposite-wound clearance holes — verified pixel-identical
-        # to gerbv's per-path output on solid planes.
-        merged_style = style.replace('fill-rule:evenodd', 'fill-rule:nonzero')
-        parts.append(f'<path style="{merged_style}" d="{rnd(" ".join(ds))}"/>')
+        # Keep gerbv's per-path fill semantics intact.  Plain filled paths can
+        # contain compound geometry such as plane anti-pads and annular rings;
+        # concatenating those paths changes how both evenodd and implicit
+        # nonzero winding are evaluated across formerly independent shapes.
+        # That can fill clearances or hollow circles, so only transformed stroke
+        # paths are collapsed below.
+        for d in ds:
+            parts.append(f'<path style="{style}" d="{rnd(d)}"/>')
     if transformed:
         parts.append(f'<g transform="{the_matrix}">')
         for style, ds in transformed.items():
             parts.append(f'<path style="{style}" d="{rnd(" ".join(ds))}"/>')
         parts.append('</g>')
     parts.append('</svg>')
-    return '\n'.join(parts), n_in, len(plain) + len(transformed)
+    n_out = sum(len(ds) for ds in plain.values()) + len(transformed)
+    return '\n'.join(parts), n_in, n_out
 
 
 def _export_one_svg(
