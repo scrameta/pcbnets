@@ -467,8 +467,14 @@ function requestVectorImage(name) {
   return null;
 }
 
-function resolveVectorImage(name) {
-  return loadedVectorImage(name) || requestVectorImage(name);
+function vectorImageStatus(name) {
+  if (!name) return {state: 'missing', img: null};
+  const cached = vectorImageCache.get(name);
+  if (cached instanceof HTMLImageElement) return {state: 'loaded', img: cached};
+  if (cached === null) return {state: 'missing', img: null};
+  if (cached) return {state: 'pending', img: null};
+  requestVectorImage(name);
+  return {state: 'pending', img: null};
 }
 
 function loadedImageMip(name, level) {
@@ -648,24 +654,12 @@ function getIdmapForLevel(desiredLevel) {
 }
 
 function preloadProgressiveMips() {
-  const layers = [];
-  if (meta) {
-    layers.push(...((meta.silk_layers) || []));
-    layers.push(...((meta.mask_layers) || []));
-    layers.push(...((meta.drill_layers) || []));
-  }
-  // Drill is not always listed in meta.json, but older/current exports often
-  // provide drill.png or mips/.../drill.png. Include it as an opportunistic
-  // keepout source; failed optional loads are cached as null.
-  layers.push('drill');
-  const names = [...new Set(['grid', ...layers])];
   const order = PROGRESSIVE_MIP_ORDER.filter(l => mipLevels.includes(l));
 
   let delay = 0;
   for (const level of order) {
     setTimeout(() => {
       if (!isTiledLevel(level)) {
-        for (const name of names) requestImageMip(name, level);
         requestIdmapMip(level);
       }
     }, delay);
@@ -688,19 +682,18 @@ async function init() {
 
   const firstLevel = initialMipLevel();
 
-  // Fast first paint: load the coarsest useful atlas and idmap first. The
-  // viewer can display and pick immediately, then progressively sharpens as
-  // finer mip levels arrive.
-  const firstLoads = [loadImageMipNow('grid', firstLevel)];
+  // Fast first pick/highlight support: load the coarsest useful idmap first.
+  // Visual artwork is requested from SVG layers during draw; PNG grid/mips are
+  // only fallback sources for old builds without SVGs.
+  const needsInitialGrid = !meta || !meta.placements;
+  const firstLoads = needsInitialGrid ? [loadImageMipNow('grid', firstLevel)] : [];
   if (mipLevels.includes(firstLevel)) firstLoads.push(loadIdmapMipNow(firstLevel));
 
   const loaded = await Promise.allSettled(firstLoads);
-  const firstGrid = loaded[0].status === 'fulfilled' ? loaded[0].value : null;
+  const firstGrid = needsInitialGrid && loaded[0].status === 'fulfilled' ? loaded[0].value : null;
   if (firstGrid) {
-    // Keep full-resolution atlas dimensions from meta/placements; the mip image
-    // itself is only a drawing source.
     imageMipCache.set('grid:' + firstLevel, firstGrid);
-  } else {
+  } else if (needsInitialGrid) {
     // Last-resort fallback for old exports with no mips directory.
     const gridImg = await loadImageMipNow('grid', 1);
     gridSrcCache = gridImg;
@@ -1480,11 +1473,12 @@ function drawTintedGridCrop(ctx, name, p, colour, alpha, mirror) {
 }
 
 function drawTintedLayer(ctx, name, p, colour, alpha, mirror) {
-  const svgImg = resolveVectorImage(name);
-  if (svgImg instanceof HTMLImageElement) {
-    drawAlphaTintedSvg(ctx, svgImg, p, mirror, colour, alpha);
+  const svg = vectorImageStatus(name);
+  if (svg.img) {
+    drawAlphaTintedSvg(ctx, svg.img, p, mirror, colour, alpha);
     return;
   }
+  if (svg.state === 'pending') return;
 
   // Backward-compatible fallback for older build directories that only include
   // PNG atlases/mips. New builds copy the source SVG layers and take the path
@@ -1539,11 +1533,12 @@ function drawAlphaTintedSvg(ctx, img, p, mirror, colour, alpha) {
 
 function drawAlphaTintedImage(ctx, img, p, mirror, colour, alpha) {
   const name = img && img._pcbnetsName;
-  const svgImg = name ? resolveVectorImage(name) : null;
-  if (svgImg instanceof HTMLImageElement) {
-    drawAlphaTintedSvg(ctx, svgImg, p, mirror, colour, alpha);
+  const svg = name ? vectorImageStatus(name) : {state: 'missing', img: null};
+  if (svg.img) {
+    drawAlphaTintedSvg(ctx, svg.img, p, mirror, colour, alpha);
     return;
   }
+  if (svg.state === 'pending') return;
 
   const desiredLevel = currentMipLevel();
   const crop = currentCropForTile({...p, x: 0, y: 0});
@@ -1598,13 +1593,14 @@ function solderMaskFilm(openingImg, p, colour, alpha, sourceLevel) {
 
 function drawSolderMaskFilm(ctx, openingImg, p, mirror, colour, alpha) {
   const name = openingImg && openingImg._pcbnetsName;
-  const svgImg = name ? resolveVectorImage(name) : null;
-  if (svgImg instanceof HTMLImageElement) {
+  const svg = name ? vectorImageStatus(name) : {state: 'missing', img: null};
+  if (svg.img) {
     const crop = currentCropForTile({...p, x: 0, y: 0});
-    const film = solderMaskFilm(svgImg, p, colour, alpha, 1);
+    const film = solderMaskFilm(svg.img, p, colour, alpha, 1);
     drawImageToTile(ctx, film, crop, p, mirror, 1);
     return;
   }
+  if (svg.state === 'pending') return;
 
   const desiredLevel = currentMipLevel();
   const crop = currentCropForTile({...p, x: 0, y: 0});
