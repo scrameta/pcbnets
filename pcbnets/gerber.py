@@ -254,43 +254,82 @@ def _format_elapsed(seconds: float) -> str:
     return f'{minutes}m{secs:02d}s'
 
 
-# gerbv's Cairo SVG backend renders every loaded file into one flattened
-# <svg>, tagging the non-selected layers (foreground alpha 00) as fully
-# transparent paths rather than omitting them. It also never emits the
-# --background as a drawable rect, so SVG output is white-on-transparent
-# regardless of the PNG background hack. For a per-layer asset we want only
-# the selected layer's geometry and a clean transparent canvas (correct for
-# compositing later), so we drop the zero-opacity paths post-export.
+# SVG export needs a different strategy from PNG.
 #
-# Both path kinds Cairo emits are matched:
-#   filled flashes:   " stroke:none;fill-rule:evenodd;fill:...;fill-opacity:0;"
-#   stroked contours: "fill:none;...;stroke:...;stroke-opacity:0;..."
-# The negative lookahead keeps partial opacities (e.g. 0.5) untouched.
-_SVG_PATH_RE = re.compile(r'<path\b[^>]*/>', re.DOTALL)
-_SVG_CLEAR_RE = re.compile(r'(?:stroke|fill)-opacity:0(?![.\d])')
+# The PNG path loads every layer at once and selects one via foreground alpha
+# (FFFFFFFF vs FFFFFF00); gerbv's raster compositor honours that alpha, so the
+# non-selected layers render as invisible pixels and alignment is free.
+#
+# gerbv's Cairo *SVG* backend does NOT honour per-file foreground alpha: it
+# draws every loaded layer opaque and flattens them into one identical file
+# (every layer's SVG came out byte-for-byte the same, an OR-merge with no way
+# to tell paths apart). So the alpha trick cannot produce per-layer SVGs.
+#
+# Instead we render each layer's SVG from its *single* source file. A lone file
+# with no window makes gerbv emit an empty SVG (degenerate extent), so we pin an
+# explicit --origin and --window_inch derived once from the all-loaded render.
+# With identical origin+window, gerbv emits an identical viewBox and transform
+# matrix for every layer (verified: same `matrix(72,0,0,-72,e,f)` and viewBox
+# across F_Cu/inner/B_Cu), so the per-layer SVGs register against each other and
+# against the PNG window with no post-normalisation. The canvas stays
+# transparent (gerbv never writes --background as a rect in SVG), which is what
+# we want for compositing.
+
+# gerbv's SVG canvas is points at 72 pt/inch, y-flipped:
+#   svg_x = 72*X_in + e ;  svg_y = -72*Y_in + f
+# so window_inch = canvas_pt / 72, and the gerber origin (lower-left) inverts
+# from the transform. We recover both from one all-loaded SVG probe.
+_SVG_HDR_RE = re.compile(r'<svg\b[^>]*\bwidth="([\d.]+)pt"[^>]*\bheight="([\d.]+)pt"')
+_SVG_MATRIX_RE = re.compile(r'matrix\(([^)]*)\)')
 
 
-def _strip_clear_paths(svg_path: pathlib.Path) -> tuple[int, int]:
-    """Remove fully-transparent <path> elements from an SVG in place.
+def _derive_window(probe_svg: pathlib.Path) -> tuple[float, float, float, float]:
+    """From an all-loaded SVG, return ``(origin_x, origin_y, width_in, height_in)``.
 
-    Returns ``(removed, kept)`` path counts. Background stays transparent so
-    the layer composites cleanly; foreground geometry (opacity 1) is retained.
+    Used to pin --origin/--window_inch for the per-layer single-file renders so
+    every layer shares one coordinate frame.
     """
-    text = svg_path.read_text()
-    removed = 0
+    text = probe_svg.read_text()
+    hdr = _SVG_HDR_RE.search(text)
+    mat = _SVG_MATRIX_RE.search(text)
+    if not hdr or not mat:
+        raise RuntimeError(
+            f'could not parse SVG window from {probe_svg.name} '
+            '(no <svg> width/height or transform matrix found)'
+        )
+    w_pt, h_pt = float(hdr.group(1)), float(hdr.group(2))
+    a, b, c, d, e, f = (float(x) for x in mat.group(1).split(','))
+    width_in = w_pt / 72.0
+    height_in = h_pt / 72.0
+    # lower-left = (svg_x=0, svg_y=h_pt): X=(0-e)/a, Y=(h_pt-f)/d
+    origin_x = (0.0 - e) / a
+    origin_y = (h_pt - f) / d
+    return origin_x, origin_y, width_in, height_in
 
-    def repl(m: re.Match) -> str:
-        nonlocal removed
-        if _SVG_CLEAR_RE.search(m.group(0)):
-            removed += 1
-            return ''
-        return m.group(0)
 
-    cleaned = _SVG_PATH_RE.sub(repl, text)
-    kept = cleaned.count('<path')
-    if removed:
-        svg_path.write_text(cleaned)
-    return removed, kept
+def _rasterise_all_svg(all_sources: list[pathlib.Path],
+                       output: pathlib.Path) -> None:
+    """Export one all-loaded SVG, used only to probe the shared window.
+
+    All layers loaded, no explicit window: gerbv sizes the canvas to the full
+    board extent, which is exactly the common frame we want to pin the
+    per-layer renders to. Content is irrelevant here — we only read the header
+    and transform — so this is discarded after ``_derive_window``.
+    """
+    cmd = [
+        'gerbv',
+        '--export=svg',
+        f'--output={output}',
+        '--foreground=#FFFFFFFF',
+        '--border=0',
+        *[str(x) for x in all_sources],
+    ]
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          text=True)
+    if proc.returncode != 0 or not output.exists():
+        raise RuntimeError(
+            f'gerbv window-probe SVG failed:\n{proc.stderr.strip()}'
+        )
 
 
 def _rasterise_one(
@@ -299,29 +338,51 @@ def _rasterise_one(
                    output: pathlib.Path,
                    dpi: int,
                    export: str = 'png',
+                   window: tuple[float, float, float, float] | None = None,
                    progress_interval: float = 30.0) -> None:
-    """Run gerbv on all these files, just outputting one
-       Done this way to get alignment
+    """Render one layer with gerbv.
+
+    Two modes:
+
+    * ``export='png'`` (window=None): loads *all* ``all_sources`` and selects
+      ``selected_src`` via foreground alpha. All layers share one origin/window
+      so the PNGs stay aligned. This is the original, unchanged behaviour.
+
+    * ``export='svg'`` (window given): loads *only* ``all_sources[selected_src]``
+      and pins ``--origin``/``--window_inch`` from ``window`` (origin_x,
+      origin_y, width_in, height_in). Single-file load avoids gerbv's SVG
+      flatten; the pinned window keeps every layer in the same frame.
     """
-    sources = [str(x) for x in all_sources]
-    foregrounds = []
-    for i, src in enumerate(all_sources):
-        if i == selected_src:
-            foregrounds.append("--foreground=#FFFFFFFF")
-        else:
-            foregrounds.append("--foreground=#FFFFFF00")
+    if export == 'svg':
+        if window is None:
+            raise ValueError('svg export requires a window')
+        sources = [str(all_sources[selected_src])]
+        foregrounds = ['--foreground=#FFFFFFFF']
+    else:
+        sources = [str(x) for x in all_sources]
+        foregrounds = []
+        for i, _src in enumerate(all_sources):
+            if i == selected_src:
+                foregrounds.append('--foreground=#FFFFFFFF')
+            else:
+                foregrounds.append('--foreground=#FFFFFF00')
+
     cmd = [
         'gerbv',
         f'--export={export}',
         f'--output={output}',
     ]
-    # --dpi is a raster concept; the SVG backend ignores it and warns.
     if export == 'png':
+        # --dpi is a raster concept; the SVG backend ignores it and warns.
         cmd.append(f'--dpi={dpi}x{dpi}')
+    else:
+        ox, oy, w_in, h_in = window
+        # Pin the frame so every single-file layer shares one viewBox/transform.
+        cmd.append(f'--origin={ox:.6f}x{oy:.6f}')
+        cmd.append(f'--window_inch={w_in:.6f}x{h_in:.6f}')
     # --background paints the PNG canvas black (white=copper convention).
-    # gerbv's SVG backend never emits it as a drawable rect, so it is a
-    # no-op there and we deliberately leave the SVG canvas transparent for
-    # clean compositing.
+    # gerbv's SVG backend never emits it as a drawable rect, so it is a no-op
+    # there and the SVG canvas stays transparent for clean compositing.
     cmd.append('--background=#000000')
     cmd += [
         *foregrounds,
@@ -430,6 +491,29 @@ def rasterise(
         fname = mapping[name]
         src = source_dir / fname
         sources.append(src)
+
+    # For SVG we render each layer from its single source file (gerbv's SVG
+    # backend flattens all loaded layers into one identical file, so the PNG
+    # alpha-select trick does not work). A lone file needs an explicit window
+    # or gerbv emits an empty SVG, so probe the shared frame once by exporting
+    # one all-loaded SVG and reading its canvas size + transform. Every
+    # per-layer render is then pinned to this same origin/window and comes out
+    # with an identical viewBox, so the layers register for compositing.
+    svg_window: tuple[float, float, float, float] | None = None
+    if svg and sources:
+        probe = output_dir / '_window_probe.svg'
+        try:
+            _rasterise_all_svg(sources, probe)
+            svg_window = _derive_window(probe)
+            log.info('  svg window: origin %.4f,%.4f  %.4f×%.4f in',
+                     *svg_window)
+        except RuntimeError as e:
+            log.error('  ! could not establish SVG window, skipping SVG: %s', e)
+            svg = False
+        finally:
+            if probe.exists():
+                probe.unlink()
+
     for tgt_i,name in enumerate(targets):
         fname = mapping[name]
         src = source_dir / fname
@@ -450,18 +534,18 @@ def rasterise(
                  size[0], size[1], _format_elapsed(time.monotonic() - started))
         written.append(out)
 
-        if svg:
+        if svg and svg_window is not None:
             svg_out = output_dir / f'{name}.svg'
             svg_started = time.monotonic()
             log.info('  rasterising %s.svg from %s', name, fname)
             try:
-                _rasterise_one(sources, tgt_i, svg_out, dpi, export='svg')
+                _rasterise_one(sources, tgt_i, svg_out, dpi,
+                               export='svg', window=svg_window)
             except RuntimeError as e:
                 log.error('  ! %s', e)
             else:
-                removed, kept = _strip_clear_paths(svg_out)
-                log.info('    → svg: stripped %d transparent paths, kept %d (%s)',
-                         removed, kept,
+                npaths = svg_out.read_text().count('<path')
+                log.info('    → svg: %d paths (%s)', npaths,
                          _format_elapsed(time.monotonic() - svg_started))
                 written.append(svg_out)
 
