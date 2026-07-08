@@ -250,7 +250,6 @@ const tileImageCache = new Map();      // key: name:level:tx:ty -> HTMLImageElem
 const processedTileCache = new Map();  // key: mode:name:level:tx:ty:colour:alpha -> canvas
 const idmapTileCache = new Map();      // key: level:tx:ty -> {level, tx, ty, width, height, data} | {promise}
 const vectorImageCache = new Map();     // name -> HTMLImageElement | Promise | null
-const vectorAlignmentCache = new Map(); // name -> {x, y, w, h} in local board pixels | null
 const INITIAL_MIP_LEVEL = 16;
 const PROGRESSIVE_MIP_ORDER = [16, 8, 4, 2, 1];
 
@@ -1472,109 +1471,8 @@ function drawTintedGridCrop(ctx, name, p, colour, alpha, mirror) {
 }
 
 
-function alphaBoundingBox(data, w, h, alphaIndex = 3, threshold = 8) {
-  let minX = w;
-  let minY = h;
-  let maxX = -1;
-  let maxY = -1;
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      if (data[(y * w + x) * 4 + alphaIndex] <= threshold) continue;
-      if (x < minX) minX = x;
-      if (y < minY) minY = y;
-      if (x > maxX) maxX = x;
-      if (y > maxY) maxY = y;
-    }
-  }
-  if (maxX < minX || maxY < minY) return null;
-  return {x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1};
-}
 
-function idmapLayerBoundingBox(p, mipMap) {
-  if (!p || !mipMap || !mipMap.data) return null;
-  const level = mipMap.level || 1;
-  const x0 = Math.max(0, Math.floor(p.x / level));
-  const y0 = Math.max(0, Math.floor(p.y / level));
-  const x1 = Math.min(mipMap.width, Math.ceil((p.x + p.w) / level));
-  const y1 = Math.min(mipMap.height, Math.ceil((p.y + p.h) / level));
-  let minX = x1;
-  let minY = y1;
-  let maxX = x0 - 1;
-  let maxY = y0 - 1;
-  for (let y = y0; y < y1; y++) {
-    for (let x = x0; x < x1; x++) {
-      const i = (y * mipMap.width + x) * 4;
-      const id = mipMap.data[i] | (mipMap.data[i + 1] << 8) | (mipMap.data[i + 2] << 16);
-      if (!id) continue;
-      if (x < minX) minX = x;
-      if (y < minY) minY = y;
-      if (x > maxX) maxX = x;
-      if (y > maxY) maxY = y;
-    }
-  }
-  if (maxX < minX || maxY < minY) return null;
-  return {
-    x: minX * level - p.x,
-    y: minY * level - p.y,
-    w: (maxX - minX + 1) * level,
-    h: (maxY - minY + 1) * level,
-  };
-}
-
-function vectorAlphaBoundingBox(img) {
-  const size = 256;
-  const c = document.createElement('canvas');
-  c.width = size;
-  c.height = size;
-  const ctx = c.getContext('2d');
-  ctx.drawImage(img, 0, 0, size, size);
-  return alphaBoundingBox(ctx.getImageData(0, 0, size, size).data, size, size);
-}
-
-function vectorBoardRect(name, img, p) {
-  const fallback = {x: 0, y: 0, w: p.w, h: p.h};
-  if (!name || !/_Cu$/i.test(name)) return fallback;
-  const key = `${name}:${p.w}x${p.h}:${img.width}x${img.height}`;
-  if (vectorAlignmentCache.has(key)) return vectorAlignmentCache.get(key) || fallback;
-
-  const mipMap = getIdmapForLevel(coarsestMipLevel());
-  const target = idmapLayerBoundingBox(p, mipMap);
-  if (!target) return fallback;
-
-  const svgBox = vectorAlphaBoundingBox(img);
-  if (!svgBox || target.w <= 0 || target.h <= 0 || svgBox.w <= 0 || svgBox.h <= 0) {
-    vectorAlignmentCache.set(key, null);
-    return fallback;
-  }
-
-  const svgNorm = {
-    x: svgBox.x / 256,
-    y: svgBox.y / 256,
-    w: svgBox.w / 256,
-    h: svgBox.h / 256,
-  };
-  const svgCentre = {
-    x: (svgNorm.x + svgNorm.w / 2) * p.w,
-    y: (svgNorm.y + svgNorm.h / 2) * p.h,
-  };
-  const targetCentre = {
-    x: target.x + target.w / 2,
-    y: target.y + target.h / 2,
-  };
-  // Only translate the SVG canvas. Scaling to bbox dimensions can distort the
-  // SVG relative to itself when drill holes/keepouts are present in one source
-  // but not the other, so preserve the original board-scale SVG geometry.
-  const rect = {
-    x: targetCentre.x - svgCentre.x,
-    y: targetCentre.y - svgCentre.y,
-    w: p.w,
-    h: p.h,
-  };
-  vectorAlignmentCache.set(key, rect);
-  return rect;
-}
-
-function drawVectorAlpha(ctx, img, p, mirror, colour, alpha, mode = 'alpha', name = null) {
+function drawVectorAlpha(ctx, img, p, mirror, colour, alpha, mode = 'alpha') {
   const r = tileScreenRect(p);
   if (!img || !rectVisible(r)) return;
 
@@ -1584,11 +1482,10 @@ function drawVectorAlpha(ctx, img, p, mirror, colour, alpha, mode = 'alpha', nam
   // browser interprets it instead of sampling a source rectangle from the
   // image's rounded natural pixel size, which can shift artwork relative to
   // the PNG idmap.
-  const boardRect = vectorBoardRect(name, img, p);
-  const dx = (boardRect.x - crop.x) * r.w / Math.max(1, crop.w);
-  const dy = (boardRect.y - crop.y) * r.h / Math.max(1, crop.h);
-  const dw = boardRect.w * r.w / Math.max(1, crop.w);
-  const dh = boardRect.h * r.h / Math.max(1, crop.h);
+  const dx = -crop.x * r.w / Math.max(1, crop.w);
+  const dy = -crop.y * r.h / Math.max(1, crop.h);
+  const dw = p.w * r.w / Math.max(1, crop.w);
+  const dh = p.h * r.h / Math.max(1, crop.h);
 
   const off = document.createElement('canvas');
   off.width = Math.max(1, Math.ceil(r.w * renderDpr));
@@ -1631,7 +1528,7 @@ function drawVectorLayer(ctx, layerRef, p, mirror, colour, alpha, mode = 'alpha'
   const status = vectorImageStatus(name);
   const img = vectorImageCache.get(name);
   if (img instanceof HTMLImageElement) {
-    drawVectorAlpha(ctx, img, p, mirror, colour, alpha, mode, name);
+    drawVectorAlpha(ctx, img, p, mirror, colour, alpha, mode);
     return true;
   }
   // A pending SVG should suppress PNG fallback; fallback only after 404/error.
