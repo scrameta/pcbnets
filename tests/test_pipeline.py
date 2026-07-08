@@ -677,6 +677,27 @@ def test_write_build_emits_drill_overlay_for_tiles(tmp_path):
     assert (build / 'mips' / '4' / 'tiles' / 'drill_1_1.png').is_file()
 
 
+def test_svg_optimise_disables_aspect_ratio_letterboxing():
+    from pcbnets.cli import _optimise_svg_text
+
+    svg = '<svg width="1303" height="885" viewBox="0 0 1303 885"><path d="M0 0"/></svg>'
+
+    optimised = _optimise_svg_text(svg)
+
+    assert 'preserveAspectRatio="none"' in optimised
+
+
+def test_svg_optimise_preserves_explicit_aspect_ratio():
+    from pcbnets.cli import _optimise_svg_text
+
+    svg = '<svg preserveAspectRatio="xMinYMin meet" viewBox="0 0 1 1"></svg>'
+
+    optimised = _optimise_svg_text(svg)
+
+    assert optimised.count('preserveAspectRatio=') == 1
+    assert 'preserveAspectRatio="xMinYMin meet"' in optimised
+
+
 def test_export_copies_mips_and_tiles(tmp_path):
     from pcbnets.cli import cmd_export
     import argparse

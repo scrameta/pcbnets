@@ -683,8 +683,18 @@ def _run_pipeline(directory: pathlib.Path,
 
 
 def _optimise_svg_text(text: str) -> str:
-    """Apply a conservative, dependency-free SVG minification pass."""
+    """Apply a conservative, dependency-free SVG minification pass.
+
+    Viewer SVGs are drawn into the same board-space rectangle as the PNG
+    idmap.  Some exporters round SVG width/height differently from the raster
+    PNG dimensions; the browser's default ``preserveAspectRatio="xMidYMid
+    meet"`` then letterboxes the drawing, which shows up as a systematic
+    offset against the idmap.  Disabling aspect-ratio preservation keeps the
+    SVG viewport mapped exactly onto the idmap rectangle.
+    """
     text = re.sub(r'<!--.*?-->', '', text, flags=re.S)
+    text = re.sub(r'(<svg\b(?![^>]*\bpreserveAspectRatio=))',
+                  r'\1 preserveAspectRatio="none"', text, count=1, flags=re.I)
     text = re.sub(r'>\s+<', '><', text)
     text = re.sub(r'\s{2,}', ' ', text)
     return text.strip() + '\n'
