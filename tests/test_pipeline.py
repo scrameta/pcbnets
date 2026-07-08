@@ -9,9 +9,11 @@ from PIL import Image, ImageDraw
 from pcbnets import (
     UnionFind,
     build_grid_and_idmap,
+    explain_merge_path,
     extract_nets,
     load_masks,
     merge_nets,
+    merge_nets_debug,
     threshold_mask,
 )
 
@@ -106,6 +108,168 @@ def test_extract_nets_drill_bridges_layers():
     assert top_net == bot_net != 0
 
 
+def test_inferred_generic_drill_ignores_holes_without_copper():
+    """Generic drill fallback treats holes with no copper pads as NPTH."""
+    layers = {
+        'top': make_mask(w=80, h=80),
+        'bot': make_mask(w=80, h=80),
+    }
+    drill = make_mask(w=80, h=80, shapes=[('ellipse', 35, 35, 45, 45)])
+
+    result = extract_nets(layers, drill, connector_mode='infer')
+
+    assert result['drill_touches'] == {}
+    assert result['drill_classifications'][0]['plated'] is False
+    assert result['drill_classifications'][0]['classification'] == 'likely_npth'
+    assert 'no substantial copper pad ring' in result['drill_classifications'][0]['reason']
+
+
+def test_inferred_generic_drill_rejects_trace_touches_without_complete_pad_ring():
+    """Generic drill fallback ignores traces that touch without forming pads."""
+    layers = {
+        'top': make_mask(w=80, h=80, shapes=[('rect', 40, 35, 70, 45)]),
+        'bot': make_mask(w=80, h=80, shapes=[('rect', 10, 35, 40, 45)]),
+    }
+    drill = make_mask(w=80, h=80, shapes=[('ellipse', 35, 35, 45, 45)])
+
+    result = extract_nets(layers, drill, connector_mode='infer')
+
+    assert result['drill_touches'] == {}
+    assert result['drill_classifications'][0]['plated'] is False
+    assert result['drill_classifications'][0]['classification'] == 'likely_npth'
+    contacts = result['drill_classifications'][0]['contacts']
+    assert any(c['contact'] == 'partial' for c in contacts)
+    assert not any(c['pad_ring_contact'] for c in contacts)
+
+
+def test_inferred_generic_drill_rejects_one_sided_high_pixel_ring():
+    from pcbnets.nets import _classify_drill
+
+    contacts = [
+        {
+            'layer': 'top',
+            'component_ids': [1],
+            'contact': 'partial',
+            'pad_ring_fraction': 0.90,
+            'pad_ring_angular_coverage': 0.30,
+        },
+        {
+            'layer': 'bot',
+            'component_ids': [1],
+            'contact': 'partial',
+            'pad_ring_fraction': 0.90,
+            'pad_ring_angular_coverage': 0.30,
+        },
+    ]
+
+    decision = _classify_drill(
+        drill_id=1,
+        contacts=contacts,
+        layer_names=['top', 'bot'],
+        radius_px=5.0,
+        small_radius_px=8.0,
+        large_radius_px=20.0,
+        connector_mode='infer',
+    )
+
+    assert decision['plated'] is False
+    assert decision['classification'] == 'likely_npth'
+
+
+def test_inferred_generic_drill_tolerates_rasterised_pad_ring_threshold():
+    from pcbnets.nets import _classify_drill
+
+    contacts = [
+        {
+            'layer': 'top',
+            'component_ids': [1],
+            'contact': 'all_around',
+            'pad_ring_fraction': 0.84,
+        },
+        {
+            'layer': 'bot',
+            'component_ids': [1],
+            'contact': 'all_around',
+            'pad_ring_fraction': 0.84,
+        },
+    ]
+
+    decision = _classify_drill(
+        drill_id=1,
+        contacts=contacts,
+        layer_names=['top', 'bot'],
+        radius_px=5.0,
+        small_radius_px=8.0,
+        large_radius_px=20.0,
+        connector_mode='infer',
+    )
+
+    assert decision['plated'] is True
+    assert decision['classification'] == 'likely_pth'
+
+
+def test_inferred_generic_drill_connects_top_and_bottom_annular_pads():
+    """Generic drill fallback treats copper on both outer sides as likely PTH."""
+    layers = {
+        'top': make_mask(w=80, h=80, shapes=[('rect', 0, 0, 79, 79)]),
+        'bot': make_mask(w=80, h=80, shapes=[('rect', 0, 0, 79, 79)]),
+    }
+    drill = make_mask(w=80, h=80, shapes=[('ellipse', 35, 35, 45, 45)])
+
+    result = extract_nets(layers, drill, connector_mode='infer')
+
+    assert len(result['drill_touches']) == 1
+    assert result['drill_classifications'][0]['plated'] is True
+    assert result['drill_classifications'][0]['reason'] == (
+        'copper annulus/pad contact found on both outer copper layers'
+    )
+
+
+def test_explicit_pth_connects_all_around_copper():
+    """Explicit PTH/via masks connect even when annular contact is all around."""
+    layers = {
+        'top': make_mask(w=80, h=80, shapes=[('rect', 0, 0, 79, 79)]),
+        'bot': make_mask(w=80, h=80, shapes=[('rect', 0, 0, 79, 79)]),
+    }
+    drill = make_mask(w=80, h=80, shapes=[('ellipse', 35, 35, 45, 45)])
+
+    result = extract_nets(layers, drill, connector_mode='explicit')
+
+    assert len(result['drill_touches']) == 1
+    assert result['drill_classifications'][0]['classification'] == 'explicit_pth'
+    members = next(iter(result['drill_touches'].values()))
+    assert ('top', 1) in members
+    assert ('bot', 1) in members
+
+
+def test_merge_nets_debug_explains_drill_path():
+    """Debug metadata should explain the drill edge that merged local nets."""
+    layers = {
+        'top': make_mask(shapes=[('rect', 50, 30, 90, 70)]),
+        'bot': make_mask(shapes=[('rect', 60, 40, 100, 80)]),
+    }
+    drill = make_mask(shapes=[('ellipse', 65, 45, 85, 65)])
+    result = extract_nets(layers, drill, drill_grow_px=0)
+
+    net_labels, debug = merge_nets_debug(
+        result['drill_touches'],
+        result['layer_labels'],
+        result['drill_labels'],
+        result['drill_classifications'],
+    )
+    assert net_labels['top'][45, 70] == net_labels['bot'][50, 80] != 0
+    assert debug['drills'][0]['bbox'] == [65, 45, 86, 66]
+    assert debug['drills'][0]['centroid'] == [75.0, 55.0]
+    assert debug['drill_classifications'][0]['classification'] == 'explicit_pth'
+
+    path = explain_merge_path(debug, ('top', 1), ('bot', 1))
+    assert path == [{
+        'from': {'layer': 'top', 'component': 1},
+        'drill': 1,
+        'to': {'layer': 'bot', 'component': 1},
+    }]
+
+
 def test_isolated_net_gets_an_id():
     """A copper region with no drills should still get a unique net id."""
     layers = {
@@ -166,6 +330,259 @@ def test_display_punches_drill_holes_out_of_copper_and_idmap():
     assert not display[3, 3]
     assert display_labels['top'][2, 2] == 1
     assert display_labels['top'][3, 3] == 0
+
+
+def test_load_net_labels_for_render_accepts_nets_output(tmp_path):
+    from pcbnets.cli import _load_net_labels_for_render
+
+    arrs = {
+        'top': np.zeros((3, 4), dtype=bool),
+        'bot': np.zeros((3, 4), dtype=bool),
+    }
+    top = np.zeros((3, 4), dtype=np.int32)
+    bot = np.ones((3, 4), dtype=np.int32)
+    np.savez_compressed(tmp_path / 'net-labels.npz', top=top, bot=bot)
+
+    loaded = _load_net_labels_for_render(tmp_path, ['top', 'bot'], arrs)
+
+    assert list(loaded) == ['top', 'bot']
+    np.testing.assert_array_equal(loaded['top'], top)
+    np.testing.assert_array_equal(loaded['bot'], bot)
+
+
+def test_load_net_labels_for_render_rejects_shape_mismatch(tmp_path):
+    from pcbnets.cli import _load_net_labels_for_render
+
+    arrs = {'top': np.zeros((3, 4), dtype=bool)}
+    np.savez_compressed(tmp_path / 'net-labels.npz',
+                        top=np.zeros((2, 4), dtype=np.int32))
+
+    with pytest.raises(ValueError, match='expected'):
+        _load_net_labels_for_render(tmp_path, ['top'], arrs)
+
+
+def test_drill_identify_writes_split_masks_and_choices(tmp_path):
+    import argparse
+    import json
+    from pcbnets.cli import cmd_drill_identify
+
+    src = tmp_path / 'src'
+    out = tmp_path / 'out'
+    src.mkdir()
+    make_mask(w=80, h=80, shapes=[
+        ('ellipse', 12, 12, 28, 28),
+    ]).save(src / 'F_Cu.png')
+    make_mask(w=80, h=80, shapes=[
+        ('ellipse', 12, 12, 28, 28),
+    ]).save(src / 'B_Cu.png')
+    make_mask(w=80, h=80, shapes=[
+        ('ellipse', 15, 15, 25, 25),
+        ('ellipse', 55, 55, 65, 65),
+    ]).save(src / 'drill.png')
+
+    args = argparse.Namespace(
+        directory=str(src),
+        output=str(out),
+        choices=None,
+        excellon=None,
+        layers=None,
+        drill='auto',
+        threshold=0,
+        dpi=1000,
+        no_auto_invert=False,
+        auto_align=False,
+        invert=[],
+        no_invert=[],
+        offset=[],
+        outer=None,
+    )
+
+    assert cmd_drill_identify(args) == 0
+
+    manifest = json.loads((out / 'drill-identify.json').read_text())
+    assert manifest['plated_count'] == 1
+    assert manifest['npth_count'] == 1
+    assert (out / 'PTH.png').exists()
+    assert (out / 'via.png').exists()
+    assert (out / 'NPTH.png').exists()
+
+    pth = np.asarray(Image.open(out / 'PTH.png').convert('L')) > 0
+    npth = np.asarray(Image.open(out / 'NPTH.png').convert('L')) > 0
+    assert pth[20, 20]
+    assert not pth[60, 60]
+    assert npth[60, 60]
+
+
+def test_drill_identify_choices_override_masks(tmp_path):
+    from pcbnets.cli import _split_drill_masks
+
+    labels = np.array([[0, 1, 2]], dtype=np.int32)
+    classifications = [
+        {'drill': 1, 'plated': True, 'classification': 'likely_pth'},
+        {'drill': 2, 'plated': False, 'classification': 'likely_npth'},
+    ]
+
+    pth, npth, decisions = _split_drill_masks(
+        labels,
+        classifications,
+        overrides={1: False, 2: True},
+    )
+
+    assert not pth[0, 1]
+    assert pth[0, 2]
+    assert npth[0, 1]
+    assert decisions[0]['override'] is True
+    assert decisions[1]['override'] is True
+
+
+
+def test_excellon_mapping_uses_centroids_not_drill_id_order():
+    from pcbnets.cli import _map_excellon_objects_to_drills
+
+    class Obj:
+        def __init__(self, x, y):
+            self.x = x
+            self.y = y
+
+    objects = [
+        Obj(0, 0),    # bottom-left in Excellon space
+        Obj(0, 100),  # top-left in Excellon space
+    ]
+    classifications = [
+        {'drill': 1, 'plated': True, 'centroid': [0, 100]},
+        {'drill': 2, 'plated': False, 'centroid': [0, 0]},
+    ]
+
+    assert _map_excellon_objects_to_drills(objects, classifications) == {
+        1: 0,
+        2: 1,
+    }
+
+
+def test_drill_identify_excellon_without_choices_writes_excellon_splits(tmp_path, monkeypatch):
+    import argparse
+    import json
+    import sys
+    import types
+    from pcbnets.cli import cmd_drill_identify
+
+    class FakeObj:
+        def __init__(self, name, x, y):
+            self.name = name
+            self.x = x
+            self.y = y
+
+    class FakeExcellon:
+        def __init__(self, objects):
+            self.objects = list(objects)
+
+        @classmethod
+        def open(cls, path):
+            return cls([FakeObj('plated-hole', 10, 30)])
+
+        def save(self, path):
+            path.write_text('\n'.join(obj.name for obj in self.objects))
+
+    monkeypatch.setitem(sys.modules, 'gerbonara', types.SimpleNamespace(ExcellonFile=FakeExcellon))
+
+    src = tmp_path / 'src'
+    out = tmp_path / 'out'
+    src.mkdir()
+    make_mask(w=40, h=40, shapes=[
+        ('ellipse', 7, 7, 23, 23),
+    ]).save(src / 'F_Cu.png')
+    make_mask(w=40, h=40, shapes=[
+        ('ellipse', 7, 7, 23, 23),
+    ]).save(src / 'B_Cu.png')
+    make_mask(w=40, h=40, shapes=[
+        ('ellipse', 10, 10, 20, 20),
+    ]).save(src / 'drill.png')
+
+    args = argparse.Namespace(
+        directory=str(src),
+        output=str(out),
+        choices=None,
+        excellon=str(tmp_path / 'all_drills.drl'),
+        layers=None,
+        drill='auto',
+        threshold=0,
+        dpi=1000,
+        no_auto_invert=False,
+        auto_align=False,
+        invert=[],
+        no_invert=[],
+        offset=[],
+        outer=None,
+    )
+
+    assert cmd_drill_identify(args) == 0
+
+    manifest = json.loads((out / 'drill-identify.json').read_text())
+    assert manifest['plated_count'] == 1
+    assert (out / 'PTH.png').exists()
+    assert (out / 'NPTH.png').exists()
+    assert (out / 'PTH.drl').read_text() == 'plated-hole'
+    assert (out / 'NPTH.drl').read_text() == ''
+    assert manifest['drill_classifications'][0]['source_object_index'] == 0
+    assert manifest['drill_classifications'][0]['source_x'] == 10
+    assert manifest['drill_classifications'][0]['source_y'] == 30
+
+
+def test_split_excellon_with_gerbonara_uses_object_index_choices(tmp_path, monkeypatch):
+    import json
+    import sys
+    import types
+    from pcbnets.cli import _split_excellon_with_gerbonara
+
+    class FakeExcellon:
+        def __init__(self, objects):
+            self.objects = list(objects)
+
+        @classmethod
+        def open(cls, path):
+            return cls(['hole-0', 'hole-1', 'hole-2'])
+
+        def save(self, path):
+            path.write_text('\n'.join(self.objects))
+
+    monkeypatch.setitem(sys.modules, 'gerbonara', types.SimpleNamespace(ExcellonFile=FakeExcellon))
+
+    choices = tmp_path / 'choices.json'
+    choices.write_text(json.dumps({
+        'drill_classifications': [
+            {'object_index': 0, 'plated': True},
+            {'object_index': 1, 'plated': False},
+            {'object_index': 2, 'plated': True},
+        ],
+    }))
+
+    pth_path, npth_path = _split_excellon_with_gerbonara(
+        tmp_path / 'all_drills.drl',
+        tmp_path / 'out',
+        choices,
+    )
+
+    assert pth_path.read_text() == 'hole-0\nhole-2'
+    assert npth_path.read_text() == 'hole-1'
+
+
+def test_split_excellon_with_gerbonara_requires_object_indexes(tmp_path):
+    import json
+    from pcbnets.cli import _split_excellon_with_gerbonara
+
+    choices = tmp_path / 'choices.json'
+    choices.write_text(json.dumps({
+        'drill_classifications': [
+            {'drill': 1, 'plated': True},
+        ],
+    }))
+
+    with pytest.raises(ValueError, match='object_index'):
+        _split_excellon_with_gerbonara(
+            tmp_path / 'all_drills.drl',
+            tmp_path / 'out',
+            choices,
+        )
 
 
 def test_id_encoding_roundtrip():

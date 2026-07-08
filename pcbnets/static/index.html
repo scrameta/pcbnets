@@ -210,6 +210,7 @@ let currentHighlightPixels = null;
 let netBreakdownCache = new Map();
 let highlightDragDx = 0;
 let highlightDragDy = 0;
+let lastPick = null;
 
 // The source atlas remains full-resolution, but the visible canvases are only
 // viewport-sized. This keeps pan/zoom work proportional to the browser window
@@ -713,6 +714,15 @@ async function init() {
 }
 
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
 
 function resizeRenderCanvases() {
   const cssW = Math.max(1, viewport.clientWidth);
@@ -1811,14 +1821,18 @@ function netLayerBreakdown(netId) {
 
 function updateNetInfo(netId) {
   const info = document.getElementById('net-info');
+  const pickHtml = lastPick
+    ? `<div style="color:var(--muted); font-size:11px">Clicked: <code>${escapeHtml(lastPick.spec)}</code></div>`
+    : '';
   if (!netId) {
-    info.innerHTML = '<em style="color:var(--muted)">Click a net</em>';
+    info.innerHTML = pickHtml + '<em style="color:var(--muted)">Click a net</em>';
     return;
   }
 
   const haveFullIndex = netToPixels && netToPixels.has(netId);
   const total = haveFullIndex ? netToPixels.get(netId).length : null;
   info.innerHTML = `<div><strong>Net ${netId}</strong></div>` +
+                   pickHtml +
                    `<div style="color:var(--muted); font-size:11px">${total === null ? 'details loading…' : total + ' px total'}</div>` +
                    `<div class="layer-list">${haveFullIndex ? 'layer breakdown…' : 'full idmap loading…'}</div>`;
 
@@ -1830,6 +1844,7 @@ function updateNetInfo(netId) {
     if (currentNet !== netId) return;
     const breakdown = netLayerBreakdown(netId);
     let html = `<div><strong>Net ${netId}</strong></div>`;
+    html += pickHtml;
     html += `<div style="color:var(--muted); font-size:11px">${total} px total</div>`;
     if (breakdown.length) {
       html += '<div class="layer-list">';
@@ -1907,6 +1922,16 @@ function pickNetAtClient(clientX, clientY) {
     ? crop.x + (1 - nx) * crop.w
     : crop.x + nx * crop.w);
   const ly = Math.floor(crop.y + ny * crop.h);
+  const renderScale = meta && Number(meta.render_scale);
+  const coordScale = Number.isFinite(renderScale) && renderScale > 0 ? renderScale : 1;
+  const localX = Math.floor((lx - p.x) / coordScale);
+  const localY = Math.floor((ly - p.y) / coordScale);
+  lastPick = {
+    layer: tile.name,
+    x: localX,
+    y: localY,
+    spec: `${tile.name}:${localX},${localY}`,
+  };
 
   if (isTiledLevel(level)) {
     const mx = Math.floor(lx / level);

@@ -14,6 +14,7 @@ import pathlib
 import pytest
 
 from pcbnets.gerber import (
+    _write_drill_aliases,
     detect_layers,
     load_or_create_layers_json,
     read_layers_json,
@@ -124,6 +125,19 @@ def test_detect_plain_drl_treated_as_physical_drill(tmp_path):
     touch(tmp_path / 'myboard.drl')
     m = detect_layers(tmp_path)
     assert m['drill'] == 'myboard.drl'
+
+
+def test_pth_preferred_for_via_alias(tmp_path):
+    """PTH remains the preferred source for via.png when present."""
+    pth = tmp_path / 'PTH.png'
+    drill = tmp_path / 'drill.png'
+    pth.write_bytes(b'pth')
+    drill.write_bytes(b'drill')
+    written = [pth, drill]
+
+    _write_drill_aliases(tmp_path, written)
+
+    assert (tmp_path / 'via.png').read_bytes() == b'pth'
 
 
 def test_detect_via_and_pth_drills(tmp_path):
@@ -250,5 +264,3 @@ def test_unknown_files_dont_break_detection(tmp_path):
     touch(tmp_path / 'proj-F_Cu.gbr')
     m = detect_layers(tmp_path)
     assert m == {'F_Cu': 'proj-F_Cu.gbr'}
-
-

@@ -32,6 +32,9 @@ dependencies = [
 dev = [
     "pytest>=7",
 ]
+excellon = [
+    "gerbonara>=1.4",
+]
 
 [project.scripts]
 pcbnets = "pcbnets.cli:main"
