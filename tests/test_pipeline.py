@@ -656,6 +656,27 @@ def test_render_writes_mips_and_tiles(tmp_path):
     assert len(list((build / 'mips' / '8' / 'tiles').glob('grid_*.png'))) == 4
 
 
+def test_write_build_emits_drill_overlay_for_tiles(tmp_path):
+    from pcbnets.cli import _write_build
+    from pcbnets.mips import make_mips
+    from pcbnets.tiles import make_tiles
+
+    build = tmp_path / 'build'
+    grid = Image.new('L', (32, 32), 255)
+    idmap = Image.new('RGB', (32, 32), (0, 0, 0))
+    drill = make_mask(w=32, h=32, shapes=[('ellipse', 12, 12, 20, 20)])
+    meta = {'drill_name': 'PTH', 'drill_layers': ['drill']}
+
+    _write_build(build, grid, idmap, meta, {'PTH': drill})
+    make_mips(build)
+    make_tiles(build)
+
+    assert (build / 'drill.png').is_file()
+    assert (build / 'mips' / '4' / 'drill.png').is_file()
+    assert (build / 'mips' / '4' / 'tiles' / 'drill_0_1.png').is_file()
+    assert (build / 'mips' / '4' / 'tiles' / 'drill_1_1.png').is_file()
+
+
 def test_export_copies_mips_and_tiles(tmp_path):
     from pcbnets.cli import cmd_export
     import argparse

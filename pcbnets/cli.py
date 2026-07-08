@@ -675,6 +675,8 @@ def _run_pipeline(directory: pathlib.Path,
             mask_present.append(mask_name)
     if mask_present:
         meta['mask_layers'] = mask_present
+    if drill_name in masks:
+        meta['drill_layers'] = ['drill']
 
     return grid, idmap, meta, masks, report
 
@@ -695,6 +697,10 @@ def _write_build(build_dir: pathlib.Path,
             masks[visual_name].convert('L').save(build_dir / f'{visual_name}.png',
                                                  optimize=True)
             logging.getLogger('pcbnets.render').info('  wrote %s.png', visual_name)
+    drill_name = meta.get('drill_name')
+    if drill_name in masks:
+        masks[drill_name].convert('L').save(build_dir / 'drill.png', optimize=True)
+        logging.getLogger('pcbnets.render').info('  wrote drill.png')
 
     logging.getLogger('pcbnets.render').info('  wrote %s/grid.png, idmap.png, meta.json', build_dir)
 
