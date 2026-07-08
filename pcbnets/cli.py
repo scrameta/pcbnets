@@ -681,6 +681,26 @@ def _run_pipeline(directory: pathlib.Path,
     return grid, idmap, meta, masks, report
 
 
+
+def _optimise_svg_text(text: str) -> str:
+    """Apply a conservative, dependency-free SVG minification pass."""
+    text = re.sub(r'<!--.*?-->', '', text, flags=re.S)
+    text = re.sub(r'>\s+<', '><', text)
+    text = re.sub(r'\s{2,}', ' ', text)
+    return text.strip() + '\n'
+
+def _copy_visual_svgs(src_dir: pathlib.Path, build_dir: pathlib.Path, names: Iterable[str]) -> None:
+    log = logging.getLogger('pcbnets.render')
+    for name in sorted(set(names)):
+        src = src_dir / f'{name}.svg'
+        if not src.exists():
+            continue
+        dst = build_dir / f'{name}.svg'
+        raw = src.read_text(encoding='utf-8')
+        optimised = _optimise_svg_text(raw)
+        dst.write_text(optimised, encoding='utf-8')
+        log.info('  wrote %s.svg (%.1f%%)', name, len(optimised) * 100 / max(1, len(raw)))
+
 def _write_build(build_dir: pathlib.Path,
                  grid: Image.Image,
                  idmap: Image.Image,
@@ -703,59 +723,6 @@ def _write_build(build_dir: pathlib.Path,
         logging.getLogger('pcbnets.render').info('  wrote drill.png')
 
     logging.getLogger('pcbnets.render').info('  wrote %s/grid.png, idmap.png, meta.json', build_dir)
-
-
-def _optimise_svg_text(text: str) -> str:
-    """Apply safe, dependency-free minification to generated SVG text."""
-    text = re.sub(r'<!--.*?-->', '', text, flags=re.DOTALL)
-    text = re.sub(r'>\s+<', '><', text)
-    text = re.sub(r'\s{2,}', ' ', text)
-    return text.strip() + '\n'
-
-
-def _copy_visual_svgs(src_dir: pathlib.Path,
-                      build_dir: pathlib.Path,
-                      layers: Iterable[str],
-                      meta: dict) -> list[pathlib.Path]:
-    """Copy source SVG layer artwork used by the web viewer.
-
-    The interactive viewer still relies on the generated PNG idmap and idmap
-    mips/tiles for picking and highlighting, but visual copper, mask, silk, and
-    hole artwork can be drawn directly from the white-on-transparent SVGs.
-    """
-    names: set[str] = set(layers)
-    names.update(meta.get('silk_layers', []))
-    names.update(meta.get('mask_layers', []))
-    names.update(meta.get('drill_layers', []))
-    names.update(meta.get('hole_layers', []))
-    if meta.get('drill_name'):
-        names.add(str(meta['drill_name']))
-    names.add('drill')
-
-    written: list[pathlib.Path] = []
-    log = logging.getLogger('pcbnets.render')
-    for name in sorted(n for n in names if n):
-        src = src_dir / f'{name}.svg'
-        if not src.is_file():
-            continue
-        dst = build_dir / f'{name}.svg'
-        original_size = src.stat().st_size
-        try:
-            text = src.read_text()
-            optimised = _optimise_svg_text(text)
-            dst.write_text(optimised)
-            shutil.copystat(src, dst)
-            saved = original_size - dst.stat().st_size
-        except UnicodeDecodeError:
-            shutil.copy2(src, dst)
-            saved = 0
-        written.append(dst)
-        if saved > 0:
-            log.info('  copied optimised %s.svg (saved %.1f KiB)',
-                     name, saved / 1024)
-        else:
-            log.info('  copied %s.svg', name)
-    return written
 
 
 def _write_mips_and_tiles(build_dir: pathlib.Path,
@@ -838,7 +805,9 @@ def cmd_render(args: argparse.Namespace) -> int:
     )
     progress.step('writing build artifacts')
     _write_build(build_dir, grid, idmap, meta, masks)
-    _copy_visual_svgs(directory, build_dir, layers, meta)
+    svg_names = set(layers) | set(SILK_LAYERS) | set(MASK_LAYERS) | {'PTH', 'NPTH', drill_name, via_name}
+    progress.detail('copying visual SVGs when available')
+    _copy_visual_svgs(directory, build_dir, svg_names)
     _write_mips_and_tiles(build_dir, progress=progress)
     progress.finish()
     return 0
@@ -1541,9 +1510,8 @@ def _bundle_file_names(build_dir: pathlib.Path) -> list[str]:
     """List build artefacts needed by the static HTML viewer."""
     names = _validate_build_dir(build_dir)
 
-    # The viewer always needs the generated grid/id map/metadata.  Visual SVGs
-    # are preferred for copper/mask/silk artwork; visual overlay PNGs remain as
-    # a fallback for older build dirs.
+    # The viewer prefers visual SVGs when present and keeps generated PNG
+    # mips/tiles for idmap picking/highlighting and legacy visual fallback.
     visual_names: set[str] = set()
     try:
         meta = json.loads((build_dir / 'meta.json').read_text())
@@ -1561,12 +1529,12 @@ def _bundle_file_names(build_dir: pathlib.Path) -> list[str]:
     visual_names.add('drill')
 
     for visual_name in sorted(visual_names):
-        svg = f'{visual_name}.svg'
-        if (build_dir / svg).exists():
-            names.append(svg)
         png = f'{visual_name}.png'
         if (build_dir / png).exists():
             names.append(png)
+        svg = f'{visual_name}.svg'
+        if (build_dir / svg).exists():
+            names.append(svg)
 
     return names
 

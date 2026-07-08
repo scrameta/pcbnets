@@ -245,11 +245,11 @@ let tileGrids = new Map([[1, [16, 16]], [2, [8, 8]], [4, [4, 4]], [8, [2, 2]]]);
 let tilePathTemplate = 'mips/{level}/tiles/{name}_{tx}_{ty}.png';
 
 const imageMipCache = new Map();       // key: name:level -> HTMLImageElement | Promise | null
-const vectorImageCache = new Map();    // key: name -> HTMLImageElement | Promise | null
 const idmapMipCache = new Map();       // level -> {level, width, height, data} | {promise}
 const tileImageCache = new Map();      // key: name:level:tx:ty -> HTMLImageElement | Promise | null
 const processedTileCache = new Map();  // key: mode:name:level:tx:ty:colour:alpha -> canvas
 const idmapTileCache = new Map();      // key: level:tx:ty -> {level, tx, ty, width, height, data} | {promise}
+const vectorImageCache = new Map();     // name -> HTMLImageElement | Promise | null
 const INITIAL_MIP_LEVEL = 16;
 const PROGRESSIVE_MIP_ORDER = [16, 8, 4, 2, 1];
 
@@ -265,6 +265,41 @@ function loadImage(src) {
 
 async function loadOptional(src) {
   try { return await loadImage(src); } catch { return null; }
+}
+
+function vectorPath(name) {
+  return './' + name + '.svg';
+}
+
+function requestVectorImage(name) {
+  if (!name) return null;
+  const cached = vectorImageCache.get(name);
+  if (cached instanceof HTMLImageElement || cached === null) return cached;
+  if (cached) return null;
+
+  const promise = loadImage(vectorPath(name))
+    .then(img => {
+      img._pcbnetsName = name;
+      vectorImageCache.set(name, img);
+      redraw();
+      return img;
+    })
+    .catch(() => {
+      vectorImageCache.set(name, null);
+      redraw();
+      return null;
+    });
+  vectorImageCache.set(name, promise);
+  return null;
+}
+
+function vectorImageStatus(name) {
+  const cached = vectorImageCache.get(name);
+  if (cached instanceof HTMLImageElement) return 'loaded';
+  if (cached === null) return 'missing';
+  if (cached) return 'pending';
+  requestVectorImage(name);
+  return 'pending';
 }
 
 async function loadOptionalLayer(available, candidates) {
@@ -321,10 +356,6 @@ function mipPath(name, level) {
     .replaceAll('{level}', String(level))
     .replaceAll('{name}', name);
   return path.startsWith('./') || path.startsWith('/') ? path : './' + path;
-}
-
-function vectorPath(name) {
-  return './' + name + '.svg';
 }
 
 function isTiledLevel(level) {
@@ -437,44 +468,6 @@ function initialMipLevel() {
 
 function layerRef(name) {
   return {_pcbnetsName: name, _pcbnetsPlaceholder: true};
-}
-
-function loadedVectorImage(name) {
-  const cached = vectorImageCache.get(name);
-  return cached instanceof HTMLImageElement ? cached : null;
-}
-
-function requestVectorImage(name) {
-  if (!name) return null;
-  const cached = vectorImageCache.get(name);
-  if (cached instanceof HTMLImageElement || cached === null) return cached;
-  if (cached) return null;
-
-  const promise = loadImage(vectorPath(name))
-    .then(img => {
-      img._pcbnetsName = name;
-      img._pcbnetsVector = true;
-      vectorImageCache.set(name, img);
-      redraw();
-      return img;
-    })
-    .catch(() => {
-      vectorImageCache.set(name, null);
-      redraw();
-      return null;
-    });
-  vectorImageCache.set(name, promise);
-  return null;
-}
-
-function vectorImageStatus(name) {
-  if (!name) return {state: 'missing', img: null};
-  const cached = vectorImageCache.get(name);
-  if (cached instanceof HTMLImageElement) return {state: 'loaded', img: cached};
-  if (cached === null) return {state: 'missing', img: null};
-  if (cached) return {state: 'pending', img: null};
-  requestVectorImage(name);
-  return {state: 'pending', img: null};
 }
 
 function loadedImageMip(name, level) {
@@ -683,17 +676,17 @@ async function init() {
   const firstLevel = initialMipLevel();
 
   // Fast first pick/highlight support: load the coarsest useful idmap first.
-  // Visual artwork is requested from SVG layers during draw; PNG grid/mips are
-  // only fallback sources for old builds without SVGs.
-  const needsInitialGrid = !meta || !meta.placements;
-  const firstLoads = needsInitialGrid ? [loadImageMipNow('grid', firstLevel)] : [];
+  // Visual artwork is SVG-first; avoid loading the visual grid PNG when modern
+  // metadata gives us placement dimensions.
+  const firstLoads = [];
+  if (!meta || !meta.placements) firstLoads.push(loadImageMipNow('grid', firstLevel));
   if (mipLevels.includes(firstLevel)) firstLoads.push(loadIdmapMipNow(firstLevel));
 
   const loaded = await Promise.allSettled(firstLoads);
-  const firstGrid = needsInitialGrid && loaded[0].status === 'fulfilled' ? loaded[0].value : null;
+  const firstGrid = (!meta || !meta.placements) && loaded[0] && loaded[0].status === 'fulfilled' ? loaded[0].value : null;
   if (firstGrid) {
     imageMipCache.set('grid:' + firstLevel, firstGrid);
-  } else if (needsInitialGrid) {
+  } else if (!meta || !meta.placements) {
     // Last-resort fallback for old exports with no mips directory.
     const gridImg = await loadImageMipNow('grid', 1);
     gridSrcCache = gridImg;
@@ -720,9 +713,14 @@ async function init() {
     drillLayers.push(...((meta.hole_layers) || []));
     drillLayers.push(...((meta.layers) || []));
   }
-  drillImg = optionalLayerRef(drillLayers,
-                             ['drill', 'drills', 'Drill', 'Drills',
-                              'PTH', 'NPTH', 'pth', 'npth']) || layerRef('drill');
+  const pthRef = optionalLayerRef(drillLayers, ['PTH', 'pth']);
+  const npthRef = optionalLayerRef(drillLayers, ['NPTH', 'npth']);
+  if (pthRef || npthRef) {
+    drillImg = [pthRef, npthRef].filter(Boolean);
+  } else {
+    drillImg = optionalLayerRef(drillLayers,
+                               ['drill', 'drills', 'Drill', 'Drills']) || layerRef('drill');
+  }
 
   if (topSilkImg || bottomSilkImg) {
     document.getElementById('toggle-silk').style.display = 'inline-block';
@@ -1472,17 +1470,66 @@ function drawTintedGridCrop(ctx, name, p, colour, alpha, mirror) {
   }
 }
 
-function drawTintedLayer(ctx, name, p, colour, alpha, mirror) {
-  const svg = vectorImageStatus(name);
-  if (svg.img) {
-    drawAlphaTintedSvg(ctx, svg.img, p, mirror, colour, alpha);
-    return;
-  }
-  if (svg.state === 'pending') return;
+function drawVectorAlpha(ctx, img, p, mirror, colour, alpha, mode = 'alpha') {
+  const r = tileScreenRect(p);
+  if (!img || !rectVisible(r)) return;
 
-  // Backward-compatible fallback for older build directories that only include
-  // PNG atlases/mips. New builds copy the source SVG layers and take the path
-  // above, avoiding PNG visual tiles entirely.
+  const crop = currentCropForTile({...p, x: 0, y: 0});
+  const sx = crop.x * img.width / Math.max(1, p.w);
+  const sy = crop.y * img.height / Math.max(1, p.h);
+  const sw = crop.w * img.width / Math.max(1, p.w);
+  const sh = crop.h * img.height / Math.max(1, p.h);
+
+  const off = document.createElement('canvas');
+  off.width = Math.max(1, Math.ceil(r.w * renderDpr));
+  off.height = Math.max(1, Math.ceil(r.h * renderDpr));
+  const octx = off.getContext('2d');
+  octx.setTransform(renderDpr, 0, 0, renderDpr, 0, 0);
+
+  if (mode === 'maskfilm') {
+    octx.fillStyle = colour;
+    octx.globalAlpha = alpha;
+    octx.fillRect(0, 0, r.w, r.h);
+    octx.globalAlpha = 1;
+    octx.globalCompositeOperation = 'destination-out';
+  }
+
+  if (mirror) {
+    octx.translate(r.w, 0);
+    octx.scale(-1, 1);
+  }
+  octx.drawImage(img, sx, sy, sw, sh, 0, 0, r.w, r.h);
+
+  if (mode !== 'maskfilm') {
+    octx.globalCompositeOperation = 'source-in';
+    octx.fillStyle = colour;
+    octx.globalAlpha = alpha;
+    octx.fillRect(0, 0, r.w, r.h);
+  }
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(r.x, r.y, r.w, r.h);
+  ctx.clip();
+  ctx.drawImage(off, r.x, r.y, off.width / renderDpr, off.height / renderDpr);
+  ctx.restore();
+}
+
+function drawVectorLayer(ctx, layerRef, p, mirror, colour, alpha, mode = 'alpha') {
+  const name = layerRef && layerRef._pcbnetsName ? layerRef._pcbnetsName : layerRef;
+  if (!name) return false;
+  const status = vectorImageStatus(name);
+  const img = vectorImageCache.get(name);
+  if (img instanceof HTMLImageElement) {
+    drawVectorAlpha(ctx, img, p, mirror, colour, alpha, mode);
+    return true;
+  }
+  // A pending SVG should suppress PNG fallback; fallback only after 404/error.
+  return status === 'pending';
+}
+
+function drawTintedLayer(ctx, name, p, colour, alpha, mirror) {
+  if (drawVectorLayer(ctx, name, p, mirror, colour, alpha, 'alpha')) return;
   drawTintedGridCrop(ctx, name, p, colour, alpha, mirror);
 }
 
@@ -1525,81 +1572,13 @@ function alphaTintedImage(img, colour, alpha, outW, outH, sourceLevel) {
   return off;
 }
 
-function drawSvgCropToOffscreen(img, p, mirror) {
-  const r = tileScreenRect(p);
-  if (!rectVisible(r)) return null;
-  const crop = currentCropForTile({...p, x: 0, y: 0});
-  const off = document.createElement('canvas');
-  off.width = Math.max(1, Math.ceil(r.w * renderDpr));
-  off.height = Math.max(1, Math.ceil(r.h * renderDpr));
-  const octx = off.getContext('2d');
-  octx.setTransform(renderDpr, 0, 0, renderDpr, 0, 0);
-  if (mirror) {
-    octx.translate(r.w, 0);
-    octx.scale(-1, 1);
-  }
-  octx.drawImage(img, crop.x, crop.y, crop.w, crop.h, 0, 0, r.w, r.h);
-  return {canvas: off, rect: r};
-}
-
-function drawSvgAlphaToTile(ctx, img, p, mirror, colour, alpha) {
-  const rendered = drawSvgCropToOffscreen(img, p, mirror);
-  if (!rendered) return;
-  const {canvas, rect} = rendered;
-  const octx = canvas.getContext('2d');
-  const [r, g, b] = parseHexColour(colour);
-  octx.setTransform(1, 0, 0, 1, 0, 0);
-  octx.globalCompositeOperation = 'source-in';
-  octx.globalAlpha = alpha;
-  octx.fillStyle = `rgb(${r}, ${g}, ${b})`;
-  octx.fillRect(0, 0, canvas.width, canvas.height);
-  octx.globalAlpha = 1;
-  octx.globalCompositeOperation = 'source-over';
-
-  ctx.drawImage(canvas, rect.x, rect.y, canvas.width / renderDpr, canvas.height / renderDpr);
-}
-
-function drawSvgMaskFilmToTile(ctx, img, p, mirror, colour, alpha) {
-  const rendered = drawSvgCropToOffscreen(img, p, mirror);
-  if (!rendered) return;
-  const {canvas, rect} = rendered;
-  const opening = canvas;
-  const [r, g, b] = parseHexColour(colour);
-
-  const film = document.createElement('canvas');
-  film.width = opening.width;
-  film.height = opening.height;
-  const fctx = film.getContext('2d');
-  fctx.globalAlpha = alpha;
-  fctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
-  fctx.fillRect(0, 0, film.width, film.height);
-  fctx.globalAlpha = 1;
-  fctx.globalCompositeOperation = 'destination-out';
-  fctx.drawImage(opening, 0, 0);
-  fctx.globalCompositeOperation = 'source-over';
-
-  ctx.drawImage(film, rect.x, rect.y, film.width / renderDpr, film.height / renderDpr);
-}
-
-function drawAlphaTintedSvg(ctx, img, p, mirror, colour, alpha) {
-  const crop = currentCropForTile({...p, x: 0, y: 0});
-  if (img._pcbnetsVector) {
-    drawSvgAlphaToTile(ctx, img, p, mirror, colour, alpha);
-    return;
-  }
-  const off = alphaTintedImage(img, colour, alpha, p.w, p.h, 1);
-  drawImageToTile(ctx, off, crop, p, mirror, 1);
-}
-
 function drawAlphaTintedImage(ctx, img, p, mirror, colour, alpha) {
-  const name = img && img._pcbnetsName;
-  const svg = name ? vectorImageStatus(name) : {state: 'missing', img: null};
-  if (svg.img) {
-    drawAlphaTintedSvg(ctx, svg.img, p, mirror, colour, alpha);
+  if (Array.isArray(img)) {
+    for (const one of img) drawAlphaTintedImage(ctx, one, p, mirror, colour, alpha);
     return;
   }
-  if (svg.state === 'pending') return;
-
+  if (drawVectorLayer(ctx, img, p, mirror, colour, alpha, 'alpha')) return;
+  const name = img && img._pcbnetsName;
   const desiredLevel = currentMipLevel();
   const crop = currentCropForTile({...p, x: 0, y: 0});
 
@@ -1652,14 +1631,8 @@ function solderMaskFilm(openingImg, p, colour, alpha, sourceLevel) {
 }
 
 function drawSolderMaskFilm(ctx, openingImg, p, mirror, colour, alpha) {
+  if (drawVectorLayer(ctx, openingImg, p, mirror, colour, alpha, 'maskfilm')) return;
   const name = openingImg && openingImg._pcbnetsName;
-  const svg = name ? vectorImageStatus(name) : {state: 'missing', img: null};
-  if (svg.img) {
-    drawSvgMaskFilmToTile(ctx, svg.img, p, mirror, colour, alpha);
-    return;
-  }
-  if (svg.state === 'pending') return;
-
   const desiredLevel = currentMipLevel();
   const crop = currentCropForTile({...p, x: 0, y: 0});
 
