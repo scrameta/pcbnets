@@ -385,22 +385,27 @@ def _optimise_svg(svg: str, precision: int = 3) -> tuple[str, int, int]:
              + (f' width="{w_m.group(1)}pt"' if w_m else '')
              + (f' height="{h_m.group(1)}pt"' if h_m else '') + '>']
     for style, ds in plain.items():
-        # gerbv emits each filled flash/region as a separate evenodd path.
-        # Concatenating many evenodd subpaths into one `d` makes the rule count
-        # crossings ACROSS formerly-separate shapes, so overlaps cancel and tear
-        # phantom holes in copper pours (power/ground planes lose ~4% fill).
-        # nonzero winding unions overlapping same-wound fills while still
-        # subtracting opposite-wound clearance holes — verified pixel-identical
-        # to gerbv's per-path output on solid planes.
-        merged_style = style.replace('fill-rule:evenodd', 'fill-rule:nonzero')
-        parts.append(f'<path style="{merged_style}" d="{rnd(" ".join(ds))}"/>')
+        # Keep gerbv's per-path evenodd fill semantics intact.  Negative
+        # plane layers commonly encode anti-pads/clearances as subpaths inside
+        # full-board filled paths; concatenating those paths (or switching them
+        # to nonzero winding) can fill the clearances and turn the simplified
+        # plane into a solid white rectangle.  That is more damaging than the
+        # extra nodes, so only collapse fills whose winding rule is safe to
+        # concatenate.
+        if 'fill-rule:evenodd' in style:
+            for d in ds:
+                parts.append(f'<path style="{style}" d="{rnd(d)}"/>')
+        else:
+            parts.append(f'<path style="{style}" d="{rnd(" ".join(ds))}"/>')
     if transformed:
         parts.append(f'<g transform="{the_matrix}">')
         for style, ds in transformed.items():
             parts.append(f'<path style="{style}" d="{rnd(" ".join(ds))}"/>')
         parts.append('</g>')
     parts.append('</svg>')
-    return '\n'.join(parts), n_in, len(plain) + len(transformed)
+    n_out = sum(len(ds) if 'fill-rule:evenodd' in style else 1
+                for style, ds in plain.items()) + len(transformed)
+    return '\n'.join(parts), n_in, n_out
 
 
 def _export_one_svg(
