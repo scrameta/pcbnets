@@ -21,8 +21,11 @@ import shutil
 import subprocess
 import time
 from typing import Iterable
+import xml.etree.ElementTree as ET
 
 from PIL import Image
+
+Image.MAX_IMAGE_PIXELS = 1_000_000_000  # 1 gigapixel
 
 
 log = logging.getLogger('pcbnets.gerber')
@@ -272,31 +275,79 @@ def _format_elapsed(seconds: float) -> str:
 #   svg_x = 72*X_in + e ;  svg_y = -72*Y_in + f
 # so window_inch = canvas_pt / 72, and the gerber origin (lower-left) inverts
 # from the transform. We recover both from one all-loaded SVG probe.
-_SVG_HDR_RE = re.compile(r'<svg\b[^>]*\bwidth="([\d.]+)pt"[^>]*\bheight="([\d.]+)pt"')
 _SVG_MATRIX_RE = re.compile(r'matrix\(([^)]*)\)')
+
+def _parse_svg_length(s: str) -> float:
+    """
+    Return numeric part of an SVG length.
+
+    For our gerbv use case, we deliberately ignore the written unit and work
+    in the SVG coordinate/user units used by the transform matrix.
+    """
+    m = re.match(r'\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)', s)
+    if not m:
+        raise ValueError(f"bad SVG length: {s!r}")
+    return float(m.group(1))
+
+
+def _parse_matrix_values(s: str) -> tuple[float, float, float, float, float, float]:
+    # SVG matrices may be comma-separated or whitespace-separated.
+    vals = [v for v in re.split(r'[\s,]+', s.strip()) if v]
+    if len(vals) != 6:
+        raise ValueError(f"bad SVG matrix: {s!r}")
+    return tuple(float(v) for v in vals)
 
 
 def _derive_window(probe_svg: pathlib.Path) -> tuple[float, float, float, float]:
-    """From an all-loaded SVG, return ``(origin_x, origin_y, width_in, height_in)``.
+    """From an all-loaded SVG, return (origin_x, origin_y, width_in, height_in).
 
-    Used to pin --origin/--window_inch for the per-layer single-file renders so
-    every layer shares one coordinate frame.
+    Robust to gerbv SVGs that use either:
+      width="123pt" height="456pt"
+    or:
+      width="123" height="456" viewBox="0 0 123 456"
+
+    The transform matrix gives the real SVG-units-per-inch scale.
     """
     text = probe_svg.read_text()
-    hdr = _SVG_HDR_RE.search(text)
+
+    root = ET.fromstring(text)
+    width_attr = root.attrib.get("width")
+    height_attr = root.attrib.get("height")
+
+    if width_attr is not None and height_attr is not None:
+        w_svg = _parse_svg_length(width_attr)
+        h_svg = _parse_svg_length(height_attr)
+    else:
+        viewbox = root.attrib.get("viewBox")
+        if not viewbox:
+            raise RuntimeError(f"could not parse SVG size from {probe_svg.name}")
+        vb = [float(x) for x in re.split(r'[\s,]+', viewbox.strip())]
+        if len(vb) != 4:
+            raise RuntimeError(f"bad SVG viewBox in {probe_svg.name}: {viewbox!r}")
+        _, _, w_svg, h_svg = vb
+
     mat = _SVG_MATRIX_RE.search(text)
-    if not hdr or not mat:
-        raise RuntimeError(
-            f'could not parse SVG window from {probe_svg.name} '
-            '(no <svg> width/height or transform matrix found)'
-        )
-    w_pt, h_pt = float(hdr.group(1)), float(hdr.group(2))
-    a, b, c, d, e, f = (float(x) for x in mat.group(1).split(','))
-    width_in = w_pt / 72.0
-    height_in = h_pt / 72.0
-    # lower-left = (svg_x=0, svg_y=h_pt): X=(0-e)/a, Y=(h_pt-f)/d
+    if not mat:
+        raise RuntimeError(f"could not parse transform matrix from {probe_svg.name}")
+
+    a, b, c, d, e, f = _parse_matrix_values(mat.group(1))
+
+    if abs(b) > 1e-9 or abs(c) > 1e-9:
+        raise RuntimeError(f"unexpected rotated/skewed SVG matrix in {probe_svg.name}")
+
+    # a/d are SVG units per Gerber inch. Usually a ~= +72 or +96,
+    # and d is negative because SVG y goes downward.
+    width_in = w_svg / abs(a)
+    height_in = h_svg / abs(d)
+
+    # Invert:
+    #   svg_x = a * X_in + e
+    #   svg_y = d * Y_in + f
+    #
+    # Lower-left of exported window is SVG x=0, y=h_svg.
     origin_x = (0.0 - e) / a
-    origin_y = (h_pt - f) / d
+    origin_y = (h_svg - f) / d
+
     return origin_x, origin_y, width_in, height_in
 
 
@@ -312,8 +363,8 @@ def _rasterise_all_svg(all_sources: list[pathlib.Path],
     cmd = [
         'gerbv',
         '--export=svg',
+        '--background=#010101','--foreground=#FEFEFE', #Black/white does not work, hence almost...
         f'--output={output}',
-        '--foreground=#FFFFFFFF',
         '--border=0',
         *[str(x) for x in all_sources],
     ]
@@ -324,83 +375,63 @@ def _rasterise_all_svg(all_sources: list[pathlib.Path],
             f'gerbv window-probe SVG failed:\n{proc.stderr.strip()}'
         )
 
+"""Make black transparent in black/white SVGs (e.g. gerbv exports).
 
-# gerbv emits one <path> per aperture flash/draw — tens of thousands per layer.
-# Browser pan/zoom cost scales with DOM node count, so a dense layer stutters
-# and forces a raster tile+mipmap pyramid. Collapsing all same-styled paths into
-# one <path> each drops node count ~1000x (e.g. 22k -> ~16), which makes a single
-# vector layer smooth enough to replace the whole tile pyramid, with resolution-
-# independent zoom. Verified geometrically identical to gerbv output (differences
-# limited to sub-pixel edge anti-aliasing).
-#
-# gerbv mixes two coordinate spaces: filled flashes are pre-baked into point
-# space (no transform); stroked draws are in inch space with a per-path
-# matrix(72,...) transform. They must stay separate — fills outside, strokes
-# inside one hoisted <g transform> — or the fills get double-transformed.
-_OPT_PATH_RE = re.compile(
-    r'<path\s+style="([^"]*)"\s+d="([^"]*?)"\s*'
-    r'(?:transform="(matrix\([^)]*\))")?\s*/>',
-    re.DOTALL)
-_OPT_HDR_RE = re.compile(r'<svg\b[^>]*>')
-_OPT_VB_RE = re.compile(r'viewBox="([^"]*)"')
-_OPT_W_RE = re.compile(r'width="([\d.]+)pt"')
-_OPT_H_RE = re.compile(r'height="([\d.]+)pt"')
-_OPT_NUM_RE = re.compile(r'-?\d+\.\d+')
+Wraps the original drawing in a luminance <mask> applied to a single
+solid rect. Painting order is preserved inside the mask, so negative
+plane layers work correctly: clearances painted in black over the
+copper pour become transparent holes instead of vanishing (no white
+square!). White areas become the rect's fill colour, so layers are
+trivially recolourable.
 
+Renders correctly in browsers, resvg, librsvg, Inkscape. (cairosvg
+treats masks as alpha masks and will get this wrong.)
+"""
+def _svg_to_transparent(path_in, path_out, fill="#FFFFFF"):
+    text = pathlib.Path(path_in).read_text()
+    m = re.search(r'<svg\b[^>]*>', text)
+    header = text[:m.end()]
+    body = text[m.end():text.rindex('</svg>')]
+    # Snap gerbv's off-black/off-white so luminance hits exactly 0/255.
+    body = body.replace('#010101', '#000000').replace('#FEFEFE', '#FFFFFF')
+    vb = re.search(r'viewBox="([\d.eE+-]+)[ ,]+([\d.eE+-]+)[ ,]+'
+                   r'([\d.eE+-]+)[ ,]+([\d.eE+-]+)"', header)
+    if not vb:
+        raise SystemExit(f"{path_in}: no viewBox found")
+    x, y, w, h = vb.groups()
+    out = (f'{header}\n'
+           f'<mask id="lum" maskUnits="userSpaceOnUse" '
+           f'x="{x}" y="{y}" width="{w}" height="{h}">{body}</mask>\n'
+           f'<rect x="{x}" y="{y}" width="{w}" height="{h}" '
+           f'fill="{fill}" mask="url(#lum)"/>\n</svg>\n')
+    pathlib.Path(path_out).write_text(out)
 
-def _optimise_svg(svg: str, precision: int = 3) -> tuple[str, int, int]:
-    """Collapse gerbv per-aperture <path> nodes into one <path> per style.
+def _optimise_svg_with_tools(svg_path: pathlib.Path) -> tuple[int, int]:
+    """Optimise an SVG in-place using svgo.
 
-    Returns ``(optimised_svg, nodes_in, nodes_out)``. Geometry is unchanged;
-    only paint-order within a style and coordinate precision differ, both
-    below the visible threshold for a copper viewer.
+    The tools run in series so we avoid hand-editing path geometry in pcbnets:
+    ``svgo -i in.svg -o temp.svg`` with
+    viewboxing/comment/id cleanup enabled.  Returns ``(bytes_in, bytes_out)``.
     """
-    hdr_m = _OPT_HDR_RE.search(svg)
-    if not hdr_m:
-        return svg, 0, 0
-    hdr = hdr_m.group(0)
-    vb_m = _OPT_VB_RE.search(hdr)
-    w_m = _OPT_W_RE.search(hdr)
-    h_m = _OPT_H_RE.search(hdr)
-    vb = vb_m.group(1) if vb_m else '0 0 0 0'
+    before = svg_path.stat().st_size
+    try:
+        svgo = subprocess.run(
+            ['svgo', '-i', str(svg_path), '-o', str(svg_path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if svgo.returncode != 0:
+            raise RuntimeError(
+                'svgo failed while optimising '
+                f'{svg_path.name}: {svgo.stderr.strip() or svgo.stdout.strip()}'
+            )
 
-    transformed: dict[str, list[str]] = {}
-    plain: dict[str, list[str]] = {}
-    the_matrix: str | None = None
-    n_in = 0
-    for m in _OPT_PATH_RE.finditer(svg):
-        style, d, mat = m.group(1).strip(), m.group(2), m.group(3)
-        n_in += 1
-        if mat:
-            the_matrix = mat
-            transformed.setdefault(style, []).append(d)
-        else:
-            plain.setdefault(style, []).append(d)
-
-    def rnd(t: str) -> str:
-        return _OPT_NUM_RE.sub(
-            lambda x: f'{float(x.group()):.{precision}f}', t)
-
-    parts = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{vb}"'
-             + (f' width="{w_m.group(1)}pt"' if w_m else '')
-             + (f' height="{h_m.group(1)}pt"' if h_m else '') + '>']
-    for style, ds in plain.items():
-        # gerbv emits each filled flash/region as a separate evenodd path.
-        # Concatenating many evenodd subpaths into one `d` makes the rule count
-        # crossings ACROSS formerly-separate shapes, so overlaps cancel and tear
-        # phantom holes in copper pours (power/ground planes lose ~4% fill).
-        # nonzero winding unions overlapping same-wound fills while still
-        # subtracting opposite-wound clearance holes — verified pixel-identical
-        # to gerbv's per-path output on solid planes.
-        merged_style = style.replace('fill-rule:evenodd', 'fill-rule:nonzero')
-        parts.append(f'<path style="{merged_style}" d="{rnd(" ".join(ds))}"/>')
-    if transformed:
-        parts.append(f'<g transform="{the_matrix}">')
-        for style, ds in transformed.items():
-            parts.append(f'<path style="{style}" d="{rnd(" ".join(ds))}"/>')
-        parts.append('</g>')
-    parts.append('</svg>')
-    return '\n'.join(parts), n_in, len(plain) + len(transformed)
+        return before, svg_path.stat().st_size
+    except FileNotFoundError as e:
+        raise RuntimeError(
+            f'{e.filename} is required for SVG optimisation; install svgo'
+        ) from e
 
 
 def _export_one_svg(
@@ -414,14 +445,11 @@ def _export_one_svg(
     cmd = [
         'gerbv',
         '--export=svg',
+        '--background=#010101','--foreground=#FEFEFE', #Black/white does not work, hence almost...
         f'--output={output}',
         # Pin the frame so every single-file layer shares one viewBox/transform.
         f'--origin={ox:.6f}x{oy:.6f}',
         f'--window_inch={w_in:.6f}x{h_in:.6f}',
-        # gerbv's SVG backend does not emit a background rect; keep the SVG
-        # transparent and add the black mask background during SVG→PNG.
-        '--background=#000000',
-        '--foreground=#FFFFFFFF',
         '--border=0',
         str(all_sources[selected_src]),
     ]
@@ -460,16 +488,15 @@ def _rasterise_svg_to_png(svg_path: pathlib.Path, png_path: pathlib.Path,
                           window: tuple[float, float, float, float],
                           dpi: int) -> tuple[int, int]:
     """Rasterise an SVG layer to a black-background PNG at ``dpi``."""
-    cairosvg = importlib.import_module('cairosvg')
     _ox, _oy, w_in, h_in = window
     width = max(1, round(w_in * dpi))
     height = max(1, round(h_in * dpi))
-    cairosvg.svg2png(
-        url=str(svg_path),
-        write_to=str(png_path),
-        output_width=width,
-        output_height=height,
-        background_color='black',
+    subprocess.run(
+        ['rsvg-convert', str(svg_path),
+         '-w', str(width), '-h', str(height),
+         '-b', 'black',
+         '-o', str(png_path)],
+        check=True,
     )
     if not png_path.exists():
         raise RuntimeError(
@@ -586,11 +613,17 @@ def rasterise(
             log.error('  ! %s', e)
             continue
 
-        raw = svg_out.read_text()
-        opt, n_in, n_out = _optimise_svg(raw)
-        svg_out.write_text(opt)
-        log.info('    → svg: %d→%d nodes, %.1f→%.1f MB',
-                 n_in, n_out, len(raw) / 1e6, len(opt) / 1e6)
+        _svg_to_transparent(svg_out,svg_out)
+
+        try:
+            before_bytes, after_bytes = _optimise_svg_with_tools(svg_out)
+        except RuntimeError as e:
+            log.error('  ! SVG optimisation failed: %s', e)
+            if not svg:
+                svg_out.unlink(missing_ok=True)
+            continue
+        log.info('    → svg: %.1f→%.1f MB via svgo',
+                 before_bytes / 1e6, after_bytes / 1e6)
 
         log.info('  rasterising %s.png from %s.svg', name, name)
         try:

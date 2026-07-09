@@ -677,25 +677,23 @@ def test_write_build_emits_drill_overlay_for_tiles(tmp_path):
     assert (build / 'mips' / '4' / 'tiles' / 'drill_1_1.png').is_file()
 
 
-def test_svg_optimise_disables_aspect_ratio_letterboxing():
-    from pcbnets.cli import _optimise_svg_text
+def test_copy_visual_svgs_preserves_source_text(tmp_path):
+    from pcbnets.cli import _copy_visual_svgs
 
-    svg = '<svg width="1303" height="885" viewBox="0 0 1303 885"><path d="M0 0"/></svg>'
+    src_dir = tmp_path / 'src'
+    build_dir = tmp_path / 'build'
+    src_dir.mkdir()
+    build_dir.mkdir()
+    svg = (
+        '<svg width="1303" height="885" viewBox="0 0 1303 885">\n'
+        '  <!-- keep raw -->\n'
+        '</svg>\n'
+    )
+    (src_dir / 'F_Cu.svg').write_text(svg)
 
-    optimised = _optimise_svg_text(svg)
+    _copy_visual_svgs(src_dir, build_dir, ['F_Cu'])
 
-    assert 'preserveAspectRatio="none"' in optimised
-
-
-def test_svg_optimise_preserves_explicit_aspect_ratio():
-    from pcbnets.cli import _optimise_svg_text
-
-    svg = '<svg preserveAspectRatio="xMinYMin meet" viewBox="0 0 1 1"></svg>'
-
-    optimised = _optimise_svg_text(svg)
-
-    assert optimised.count('preserveAspectRatio=') == 1
-    assert 'preserveAspectRatio="xMinYMin meet"' in optimised
+    assert (build_dir / 'F_Cu.svg').read_text() == svg
 
 
 def test_export_copies_mips_and_tiles(tmp_path):

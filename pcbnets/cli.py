@@ -681,35 +681,17 @@ def _run_pipeline(directory: pathlib.Path,
     return grid, idmap, meta, masks, report
 
 
-
-def _optimise_svg_text(text: str) -> str:
-    """Apply a conservative, dependency-free SVG minification pass.
-
-    Viewer SVGs are drawn into the same board-space rectangle as the PNG
-    idmap.  Some exporters round SVG width/height differently from the raster
-    PNG dimensions; the browser's default ``preserveAspectRatio="xMidYMid
-    meet"`` then letterboxes the drawing, which shows up as a systematic
-    offset against the idmap.  Disabling aspect-ratio preservation keeps the
-    SVG viewport mapped exactly onto the idmap rectangle.
-    """
-    text = re.sub(r'<!--.*?-->', '', text, flags=re.S)
-    text = re.sub(r'(<svg\b(?![^>]*\bpreserveAspectRatio=))',
-                  r'\1 preserveAspectRatio="none"', text, count=1, flags=re.I)
-    text = re.sub(r'>\s+<', '><', text)
-    text = re.sub(r'\s{2,}', ' ', text)
-    return text.strip() + '\n'
-
-def _copy_visual_svgs(src_dir: pathlib.Path, build_dir: pathlib.Path, names: Iterable[str]) -> None:
+def _copy_visual_svgs(src_dir: pathlib.Path, build_dir: pathlib.Path,
+                      names: Iterable[str]) -> None:
     log = logging.getLogger('pcbnets.render')
     for name in sorted(set(names)):
         src = src_dir / f'{name}.svg'
         if not src.exists():
             continue
         dst = build_dir / f'{name}.svg'
-        raw = src.read_text(encoding='utf-8')
-        optimised = _optimise_svg_text(raw)
-        dst.write_text(optimised, encoding='utf-8')
-        log.info('  wrote %s.svg (%.1f%%)', name, len(optimised) * 100 / max(1, len(raw)))
+        shutil.copy2(src, dst)
+        log.info('  copied %s.svg', name)
+
 
 def _write_build(build_dir: pathlib.Path,
                  grid: Image.Image,
