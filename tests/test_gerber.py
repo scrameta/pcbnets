@@ -26,46 +26,40 @@ def touch(p: pathlib.Path) -> None:
     p.write_text('')
 
 
-def test_svg_optimise_preserves_evenodd_plane_paths():
-    """Evenodd plane paths must not be merged into a solid white fill."""
-    from pcbnets.gerber import _optimise_svg
+def test_svg_tools_run_svgo_then_scour(monkeypatch, tmp_path):
+    from pcbnets.gerber import _optimise_svg_with_tools
 
-    svg = (
-        '<svg width="10pt" height="10pt" viewBox="0 0 10 10">'
-        '<path style="fill:#ffffff;fill-rule:evenodd" '
-        'd="M0 0 H10 V10 H0 Z M4 4 H6 V6 H4 Z"/>'
-        '<path style="fill:#ffffff;fill-rule:evenodd" '
-        'd="M1 1 H2 V2 H1 Z"/>'
-        '</svg>'
-    )
+    svg = tmp_path / 'layer.svg'
+    svg.write_text('<svg><!-- verbose --><path d="M0 0"/></svg>')
+    calls = []
 
-    optimised, nodes_in, nodes_out = _optimise_svg(svg)
+    def fake_run(cmd, stdout, stderr, text):
+        calls.append(cmd)
+        if cmd[0] == 'svgo':
+            pathlib.Path(cmd[4]).write_text('<svg><path d="M0 0"/></svg>')
+        elif cmd[0] == 'scour':
+            pathlib.Path(cmd[4]).write_text('<svg><path d="M0 0"/></svg>')
+        return type('Proc', (), {'returncode': 0, 'stdout': '', 'stderr': ''})()
 
-    assert nodes_in == 2
-    assert nodes_out == 2
-    assert optimised.count('<path style="fill:#ffffff;fill-rule:evenodd"') == 2
-    assert 'fill-rule:nonzero' not in optimised
+    monkeypatch.setattr('pcbnets.gerber.subprocess.run', fake_run)
 
+    before, after = _optimise_svg_with_tools(svg)
 
-def test_svg_optimise_preserves_plain_compound_fill_paths():
-    """Plain compound fills such as annular rings must stay hollow."""
-    from pcbnets.gerber import _optimise_svg
-
-    svg = (
-        '<svg width="10pt" height="10pt" viewBox="0 0 10 10">'
-        '<path style="fill:#ffffff" '
-        'd="M0 0 H10 V10 H0 Z M4 4 H6 V6 H4 Z"/>'
-        '<path style="fill:#ffffff" '
-        'd="M1 1 H2 V2 H1 Z"/>'
-        '</svg>'
-    )
-
-    optimised, nodes_in, nodes_out = _optimise_svg(svg)
-
-    assert nodes_in == 2
-    assert nodes_out == 2
-    assert optimised.count('<path style="fill:#ffffff"') == 2
-    assert 'M0 0 H10 V10 H0 Z M4 4 H6 V6 H4 Z M1 1' not in optimised
+    assert before > after
+    assert calls == [
+        ['svgo', '-i', str(svg), '-o', str(tmp_path / 'layer.svgo.tmp.svg')],
+        [
+            'scour',
+            '-i', str(tmp_path / 'layer.svgo.tmp.svg'),
+            '-o', str(svg),
+            '--enable-viewboxing',
+            '--enable-id-stripping',
+            '--enable-comment-stripping',
+            '--shorten-ids',
+            '--indent=none',
+        ],
+    ]
+    assert not (tmp_path / 'layer.svgo.tmp.svg').exists()
 
 
 def test_detect_kicad_modern_4_layer(tmp_path):

@@ -325,82 +325,55 @@ def _rasterise_all_svg(all_sources: list[pathlib.Path],
         )
 
 
-# gerbv emits one <path> per aperture flash/draw — tens of thousands per layer.
-# Browser pan/zoom cost scales with DOM node count, so a dense layer stutters
-# and forces a raster tile+mipmap pyramid. Collapsing all same-styled paths into
-# one <path> each drops node count ~1000x (e.g. 22k -> ~16), which makes a single
-# vector layer smooth enough to replace the whole tile pyramid, with resolution-
-# independent zoom. Verified geometrically identical to gerbv output (differences
-# limited to sub-pixel edge anti-aliasing).
-#
-# gerbv mixes two coordinate spaces: filled flashes are pre-baked into point
-# space (no transform); stroked draws are in inch space with a per-path
-# matrix(72,...) transform. They must stay separate — fills outside, strokes
-# inside one hoisted <g transform> — or the fills get double-transformed.
-_OPT_PATH_RE = re.compile(
-    r'<path\s+style="([^"]*)"\s+d="([^"]*?)"\s*'
-    r'(?:transform="(matrix\([^)]*\))")?\s*/>',
-    re.DOTALL)
-_OPT_HDR_RE = re.compile(r'<svg\b[^>]*>')
-_OPT_VB_RE = re.compile(r'viewBox="([^"]*)"')
-_OPT_W_RE = re.compile(r'width="([\d.]+)pt"')
-_OPT_H_RE = re.compile(r'height="([\d.]+)pt"')
-_OPT_NUM_RE = re.compile(r'-?\d+\.\d+')
+def _optimise_svg_with_tools(svg_path: pathlib.Path) -> tuple[int, int]:
+    """Optimise an SVG in-place using svgo followed by scour.
 
-
-def _optimise_svg(svg: str, precision: int = 3) -> tuple[str, int, int]:
-    """Collapse gerbv per-aperture <path> nodes into one <path> per style.
-
-    Returns ``(optimised_svg, nodes_in, nodes_out)``. Geometry is unchanged;
-    only paint-order within a style and coordinate precision differ, both
-    below the visible threshold for a copper viewer.
+    The tools run in series so we avoid hand-editing path geometry in pcbnets:
+    ``svgo -i in.svg -o temp.svg`` then ``scour -i temp.svg -o in.svg`` with
+    viewboxing/comment/id cleanup enabled.  Returns ``(bytes_in, bytes_out)``.
     """
-    hdr_m = _OPT_HDR_RE.search(svg)
-    if not hdr_m:
-        return svg, 0, 0
-    hdr = hdr_m.group(0)
-    vb_m = _OPT_VB_RE.search(hdr)
-    w_m = _OPT_W_RE.search(hdr)
-    h_m = _OPT_H_RE.search(hdr)
-    vb = vb_m.group(1) if vb_m else '0 0 0 0'
+    before = svg_path.stat().st_size
+    tmp = svg_path.with_name(f'{svg_path.stem}.svgo.tmp{svg_path.suffix}')
+    try:
+        svgo = subprocess.run(
+            ['svgo', '-i', str(svg_path), '-o', str(tmp)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if svgo.returncode != 0 or not tmp.exists():
+            raise RuntimeError(
+                'svgo failed while optimising '
+                f'{svg_path.name}: {svgo.stderr.strip() or svgo.stdout.strip()}'
+            )
 
-    transformed: dict[str, list[str]] = {}
-    plain: dict[str, list[str]] = {}
-    the_matrix: str | None = None
-    n_in = 0
-    for m in _OPT_PATH_RE.finditer(svg):
-        style, d, mat = m.group(1).strip(), m.group(2), m.group(3)
-        n_in += 1
-        if mat:
-            the_matrix = mat
-            transformed.setdefault(style, []).append(d)
-        else:
-            plain.setdefault(style, []).append(d)
-
-    def rnd(t: str) -> str:
-        return _OPT_NUM_RE.sub(
-            lambda x: f'{float(x.group()):.{precision}f}', t)
-
-    parts = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{vb}"'
-             + (f' width="{w_m.group(1)}pt"' if w_m else '')
-             + (f' height="{h_m.group(1)}pt"' if h_m else '') + '>']
-    for style, ds in plain.items():
-        # Keep gerbv's per-path fill semantics intact.  Plain filled paths can
-        # contain compound geometry such as plane anti-pads and annular rings;
-        # concatenating those paths changes how both evenodd and implicit
-        # nonzero winding are evaluated across formerly independent shapes.
-        # That can fill clearances or hollow circles, so only transformed stroke
-        # paths are collapsed below.
-        for d in ds:
-            parts.append(f'<path style="{style}" d="{rnd(d)}"/>')
-    if transformed:
-        parts.append(f'<g transform="{the_matrix}">')
-        for style, ds in transformed.items():
-            parts.append(f'<path style="{style}" d="{rnd(" ".join(ds))}"/>')
-        parts.append('</g>')
-    parts.append('</svg>')
-    n_out = sum(len(ds) for ds in plain.values()) + len(transformed)
-    return '\n'.join(parts), n_in, n_out
+        scour = subprocess.run(
+            [
+                'scour',
+                '-i', str(tmp),
+                '-o', str(svg_path),
+                '--enable-viewboxing',
+                '--enable-id-stripping',
+                '--enable-comment-stripping',
+                '--shorten-ids',
+                '--indent=none',
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if scour.returncode != 0 or not svg_path.exists():
+            raise RuntimeError(
+                'scour failed while optimising '
+                f'{svg_path.name}: {scour.stderr.strip() or scour.stdout.strip()}'
+            )
+        return before, svg_path.stat().st_size
+    except FileNotFoundError as e:
+        raise RuntimeError(
+            f'{e.filename} is required for SVG optimisation; install svgo and scour'
+        ) from e
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _export_one_svg(
@@ -586,11 +559,15 @@ def rasterise(
             log.error('  ! %s', e)
             continue
 
-        raw = svg_out.read_text()
-        opt, n_in, n_out = _optimise_svg(raw)
-        svg_out.write_text(opt)
-        log.info('    → svg: %d→%d nodes, %.1f→%.1f MB',
-                 n_in, n_out, len(raw) / 1e6, len(opt) / 1e6)
+        try:
+            before_bytes, after_bytes = _optimise_svg_with_tools(svg_out)
+        except RuntimeError as e:
+            log.error('  ! SVG optimisation failed: %s', e)
+            if not svg:
+                svg_out.unlink(missing_ok=True)
+            continue
+        log.info('    → svg: %.1f→%.1f MB via svgo+scour',
+                 before_bytes / 1e6, after_bytes / 1e6)
 
         log.info('  rasterising %s.png from %s.svg', name, name)
         try:
