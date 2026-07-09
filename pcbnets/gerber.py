@@ -21,8 +21,11 @@ import shutil
 import subprocess
 import time
 from typing import Iterable
+import xml.etree.ElementTree as ET
 
 from PIL import Image
+
+Image.MAX_IMAGE_PIXELS = 1_000_000_000  # 1 gigapixel
 
 
 log = logging.getLogger('pcbnets.gerber')
@@ -272,31 +275,79 @@ def _format_elapsed(seconds: float) -> str:
 #   svg_x = 72*X_in + e ;  svg_y = -72*Y_in + f
 # so window_inch = canvas_pt / 72, and the gerber origin (lower-left) inverts
 # from the transform. We recover both from one all-loaded SVG probe.
-_SVG_HDR_RE = re.compile(r'<svg\b[^>]*\bwidth="([\d.]+)pt"[^>]*\bheight="([\d.]+)pt"')
 _SVG_MATRIX_RE = re.compile(r'matrix\(([^)]*)\)')
+
+def _parse_svg_length(s: str) -> float:
+    """
+    Return numeric part of an SVG length.
+
+    For our gerbv use case, we deliberately ignore the written unit and work
+    in the SVG coordinate/user units used by the transform matrix.
+    """
+    m = re.match(r'\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)', s)
+    if not m:
+        raise ValueError(f"bad SVG length: {s!r}")
+    return float(m.group(1))
+
+
+def _parse_matrix_values(s: str) -> tuple[float, float, float, float, float, float]:
+    # SVG matrices may be comma-separated or whitespace-separated.
+    vals = [v for v in re.split(r'[\s,]+', s.strip()) if v]
+    if len(vals) != 6:
+        raise ValueError(f"bad SVG matrix: {s!r}")
+    return tuple(float(v) for v in vals)
 
 
 def _derive_window(probe_svg: pathlib.Path) -> tuple[float, float, float, float]:
-    """From an all-loaded SVG, return ``(origin_x, origin_y, width_in, height_in)``.
+    """From an all-loaded SVG, return (origin_x, origin_y, width_in, height_in).
 
-    Used to pin --origin/--window_inch for the per-layer single-file renders so
-    every layer shares one coordinate frame.
+    Robust to gerbv SVGs that use either:
+      width="123pt" height="456pt"
+    or:
+      width="123" height="456" viewBox="0 0 123 456"
+
+    The transform matrix gives the real SVG-units-per-inch scale.
     """
     text = probe_svg.read_text()
-    hdr = _SVG_HDR_RE.search(text)
+
+    root = ET.fromstring(text)
+    width_attr = root.attrib.get("width")
+    height_attr = root.attrib.get("height")
+
+    if width_attr is not None and height_attr is not None:
+        w_svg = _parse_svg_length(width_attr)
+        h_svg = _parse_svg_length(height_attr)
+    else:
+        viewbox = root.attrib.get("viewBox")
+        if not viewbox:
+            raise RuntimeError(f"could not parse SVG size from {probe_svg.name}")
+        vb = [float(x) for x in re.split(r'[\s,]+', viewbox.strip())]
+        if len(vb) != 4:
+            raise RuntimeError(f"bad SVG viewBox in {probe_svg.name}: {viewbox!r}")
+        _, _, w_svg, h_svg = vb
+
     mat = _SVG_MATRIX_RE.search(text)
-    if not hdr or not mat:
-        raise RuntimeError(
-            f'could not parse SVG window from {probe_svg.name} '
-            '(no <svg> width/height or transform matrix found)'
-        )
-    w_pt, h_pt = float(hdr.group(1)), float(hdr.group(2))
-    a, b, c, d, e, f = (float(x) for x in mat.group(1).split(','))
-    width_in = w_pt / 72.0
-    height_in = h_pt / 72.0
-    # lower-left = (svg_x=0, svg_y=h_pt): X=(0-e)/a, Y=(h_pt-f)/d
+    if not mat:
+        raise RuntimeError(f"could not parse transform matrix from {probe_svg.name}")
+
+    a, b, c, d, e, f = _parse_matrix_values(mat.group(1))
+
+    if abs(b) > 1e-9 or abs(c) > 1e-9:
+        raise RuntimeError(f"unexpected rotated/skewed SVG matrix in {probe_svg.name}")
+
+    # a/d are SVG units per Gerber inch. Usually a ~= +72 or +96,
+    # and d is negative because SVG y goes downward.
+    width_in = w_svg / abs(a)
+    height_in = h_svg / abs(d)
+
+    # Invert:
+    #   svg_x = a * X_in + e
+    #   svg_y = d * Y_in + f
+    #
+    # Lower-left of exported window is SVG x=0, y=h_svg.
     origin_x = (0.0 - e) / a
-    origin_y = (h_pt - f) / d
+    origin_y = (h_svg - f) / d
+
     return origin_x, origin_y, width_in, height_in
 
 
@@ -313,7 +364,6 @@ def _rasterise_all_svg(all_sources: list[pathlib.Path],
         'gerbv',
         '--export=svg',
         f'--output={output}',
-        '--foreground=#FFFFFFFF',
         '--border=0',
         *[str(x) for x in all_sources],
     ]
@@ -394,7 +444,6 @@ def _export_one_svg(
         # gerbv's SVG backend does not emit a background rect; keep the SVG
         # transparent and add the black mask background during SVG→PNG.
         '--background=#000000',
-        '--foreground=#FFFFFFFF',
         '--border=0',
         str(all_sources[selected_src]),
     ]
