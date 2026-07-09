@@ -363,6 +363,7 @@ def _rasterise_all_svg(all_sources: list[pathlib.Path],
     cmd = [
         'gerbv',
         '--export=svg',
+        '--background=#010101','--foreground=#FEFEFE', #Black/white does not work, hence almost...
         f'--output={output}',
         '--border=0',
         *[str(x) for x in all_sources],
@@ -374,56 +375,63 @@ def _rasterise_all_svg(all_sources: list[pathlib.Path],
             f'gerbv window-probe SVG failed:\n{proc.stderr.strip()}'
         )
 
+"""Make black transparent in black/white SVGs (e.g. gerbv exports).
+
+Wraps the original drawing in a luminance <mask> applied to a single
+solid rect. Painting order is preserved inside the mask, so negative
+plane layers work correctly: clearances painted in black over the
+copper pour become transparent holes instead of vanishing (no white
+square!). White areas become the rect's fill colour, so layers are
+trivially recolourable.
+
+Renders correctly in browsers, resvg, librsvg, Inkscape. (cairosvg
+treats masks as alpha masks and will get this wrong.)
+"""
+def _svg_to_transparent(path_in, path_out, fill="#FFFFFF"):
+    text = pathlib.Path(path_in).read_text()
+    m = re.search(r'<svg\b[^>]*>', text)
+    header = text[:m.end()]
+    body = text[m.end():text.rindex('</svg>')]
+    # Snap gerbv's off-black/off-white so luminance hits exactly 0/255.
+    body = body.replace('#010101', '#000000').replace('#FEFEFE', '#FFFFFF')
+    vb = re.search(r'viewBox="([\d.eE+-]+)[ ,]+([\d.eE+-]+)[ ,]+'
+                   r'([\d.eE+-]+)[ ,]+([\d.eE+-]+)"', header)
+    if not vb:
+        raise SystemExit(f"{path_in}: no viewBox found")
+    x, y, w, h = vb.groups()
+    out = (f'{header}\n'
+           f'<mask id="lum" maskUnits="userSpaceOnUse" '
+           f'x="{x}" y="{y}" width="{w}" height="{h}">{body}</mask>\n'
+           f'<rect x="{x}" y="{y}" width="{w}" height="{h}" '
+           f'fill="{fill}" mask="url(#lum)"/>\n</svg>\n')
+    pathlib.Path(path_out).write_text(out)
 
 def _optimise_svg_with_tools(svg_path: pathlib.Path) -> tuple[int, int]:
-    """Optimise an SVG in-place using svgo followed by scour.
+    """Optimise an SVG in-place using svgo.
 
     The tools run in series so we avoid hand-editing path geometry in pcbnets:
-    ``svgo -i in.svg -o temp.svg`` then ``scour -i temp.svg -o in.svg`` with
+    ``svgo -i in.svg -o temp.svg`` with
     viewboxing/comment/id cleanup enabled.  Returns ``(bytes_in, bytes_out)``.
     """
     before = svg_path.stat().st_size
-    tmp = svg_path.with_name(f'{svg_path.stem}.svgo.tmp{svg_path.suffix}')
     try:
         svgo = subprocess.run(
-            ['svgo', '-i', str(svg_path), '-o', str(tmp)],
+            ['svgo', '-i', str(svg_path), '-o', str(svg_path)],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
         )
-        if svgo.returncode != 0 or not tmp.exists():
+        if svgo.returncode != 0:
             raise RuntimeError(
                 'svgo failed while optimising '
                 f'{svg_path.name}: {svgo.stderr.strip() or svgo.stdout.strip()}'
             )
 
-        scour = subprocess.run(
-            [
-                'scour',
-                '-i', str(tmp),
-                '-o', str(svg_path),
-                '--enable-viewboxing',
-                '--enable-id-stripping',
-                '--enable-comment-stripping',
-                '--shorten-ids',
-                '--indent=none',
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        if scour.returncode != 0 or not svg_path.exists():
-            raise RuntimeError(
-                'scour failed while optimising '
-                f'{svg_path.name}: {scour.stderr.strip() or scour.stdout.strip()}'
-            )
         return before, svg_path.stat().st_size
     except FileNotFoundError as e:
         raise RuntimeError(
-            f'{e.filename} is required for SVG optimisation; install svgo and scour'
+            f'{e.filename} is required for SVG optimisation; install svgo'
         ) from e
-    finally:
-        tmp.unlink(missing_ok=True)
 
 
 def _export_one_svg(
@@ -437,13 +445,11 @@ def _export_one_svg(
     cmd = [
         'gerbv',
         '--export=svg',
+        '--background=#010101','--foreground=#FEFEFE', #Black/white does not work, hence almost...
         f'--output={output}',
         # Pin the frame so every single-file layer shares one viewBox/transform.
         f'--origin={ox:.6f}x{oy:.6f}',
         f'--window_inch={w_in:.6f}x{h_in:.6f}',
-        # gerbv's SVG backend does not emit a background rect; keep the SVG
-        # transparent and add the black mask background during SVG→PNG.
-        '--background=#000000',
         '--border=0',
         str(all_sources[selected_src]),
     ]
@@ -482,16 +488,15 @@ def _rasterise_svg_to_png(svg_path: pathlib.Path, png_path: pathlib.Path,
                           window: tuple[float, float, float, float],
                           dpi: int) -> tuple[int, int]:
     """Rasterise an SVG layer to a black-background PNG at ``dpi``."""
-    cairosvg = importlib.import_module('cairosvg')
     _ox, _oy, w_in, h_in = window
     width = max(1, round(w_in * dpi))
     height = max(1, round(h_in * dpi))
-    cairosvg.svg2png(
-        url=str(svg_path),
-        write_to=str(png_path),
-        output_width=width,
-        output_height=height,
-        background_color='black',
+    subprocess.run(
+        ['rsvg-convert', str(svg_path),
+         '-w', str(width), '-h', str(height),
+         '-b', 'black',
+         '-o', str(png_path)],
+        check=True,
     )
     if not png_path.exists():
         raise RuntimeError(
@@ -608,6 +613,8 @@ def rasterise(
             log.error('  ! %s', e)
             continue
 
+        _svg_to_transparent(svg_out,svg_out)
+
         try:
             before_bytes, after_bytes = _optimise_svg_with_tools(svg_out)
         except RuntimeError as e:
@@ -615,7 +622,7 @@ def rasterise(
             if not svg:
                 svg_out.unlink(missing_ok=True)
             continue
-        log.info('    → svg: %.1f→%.1f MB via svgo+scour',
+        log.info('    → svg: %.1f→%.1f MB via svgo',
                  before_bytes / 1e6, after_bytes / 1e6)
 
         log.info('  rasterising %s.png from %s.svg', name, name)
