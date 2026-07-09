@@ -391,6 +391,7 @@ def _svg_to_transparent(path_in, path_out, fill="#FFFFFF"):
     text = pathlib.Path(path_in).read_text()
     m = re.search(r'<svg\b[^>]*>', text)
     header = text[:m.end()]
+    header = re.sub(r'<svg\b', '<svg shape-rendering="crispEdges"', header, count=1)    
     body = text[m.end():text.rindex('</svg>')]
     # Snap gerbv's off-black/off-white so luminance hits exactly 0/255.
     body = body.replace('#010101', '#000000').replace('#FEFEFE', '#FFFFFF')
@@ -494,7 +495,6 @@ def _rasterise_svg_to_png(svg_path: pathlib.Path, png_path: pathlib.Path,
     subprocess.run(
         ['rsvg-convert', str(svg_path),
          '-w', str(width), '-h', str(height),
-         '-b', 'black',
          '-o', str(png_path)],
         check=True,
     )

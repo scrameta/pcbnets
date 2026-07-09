@@ -7,6 +7,7 @@ from typing import Callable, Iterable
 
 from PIL import Image
 
+Image.MAX_IMAGE_PIXELS = 1_000_000_000  # 1 gigapixel
 
 # Optional silkscreen layer filenames, looked up alongside the copper layers.
 # Canonical KiCad-style names only.
@@ -29,7 +30,7 @@ MASK_POSITION = {
 }
 
 
-def threshold_mask(img: Image.Image, threshold: int = 0) -> Image.Image:
+def alpha_to_mask(img: Image.Image) -> Image.Image:
     """Convert an arbitrary image to a clean 1-bit mask.
 
     Avoids ``convert('1')``'s dithering — anything above ``threshold`` becomes
@@ -37,14 +38,14 @@ def threshold_mask(img: Image.Image, threshold: int = 0) -> Image.Image:
     to ``ImageChops.logical_*`` and ``scipy.ndimage.label`` (after going via
     numpy).
     """
-    return img.convert('L').point(lambda p: p > threshold, mode='1')
+    img = img.getchannel('A').point(lambda p: p > 128, mode='1')
+    return img
 
 
 def load_masks(
     directory: pathlib.Path,
     layer_names: Iterable[str],
     drill_name: str = 'drill',
-    threshold: int = 0,
     silk: bool = True,
     extra_names: Iterable[str] = (),
     progress: Callable[[str], None] | None = None,
@@ -78,7 +79,7 @@ def load_masks(
         path = directory / f'{name}.png'
         if not path.is_file():
             raise FileNotFoundError(f'expected mask file not found: {path}')
-        masks[name] = threshold_mask(Image.open(path), threshold)
+        masks[name] = alpha_to_mask(Image.open(path))
 
     if silk:
         optional = (*SILK_LAYERS, *MASK_LAYERS)
@@ -89,7 +90,7 @@ def load_masks(
             if path.is_file():
                 if progress:
                     progress(f'loading optional visual mask: {name}.png')
-                masks[name] = threshold_mask(Image.open(path), threshold)
+                masks[name] = alpha_to_mask(Image.open(path))
 
     # Sanity-check: every mask must have the same dimensions.
     if progress:
