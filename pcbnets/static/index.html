@@ -1,402 +1,1683 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>pcbnets viewer</title>
 <style>
-  :root{
-    --bg:#1a1a1a; --panel:#202020; --fg:#e0e0e0; --muted:#888;
-    --substrate:#2b2416;          /* bare FR4 under the copper */
-    --copper-outer:#c98f2e;
-    --copper-inner:#b7bcc5;
-    --soldermask:#0d6b34;
-    --silk:#f2f2f2;
-    --drill:#0b0b0b;
-    --highlight:rgba(255,80,80,.75);
+  :root {
+    --bg: #1a1a1a;
+    --panel: #242424;
+    --fg: #e0e0e0;
+    --muted: #888;
+    --highlight: rgba(255, 80, 80, 0.72);
+    --substrate: #2b2416;
+    --outer-copper: #c79a32;
+    --inner-copper: #a9b0b8;
+    --soldermask: #123d25;
+    --silk: #fff;
+    --drill: #050505;
   }
-  *{box-sizing:border-box}
-  html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);
-            font:14px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;overflow:hidden}
-  body{display:flex;flex-direction:row}
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    height: 100%;
+    overflow: hidden;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  body { display: flex; }
 
-  aside{width:290px;flex-shrink:0;padding:16px;background:var(--panel);
-        border-right:1px solid #333;overflow-y:auto}
-  aside h1{font-size:16px;margin:0 0 12px}
-  aside label.section{font-size:11px;color:var(--muted);text-transform:uppercase;
-                      display:block;margin-top:16px;margin-bottom:6px}
-  button{margin:0 4px 4px 0;padding:6px 10px;background:#333;color:var(--fg);
-         border:1px solid #444;border-radius:3px;cursor:pointer;font:inherit;font-size:12px}
-  button:hover{background:#444}
-  button.active{background:#2a5a7a;border-color:#4ac}
-  .row{display:flex;gap:4px;flex-wrap:wrap}
+  #sidebar {
+    width: 280px;
+    flex: 0 0 280px;
+    padding: 16px;
+    overflow-y: auto;
+    background: var(--panel);
+    border-right: 1px solid #333;
+  }
+  body.sidebar-collapsed #sidebar { display: none; }
+  #sidebar h1 { margin: 0 0 12px; font-size: 16px; }
+  #sidebar p { margin: 4px 0; color: var(--muted); font-size: 12px; }
+  #sidebar label.section {
+    display: block;
+    margin-top: 12px;
+    color: var(--muted);
+    font-size: 11px;
+    text-transform: uppercase;
+  }
+  #sidebar input[type=number] {
+    width: 100%;
+    padding: 6px;
+    color: var(--fg);
+    background: #111;
+    border: 1px solid #333;
+    border-radius: 3px;
+    font: inherit;
+  }
+  button {
+    margin-top: 6px;
+    padding: 6px 10px;
+    color: var(--fg);
+    background: #333;
+    border: 1px solid #444;
+    border-radius: 3px;
+    cursor: pointer;
+    font: inherit;
+    font-size: 12px;
+  }
+  button:hover { background: #444; }
+  button.active { background: #2a5a7a; border-color: #4ac; }
+  .toggle-row { display: flex; flex-wrap: wrap; gap: 6px; }
+  .hint { color: var(--muted); font-size: 11px; line-height: 1.35; }
+  .readout { margin-top: 4px; color: var(--muted); font-size: 11px; }
+  #net-info { margin-top: 16px; font-size: 13px; }
+  #net-info .layer-list { margin-top: 4px; color: var(--muted); }
+  #error { margin-top: 12px; color: #ff9d9d; white-space: pre-wrap; }
 
-  /* A layer button carries a dot when the selected net has copper on it. */
-  #layer-buttons button{position:relative;padding-left:20px}
-  #layer-buttons button::before{
-    content:'';position:absolute;left:7px;top:50%;transform:translateY(-50%);
-    width:6px;height:6px;border-radius:50%;background:transparent;
-    box-shadow:inset 0 0 0 1px #555}
-  #layer-buttons button.has-net::before{background:var(--highlight);box-shadow:none}
+  #viewport {
+    position: relative;
+    flex: 1;
+    min-width: 0;
+    overflow: auto;
+    background: #050505;
+    cursor: crosshair;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-user-drag: none;
+    scrollbar-color: #555 #181818;
+  }
+  #viewport *,
+  #viewport svg,
+  #viewport canvas {
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-user-drag: none;
+  }
+  #viewport.dragging { cursor: move; }
+  #sidebar-tab {
+    position: fixed;
+    z-index: 100;
+    top: 10px;
+    left: 10px;
+    display: none;
+    padding: 6px 10px;
+    color: var(--fg);
+    background: rgba(36, 36, 36, .92);
+    border: 1px solid #444;
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 14px;
+  }
+  body.sidebar-collapsed #sidebar-tab { display: block; }
 
-  #net-info{margin-top:16px;font-size:13px}
-  #net{font-weight:700;color:#ff8a8a}
-  .layer-list{color:var(--muted);margin-top:4px;font-size:12px}
-  #error{color:#ff9d9d;white-space:pre-wrap;margin-top:12px}
-
-  main{flex:1;overflow:auto;position:relative;background:#141414;cursor:crosshair}
-  main.dragging{cursor:move}
-
-  /* The board is a physical stack: substrate, copper, soldermask, silkscreen.
-     transform-origin stays at 0 0 so scroll offsets remain meaningful; the
-     back view mirrors in place with translateX(-100%) rather than moving the
-     board out from under the scroll container. */
-  .board{position:relative;margin:24px;transform-origin:0 0;
-         background:var(--substrate);box-shadow:0 0 0 1px #000}
-
-  .layer{position:absolute;inset:0;pointer-events:none}
-  .layer svg{position:absolute;inset:0;width:100%;height:100%;display:block}
-  .layer[hidden]{display:none}
-
-  .copper.outer{color:var(--copper-outer)}
-  .copper.inner{color:var(--copper-inner)}
-  .soldermask{color:var(--soldermask);opacity:.82}
-  .silk{color:var(--silk)}
-  .drill{color:var(--drill)}
-
-  .net{position:absolute;inset:0;z-index:20;pointer-events:none}
-  .net svg{position:absolute;inset:0;width:100%;height:100%;display:block;pointer-events:none}
-  .net g[data-layer]{display:none}
-  .net g[data-layer].shown{display:inline;pointer-events:auto}
-  .net-shape{fill:transparent;stroke:transparent;pointer-events:all}
-  .net-shape.selected{fill:var(--highlight);stroke:var(--highlight)}
+  #world {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    min-width: 100%;
+    min-height: 100%;
+  }
+  #grid-stage {
+    position: absolute;
+    left: 0;
+    top: 0;
+  }
+  #grid-inner {
+    position: absolute;
+    left: 0;
+    top: 0;
+    transform-origin: 0 0;
+  }
+  .tile {
+    position: absolute;
+    overflow: hidden;
+    background: #050505;
+    box-shadow: inset 0 0 0 1px #333;
+    contain: layout paint style;
+  }
+  .tile-board,
+  .tile-preview,
+  .tile-local-preview,
+  .tile-netmap,
+  .tile-net-highlight {
+    position: absolute;
+    left: 0;
+    top: 0;
+    transform-origin: 0 0;
+    will-change: transform;
+  }
+  .tile-board { z-index: 0; pointer-events: none; }
+  .tile-preview,
+  .tile-local-preview {
+    z-index: 10;
+    visibility: hidden;
+    pointer-events: none;
+    image-rendering: auto;
+  }
+  .tile-local-preview { z-index: 11; }
+  .tile-local-preview-canvas {
+    position: absolute;
+    image-rendering: auto;
+    pointer-events: none;
+  }
+  /* The source SVGs may request crispEdges for mask/PNG generation.
+     Override that only for the visible vector artwork so the browser
+     anti-aliases the final display normally. */
+  .tile-board svg,
+  .tile-board svg * {
+    shape-rendering: geometricPrecision !important;
+  }
+  .tile-board > svg,
+  .tile-netmap > svg {
+    position: absolute;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+  }
+  .tile-netmap { z-index: 20; pointer-events: none; }
+  .tile-netmap svg { pointer-events: none; }
+  body.navigating .tile-netmap,
+  body.navigation-settling .tile-netmap { visibility: hidden; }
+  /* Hide the live vector artwork while navigating. During the settling phase
+     each tile's board is revealed one at a time (see
+     revealBoardsProgressively) *underneath* the opaque preview canvases, so
+     the expensive SVG re-raster happens in small per-tile chunks that can be
+     interrupted by a new gesture, instead of one long input-blocking paint. */
+  body.navigating .tile.preview-full-active.preview-ready .tile-board,
+  body.navigating .tile.preview-local-active.local-preview-ready .tile-board,
+  body.navigation-settling .tile.preview-full-active.preview-ready:not(.board-revealed) .tile-board,
+  body.navigation-settling .tile.preview-local-active.local-preview-ready:not(.board-revealed) .tile-board {
+    visibility: hidden;
+  }
+  body.navigating .tile.preview-full-active.preview-ready .tile-preview,
+  body.navigation-settling .tile.preview-full-active.preview-ready .tile-preview {
+    visibility: visible;
+  }
+  body.navigating .tile.preview-local-active.local-preview-ready .tile-local-preview,
+  body.navigation-settling .tile.preview-local-active.local-preview-ready .tile-local-preview {
+    visibility: visible;
+  }
+  .net-shape {
+    fill: transparent;
+    stroke: transparent;
+    pointer-events: all;
+    cursor: crosshair;
+  }
+  /* The selected class on the netmap is bookkeeping; the visible highlight
+     lives in the lightweight .tile-net-highlight overlay, which contains only
+     the selected net's shapes and therefore stays visible (and cheap to
+     transform) while panning and zooming. */
+  .tile-net-highlight {
+    z-index: 21;
+  }
+  .tile-net-highlight,
+  .tile-net-highlight * {
+    pointer-events: none !important;
+  }
+  .tile-net-highlight > svg {
+    position: absolute;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+  }
+  .tile-net-highlight [data-net-id] {
+    fill: var(--highlight) !important;
+    stroke: var(--highlight) !important;
+  }
+  .silk-layer.silk-hidden { display: none; }
+  .tile-label {
+    position: absolute;
+    z-index: 30;
+    padding: 2px 6px;
+    color: #fff;
+    background: rgba(0, 0, 0, .75);
+    border-radius: 2px;
+    font-size: 11px;
+    line-height: 1.3;
+    pointer-events: none;
+    transform-origin: 0 0;
+    white-space: nowrap;
+  }
+  .tile-label.flipped { background: rgba(120, 60, 0, .85); }
 </style>
 </head>
 <body>
-
-<aside>
+<div id="sidebar">
   <h1>pcbnets viewer</h1>
+  <p id="loading">Loading…</p>
+  <div id="controls" style="display:none">
+    <label class="section">View</label>
+    <div class="toggle-row">
+      <button id="toggle-fit">Fit screen</button>
+      <button id="toggle-flip">View from back</button>
+      <button id="toggle-silk" style="display:none">Show silk</button>
+      <button id="toggle-sidebar">Hide panel</button>
+    </div>
 
-  <label class="section">Layer</label>
-  <div class="row" id="layer-buttons"></div>
+    <label class="section">Layer windows</label>
+    <div class="toggle-row">
+      <button id="panel-zoom-out">− smaller</button>
+      <button id="panel-zoom-fit">Fit windows</button>
+      <button id="panel-zoom-in">+ larger</button>
+    </div>
+    <p id="panel-scale-readout" class="readout"></p>
+    <p class="hint">Wheel: zoom board contents. Shift+wheel or +/-: resize the layer windows. Middle/right drag, or Alt+drag: move the window grid. H hides/shows this panel.</p>
 
-  <label class="section">Board stack</label>
-  <div class="row" id="stack-buttons"></div>
+    <label class="section">Find net</label>
+    <input id="net-search" min="1" placeholder="net id" type="number"/>
 
-  <label class="section">View</label>
-  <div class="row">
-    <button id="front" class="active">Front</button>
-    <button id="back">Back</button>
-    <button id="zin">Zoom +</button>
-    <button id="zout">Zoom -</button>
-    <button id="fit">Fit</button>
+    <label class="section">Layers</label>
+    <p id="tile-list"></p>
+    <div id="net-info"><em style="color:var(--muted)">Click a net</em></div>
+    <div id="error"></div>
   </div>
-
-  <div id="net-info">
-    Selected net: <span id="net">none</span>
-    <div id="net-layers" class="layer-list"></div>
-    <div class="row" style="margin-top:8px"><button id="clear">Clear</button></div>
+</div>
+<div id="viewport">
+  <button id="sidebar-tab" title="Show controls" aria-label="Show controls">☰</button>
+  <div id="world">
+    <div id="grid-stage"><div id="grid-inner"></div></div>
   </div>
-
-  <div id="error"></div>
-</aside>
-
-<main id="stage"><div id="board" class="board"></div></main>
+</div>
 
 <script>
 'use strict';
 
-const board = document.getElementById('board');
-const stage = document.getElementById('stage');
-const errEl = document.getElementById('error');
+const viewport = document.getElementById('viewport');
+const world = document.getElementById('world');
+const gridStage = document.getElementById('grid-stage');
+const gridInner = document.getElementById('grid-inner');
+const sidebarTab = document.getElementById('sidebar-tab');
+const panelScaleReadout = document.getElementById('panel-scale-readout');
+const errorEl = document.getElementById('error');
 
-let meta, netRoot;
-let zoom = 1, back = false;
-let activeLayer = null, currentNet = null;
+let meta = null;
+let boardW = 0;
+let boardH = 0;
+let gridW = 0;
+let gridH = 0;
+let placements = new Map();
+let layerSources = new Map();
+let netSource = null;
+let netViewBox = null;
+let netElements = new Map();
+let layerNetIds = new Map();
+let highlightSvgs = new Map();
+let selectedNetElements = [];
+let transformElements = [];
+let tileLabelElements = [];
+let tileElements = [];
+let previewBuildGeneration = 0;
+let previewBitmapCache = new Map();
+let localPreviewBuildGeneration = 0;
+let localPreviewBuildTimer = 0;
+let localPreviewBitmapCache = new Map();
+let localPreviewState = null;
+let navigationSettleGeneration = 0;
+let currentNet = null;
+let lastPick = null;
 
-const copperEls = new Map();          // copper layer name -> element
-const stackEls  = new Map();          // overlay name -> element
-const stackOn   = {soldermask:true, silk:true, drill:true};
+let contentTransformFrame = 0;
+let scrollAreaFrame = 0;
+let navigationTimer = 0;
+let pointerNavigating = false;
+let panNavigationStarted = false;
 
-function fail(msg){ errEl.textContent = msg; throw new Error(msg); }
+let panelScale = 1;
+let panelX = 16;
+let panelY = 16;
+let scrollOriginX = 0;
+let scrollOriginY = 0;
+let lastViewportW = 0;
+let lastViewportH = 0;
+const PANEL_SCALE_MIN = 0.04;
+const PANEL_SCALE_MAX = 8;
+const SCROLL_PAD = 32;
+const PREVIEW_BASE_SCALE = 0.50;
+const PREVIEW_MAX_PIXELS = 8_000_000;
+const LOCAL_PREVIEW_COVERAGE = 2.75;
+const LOCAL_PREVIEW_RESOLUTION_HEADROOM = 2.45;
+const LOCAL_PREVIEW_DPR_MAX = 3;
+const LOCAL_PREVIEW_MAX_DIMENSION = 8192;
+const LOCAL_PREVIEW_MAX_PIXELS = 16_000_000;
 
-async function text(path, what){
-  const r = await fetch(path);
-  if(!r.ok) fail(`${what} missing: ${path}`);
-  return r.text();
+// Full-board fallback previews (used when zoomed out or before the local
+// crop is ready) scale with the display's pixel density so they don't look
+// soft on HiDPI screens, within a per-layer pixel budget.
+function fullPreviewScale() {
+  const dpr = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
+  const budget = Math.sqrt(PREVIEW_MAX_PIXELS / Math.max(1, boardW * boardH));
+  return Math.max(0.25, Math.min(1, PREVIEW_BASE_SCALE * dpr, budget));
+}
+const PREVIEW_CSS_VARIABLES = [
+  '--substrate',
+  '--outer-copper',
+  '--inner-copper',
+  '--soldermask',
+  '--silk',
+  '--drill',
+];
+
+let contentZoom = 1;
+let contentPanX = 0;
+let contentPanY = 0;
+let flipped = false;
+let silkOn = true;
+
+let isPanning = false;
+let isPanelPanning = false;
+let panMoved = false;
+let panStartX = 0;
+let panStartY = 0;
+let panOrigX = 0;
+let panOrigY = 0;
+let panelPanOrigX = 0;
+let panelPanOrigY = 0;
+let pendingPickNet = null;
+let pendingPickLayer = null;
+
+function fail(message) {
+  errorEl.textContent = message;
+  throw new Error(message);
 }
 
-function parseSvg(src, path){
-  const doc = new DOMParser().parseFromString(src, 'image/svg+xml');
-  if(doc.querySelector('parsererror')) fail(`SVG cannot be parsed: ${path}`);
-  const svg = doc.documentElement;
-  if(!svg || svg.tagName.toLowerCase() !== 'svg') fail(`SVG cannot be parsed: ${path}`);
-  return document.importNode(svg, true);
+async function fetchText(path, what) {
+  const response = await fetch(path);
+  if (!response.ok) fail(`${what} missing: ${path}`);
+  return response.text();
 }
 
-function checkSize(svg, path, w, h){
-  const vb = svg.getAttribute('viewBox');
-  if(!vb) return;
-  const p = vb.trim().split(/[\s,]+/).map(Number);
-  if(p.length === 4 && (Math.abs(p[2]-w) > 0.01 || Math.abs(p[3]-h) > 0.01))
-    fail(`SVG dimensions do not match metadata for ${path}: ${p[2]}x${p[3]}, expected ${w}x${h}`);
+async function fetchOptionalText(path) {
+  const response = await fetch(path);
+  if (response.status === 404) return null;
+  if (!response.ok) fail(`Unable to load optional SVG layer: ${path}`);
+  return response.text();
 }
 
-/* Gerber soldermask layers describe the OPENINGS, not the coverage: on this
-   board F_Mask is 13% fill and every shape sits over a pad or a drill. To draw
-   a board we need the complement. The build step leaves each layer as a
-   <mask> holding black backdrop + white artwork, painted through by one rect,
-   so swapping those two luminances inverts the mask in place. */
-function invertMask(svg){
-  const mask = svg.querySelector('mask');
-  if(!mask) return svg;
-  for(const el of mask.querySelectorAll('*')){
-    for(const attr of ['fill','stroke']){
-      const v = (el.getAttribute(attr) || '').toUpperCase();
-      if(v === '#010101') el.setAttribute(attr, '#FEFEFE');
-      else if(v === '#FEFEFE') el.setAttribute(attr, '#010101');
+function parseSvg(text, path) {
+  const doc = new DOMParser().parseFromString(text, 'image/svg+xml');
+  if (doc.querySelector('parsererror')) fail(`SVG cannot be parsed: ${path}`);
+  const root = doc.documentElement;
+  if (!root || root.tagName.toLowerCase() !== 'svg') fail(`SVG cannot be parsed: ${path}`);
+  return root;
+}
+
+function svgViewBox(svg, fallbackW, fallbackH) {
+  const raw = svg.getAttribute('viewBox');
+  if (raw) {
+    const values = raw.trim().split(/[\s,]+/).map(Number);
+    if (values.length === 4 && values.every(Number.isFinite) && values[2] > 0 && values[3] > 0) return values;
+  }
+  return [0, 0, fallbackW, fallbackH];
+}
+
+function checkSvgSize(svg, path, width, height) {
+  const vb = svgViewBox(svg, width, height);
+  if (Math.abs(vb[2] - width) > .01 || Math.abs(vb[3] - height) > .01) {
+    fail(`SVG dimensions do not match metadata for ${path}: ${vb[2]}x${vb[3]}, expected ${width}x${height}`);
+  }
+}
+
+function namespaceIds(root, suffix) {
+  const mapping = new Map();
+  if (root.hasAttribute('id')) mapping.set(root.getAttribute('id'), `${root.getAttribute('id')}--${suffix}`);
+  for (const element of root.querySelectorAll('[id]')) {
+    const oldId = element.getAttribute('id');
+    mapping.set(oldId, `${oldId}--${suffix}`);
+  }
+  if (!mapping.size) return;
+
+  const all = [root, ...root.querySelectorAll('*')];
+  for (const element of all) {
+    const id = element.getAttribute('id');
+    if (id && mapping.has(id)) element.setAttribute('id', mapping.get(id));
+    for (const attr of [...element.attributes]) {
+      let value = attr.value;
+      for (const [oldId, newId] of mapping) {
+        value = value.replaceAll(`url(#${oldId})`, `url(#${newId})`);
+        if ((attr.name === 'href' || attr.name === 'xlink:href') && value === `#${oldId}`) value = `#${newId}`;
+      }
+      if (value !== attr.value) element.setAttribute(attr.name, value);
     }
+  }
+}
+
+function invertGerberMask(root) {
+  const mask = root.querySelector('mask');
+  if (!mask) return;
+  for (const element of mask.querySelectorAll('*')) {
+    for (const attr of ['fill', 'stroke']) {
+      const value = (element.getAttribute(attr) || '').trim().toUpperCase();
+      if (value === '#010101') element.setAttribute(attr, '#FEFEFE');
+      else if (value === '#FEFEFE') element.setAttribute(attr, '#010101');
+    }
+  }
+}
+
+function cloneLayer(name, instance, colour, {invert=false, className=''} = {}) {
+  const source = layerSources.get(name);
+  if (!source) return null;
+  const clone = source.cloneNode(true);
+  namespaceIds(clone, instance);
+  if (invert) invertGerberMask(clone);
+  clone.setAttribute('x', '0');
+  clone.setAttribute('y', '0');
+  clone.setAttribute('width', String(boardW));
+  clone.setAttribute('height', String(boardH));
+  clone.setAttribute('preserveAspectRatio', 'none');
+  clone.style.color = colour;
+  if (className) clone.classList.add(...className.split(/\s+/).filter(Boolean));
+  return clone;
+}
+
+function appendLayer(parent, name, instance, colour, options={}) {
+  const svg = cloneLayer(name, instance, colour, options);
+  if (svg) parent.appendChild(svg);
+  return svg;
+}
+
+function sideOf(name) { return /^B[_-]/i.test(name) ? 'B' : 'F'; }
+function outerLayers() { return meta.outer_layers || ['F_Cu', 'B_Cu']; }
+function isOuter(name) { return outerLayers().includes(name); }
+function frontLayerName() {
+  const layers = meta.layers || [];
+  return layers.find(name => isOuter(name) && sideOf(name) === 'F') || layers[0];
+}
+function backLayerName() {
+  const layers = meta.layers || [];
+  return layers.find(name => isOuter(name) && sideOf(name) === 'B') || layers[layers.length - 1];
+}
+function firstExisting(names) { return names.find(name => layerSources.has(name)) || null; }
+
+function createVisualSvg(layerName, tileIndex) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', `0 0 ${boardW} ${boardH}`);
+  svg.setAttribute('preserveAspectRatio', 'none');
+  svg.setAttribute('aria-hidden', 'true');
+
+  const background = document.createElementNS(svg.namespaceURI, 'rect');
+  background.setAttribute('x', '0');
+  background.setAttribute('y', '0');
+  background.setAttribute('width', String(boardW));
+  background.setAttribute('height', String(boardH));
+  background.setAttribute('fill', isOuter(layerName) ? 'var(--substrate)' : '#050505');
+  svg.appendChild(background);
+
+  appendLayer(svg, layerName, `tile${tileIndex}-copper`, isOuter(layerName) ? 'var(--outer-copper)' : 'var(--inner-copper)');
+
+  const sameSide = sideOf(layerName);
+  const maskName = isOuter(layerName)
+    ? firstExisting((meta.mask_layers || []).filter(name => sideOf(name) === sameSide))
+    : null;
+  if (maskName) {
+    const film = appendLayer(svg, maskName, `tile${tileIndex}-film`, 'var(--soldermask)', {invert:true, className:'mask-layer'});
+    if (film) film.style.opacity = '.94';
+  }
+
+  const silkName = isOuter(layerName)
+    ? firstExisting((meta.silk_layers || []).filter(name => sideOf(name) === sameSide))
+    : null;
+  if (silkName) {
+    const silk = appendLayer(svg, silkName, `tile${tileIndex}-silk`, 'var(--silk)', {className:'silk-layer'});
+    if (silk) {
+      silk.style.opacity = '.92';
+      const defs = document.createElementNS(svg.namespaceURI, 'defs');
+      const keepMask = document.createElementNS(svg.namespaceURI, 'mask');
+      const keepId = `silk-keep-${tileIndex}`;
+      keepMask.setAttribute('id', keepId);
+      keepMask.setAttribute('maskUnits', 'userSpaceOnUse');
+      keepMask.setAttribute('x', '0');
+      keepMask.setAttribute('y', '0');
+      keepMask.setAttribute('width', String(boardW));
+      keepMask.setAttribute('height', String(boardH));
+      const keep = document.createElementNS(svg.namespaceURI, 'rect');
+      keep.setAttribute('width', String(boardW));
+      keep.setAttribute('height', String(boardH));
+      keep.setAttribute('fill', 'white');
+      keepMask.appendChild(keep);
+      if (maskName) appendLayer(keepMask, maskName, `tile${tileIndex}-silk-openings`, 'black');
+      for (const drillName of (meta.drill_layers || [])) {
+        appendLayer(keepMask, drillName, `tile${tileIndex}-silk-drill-${drillName}`, 'black');
+      }
+      defs.appendChild(keepMask);
+      svg.insertBefore(defs, silk);
+      silk.setAttribute('mask', `url(#${keepId})`);
+    }
+  }
+
+  for (const drillName of (meta.drill_layers || [])) {
+    appendLayer(svg, drillName, `tile${tileIndex}-drill-${drillName}`, 'var(--drill)', {className:'drill-layer'});
+  }
+
+  return svg;
+}
+
+function createNetSvg(layerName) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', netViewBox.join(' '));
+  svg.setAttribute('preserveAspectRatio', 'none');
+  svg.setAttribute('data-layer', layerName);
+
+  const group = [...netSource.querySelectorAll('g[data-layer]')]
+    .find(candidate => candidate.dataset.layer === layerName);
+  if (group) svg.appendChild(group.cloneNode(true));
+
+  for (const shape of svg.querySelectorAll('[data-net-id]')) {
+    shape.classList.add('net-shape');
+    shape.dataset.layer = layerName;
+    const id = Number(shape.dataset.netId);
+    if (!Number.isInteger(id) || id < 1 || (meta.n_nets && id > Number(meta.n_nets))) {
+      fail(`Net-map geometry references an invalid net ID: ${shape.dataset.netId}`);
+    }
+    if (!netElements.has(id)) netElements.set(id, []);
+    netElements.get(id).push(shape);
+    if (!layerNetIds.has(layerName)) layerNetIds.set(layerName, new Set());
+    layerNetIds.get(layerName).add(id);
   }
   return svg;
 }
 
-const isOuter = n => (meta.outer_layers || ['F_Cu','B_Cu']).includes(n);
-const sideOf  = n => /^B[_-]/i.test(n) ? 'B' : 'F';
-
-async function addLayer(name, cls, w, h, {invert=false} = {}){
-  const file = (meta.layer_svgs && meta.layer_svgs[name]) || `${name}.svg`;
-  const svg = parseSvg(await text(file, `SVG layer ${name}`), file);
-  checkSize(svg, file, w, h);
-  if(invert) invertMask(svg);
-  const div = document.createElement('div');
-  div.className = `layer ${cls}`;
-  div.dataset.layer = name;
-  div.hidden = true;
-  div.appendChild(svg);
-  board.appendChild(div);
-  return div;
-}
-
-async function init(){
-  meta = JSON.parse(await text('meta.json', 'metadata'));
-  if(!meta.netmap) meta.netmap = 'netmap.svg';
-
-  const w = meta.width || meta.tile_w;
-  const h = meta.height || meta.tile_h;
-  if(!w || !h) fail('metadata is missing board dimensions (width/height)');
-  board.style.width = w + 'px';
-  board.style.height = h + 'px';
-
-  const copper = meta.layers || [];
-  if(!copper.length) fail('metadata lists no copper layers');
-
-  // Copper sits directly on the substrate. Exactly one layer shows at a time.
-  for(const name of copper) copperEls.set(name, await addLayer(name, 'copper ' + (isOuter(name)?'outer':'inner'), w, h));
-
-  // Soldermask then silkscreen then drill, so the stack reads bottom-up the
-  // way the physical board does. Drill holes punch through everything.
-  const have = n => meta.layer_svgs && meta.layer_svgs[n];
-  for(const name of (meta.mask_layers || []))
-    if(have(name)) stackEls.set(name, await addLayer(name, 'soldermask', w, h, {invert:true}));
-  for(const name of (meta.silk_layers || []))
-    if(have(name)) stackEls.set(name, await addLayer(name, 'silk', w, h));
-  for(const name of (meta.drill_layers || []))
-    if(have(name)) stackEls.set(name, await addLayer(name, 'drill', w, h));
-
-  const netWrap = document.createElement('div');
-  netWrap.className = 'net';
-  netWrap.appendChild(parseSvg(await text(meta.netmap, 'netmap.svg'), meta.netmap));
-  netRoot = netWrap.querySelector('svg');
-  // The pick map is emitted on a finer grid than the layers (meta.netmap_scale)
-  // so the highlight follows trace edges instead of looking blocky. Its <svg>
-  // stretches to the same board box, so the extra resolution costs nothing in
-  // layout -- only the viewBox differs.
-  const ns = Math.max(1, Number(meta.netmap_scale) || 1);
-  const netW = Number(meta.netmap_width) || w * ns;
-  const netH = Number(meta.netmap_height) || h * ns;
-  checkSize(netRoot, meta.netmap, netW, netH);
-  board.appendChild(netWrap);
-  validateNetmap();
-
-  buildLayerButtons(copper);
-  buildStackButtons();
-
-  netRoot.addEventListener('pointerdown', e => {
-    const shape = e.target.closest('[data-net-id]');
-    if(shape){ selectNet(Number(shape.dataset.netId)); e.stopPropagation(); }
-    else clearNet();
+function buildPlacements() {
+  placements.clear();
+  const layers = meta.layers || [];
+  const cols = Math.max(1, Math.floor(Number(meta.cols) || 2));
+  const rows = Math.ceil(layers.length / cols);
+  gridW = cols * boardW;
+  gridH = rows * boardH;
+  layers.forEach((name, index) => {
+    const col = index % cols;
+    const row = Math.floor(index / cols);
+    placements.set(name, {x: col * boardW, y: row * boardH, w: boardW, h: boardH, col, row});
   });
-  stage.addEventListener('pointerdown', e => {
-    if(!e.target.closest('[data-net-id]')) clearNet();
+}
+
+function buildTiles() {
+  gridInner.innerHTML = '';
+  netElements.clear();
+  layerNetIds.clear();
+  highlightSvgs.clear();
+  selectedNetElements = [];
+  const layers = meta.layers || [];
+  layers.forEach((name, index) => {
+    const placement = placements.get(name);
+    const tile = document.createElement('div');
+    tile.className = 'tile';
+    tile.dataset.layer = name;
+    tile.style.left = `${placement.x}px`;
+    tile.style.top = `${placement.y}px`;
+    tile.style.width = `${boardW}px`;
+    tile.style.height = `${boardH}px`;
+
+    const visual = document.createElement('div');
+    visual.className = 'tile-board';
+    visual.draggable = false;
+    visual.style.width = `${boardW}px`;
+    visual.style.height = `${boardH}px`;
+    visual.appendChild(createVisualSvg(name, index));
+
+    const preview = document.createElement('canvas');
+    preview.className = 'tile-preview';
+    preview.draggable = false;
+    preview.dataset.layer = name;
+    preview.style.width = `${boardW}px`;
+    preview.style.height = `${boardH}px`;
+
+    const localPreview = document.createElement('div');
+    localPreview.className = 'tile-local-preview';
+    localPreview.draggable = false;
+    localPreview.dataset.layer = name;
+    localPreview.style.width = `${boardW}px`;
+    localPreview.style.height = `${boardH}px`;
+    const localCanvas = document.createElement('canvas');
+    localCanvas.className = 'tile-local-preview-canvas';
+    localCanvas.draggable = false;
+    localPreview.appendChild(localCanvas);
+
+    const net = document.createElement('div');
+    net.className = 'tile-netmap';
+    net.draggable = false;
+    net.dataset.layer = name;
+    net.style.width = `${boardW}px`;
+    net.style.height = `${boardH}px`;
+    net.appendChild(createNetSvg(name));
+
+    const highlight = document.createElement('div');
+    highlight.className = 'tile-net-highlight';
+    highlight.draggable = false;
+    highlight.dataset.layer = name;
+    highlight.style.width = `${boardW}px`;
+    highlight.style.height = `${boardH}px`;
+    const highlightSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    highlightSvg.setAttribute('viewBox', netViewBox.join(' '));
+    highlightSvg.setAttribute('preserveAspectRatio', 'none');
+    highlightSvg.setAttribute('aria-hidden', 'true');
+    highlight.appendChild(highlightSvg);
+    highlightSvgs.set(name, highlightSvg);
+
+    const label = document.createElement('div');
+    label.className = 'tile-label';
+    label.dataset.layer = name;
+    label.textContent = name;
+
+    tile.appendChild(visual);
+    tile.appendChild(preview);
+    tile.appendChild(localPreview);
+    tile.appendChild(net);
+    tile.appendChild(highlight);
+    tile.appendChild(label);
+    gridInner.appendChild(tile);
   });
-  enablePan();
-
-  selectLayer(copper[0]);
-  fit();
+  transformElements = [...gridInner.querySelectorAll('.tile-board,.tile-preview,.tile-local-preview,.tile-netmap,.tile-net-highlight')];
+  tileLabelElements = [...gridInner.querySelectorAll('.tile-label')];
+  tileElements = [...gridInner.querySelectorAll('.tile')];
+  updateTileLabels();
+  applyContentTransformNow();
 }
 
-function validateNetmap(){
-  const max = Number(meta.n_nets || 0);
-  for(const e of netRoot.querySelectorAll('[data-net-id]')){
-    const id = Number(e.dataset.netId);
-    if(!Number.isInteger(id) || id < 1 || (max && id > max))
-      fail(`Net-map geometry references an invalid net ID: ${e.dataset.netId}`);
+function idlePause() {
+  return new Promise(resolve => {
+    if ('requestIdleCallback' in window) {
+      requestIdleCallback(() => resolve(), {timeout: 200});
+    } else {
+      setTimeout(resolve, 0);
+    }
+  });
+}
+
+function cssVariable(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+function previewLayerSvgText(name, colour, invert, width, height, viewBox=null) {
+  const source = layerSources.get(name);
+  if (!source) return null;
+  const clone = source.cloneNode(true);
+  if (invert) invertGerberMask(clone);
+  clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+  clone.setAttribute('x', '0');
+  clone.setAttribute('y', '0');
+  clone.setAttribute('width', String(width));
+  clone.setAttribute('height', String(height));
+  clone.setAttribute('preserveAspectRatio', 'none');
+  if (viewBox) clone.setAttribute('viewBox', viewBox.join(' '));
+  clone.style.color = colour;
+
+  // crispEdges is useful for producing binary analysis masks, but it makes
+  // both the browser view and the temporary navigation preview jagged.
+  // Strip local overrides and request normal high-quality SVG rasterisation.
+  for (const element of [clone, ...clone.querySelectorAll('*')]) {
+    element.removeAttribute('shape-rendering');
+    if (element.style) element.style.removeProperty('shape-rendering');
+  }
+  clone.setAttribute('shape-rendering', 'geometricPrecision');
+
+  return new XMLSerializer().serializeToString(clone);
+}
+
+async function decodeSvgPreview(text) {
+  const blob = new Blob([text], {type: 'image/svg+xml'});
+  const url = URL.createObjectURL(blob);
+  try {
+    const image = new Image();
+    image.decoding = 'async';
+    await new Promise((resolve, reject) => {
+      image.onload = resolve;
+      image.onerror = () => reject(new Error('Unable to rasterise SVG navigation preview'));
+      image.src = url;
+    });
+    // Force the rasterisation to complete off the main thread now, rather
+    // than synchronously inside the first drawImage() call.
+    if (image.decode) await image.decode().catch(() => {});
+    return image;
+  } finally {
+    URL.revokeObjectURL(url);
   }
 }
 
-function buildLayerButtons(copper){
-  const box = document.getElementById('layer-buttons');
-  for(const name of copper){
-    const b = document.createElement('button');
-    b.textContent = name;
-    b.dataset.layer = name;
-    b.onclick = () => selectLayer(name);
-    box.appendChild(b);
+function previewBitmap(name, colour, invert, width, height, {viewBox=null, cache=previewBitmapCache} = {}) {
+  if (!layerSources.has(name)) return Promise.resolve(null);
+  const viewKey = viewBox ? viewBox.map(value => Number(value).toFixed(5)).join(',') : 'full';
+  const key = `${name}\u0000${colour}\u0000${invert ? 1 : 0}\u0000${width}x${height}\u0000${viewKey}`;
+  if (!cache.has(key)) {
+    const text = previewLayerSvgText(name, colour, invert, width, height, viewBox);
+    cache.set(key, decodeSvgPreview(text).catch(error => {
+      cache.delete(key);
+      throw error;
+    }));
+  }
+  return cache.get(key);
+}
+
+// A macrotask yield: unlike awaiting a resolved promise (microtask), this
+// lets queued pointer/wheel events be dispatched, so their handlers can bump
+// the build generations and abort the remaining work.
+function yieldToInput() {
+  return new Promise(resolve => setTimeout(resolve, 0));
+}
+
+async function drawPreviewLayer(ctx, name, colour, {invert=false, viewBox=null, cache=previewBitmapCache, shouldAbort=null} = {}) {
+  const image = await previewBitmap(
+    name,
+    colour,
+    invert,
+    ctx.canvas.width,
+    ctx.canvas.height,
+    {viewBox, cache},
+  );
+  if (!image) return;
+  if (shouldAbort) {
+    await yieldToInput();
+    if (shouldAbort()) return;
+  }
+  ctx.drawImage(image, 0, 0, ctx.canvas.width, ctx.canvas.height);
+}
+
+async function paintTilePreview(canvas, layerName, width, height, {viewBox=null, cache=previewBitmapCache, shouldAbort=null} = {}) {
+  if (canvas.width !== width) canvas.width = width;
+  if (canvas.height !== height) canvas.height = height;
+
+  const ctx = canvas.getContext('2d', {alpha: false});
+  if (!ctx) throw new Error('Unable to create preview canvas context');
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.fillStyle = isOuter(layerName) ? cssVariable('--substrate') : '#050505';
+  ctx.fillRect(0, 0, width, height);
+
+  await drawPreviewLayer(
+    ctx,
+    layerName,
+    isOuter(layerName) ? cssVariable('--outer-copper') : cssVariable('--inner-copper'),
+    {viewBox, cache, shouldAbort},
+  );
+  if (shouldAbort && shouldAbort()) return;
+
+  const sameSide = sideOf(layerName);
+  const maskName = isOuter(layerName)
+    ? firstExisting((meta.mask_layers || []).filter(name => sideOf(name) === sameSide))
+    : null;
+  if (maskName) {
+    ctx.save();
+    ctx.globalAlpha = .94;
+    await drawPreviewLayer(ctx, maskName, cssVariable('--soldermask'), {invert: true, viewBox, cache, shouldAbort});
+    ctx.restore();
+  }
+  if (shouldAbort && shouldAbort()) return;
+
+  const silkName = silkOn && isOuter(layerName)
+    ? firstExisting((meta.silk_layers || []).filter(name => sideOf(name) === sameSide))
+    : null;
+  if (silkName) {
+    const silkCanvas = document.createElement('canvas');
+    silkCanvas.width = width;
+    silkCanvas.height = height;
+    const silkCtx = silkCanvas.getContext('2d');
+    if (!silkCtx) throw new Error('Unable to create silk preview canvas context');
+    silkCtx.imageSmoothingEnabled = true;
+    silkCtx.imageSmoothingQuality = 'high';
+    await drawPreviewLayer(silkCtx, silkName, cssVariable('--silk'), {viewBox, cache, shouldAbort});
+
+    silkCtx.globalCompositeOperation = 'destination-out';
+    if (maskName) await drawPreviewLayer(silkCtx, maskName, '#000', {viewBox, cache, shouldAbort});
+    for (const drillName of (meta.drill_layers || [])) {
+      await drawPreviewLayer(silkCtx, drillName, '#000', {viewBox, cache, shouldAbort});
+    }
+    silkCtx.globalCompositeOperation = 'source-over';
+    if (shouldAbort && shouldAbort()) return;
+
+    ctx.save();
+    ctx.globalAlpha = .92;
+    ctx.drawImage(silkCanvas, 0, 0);
+    ctx.restore();
+  }
+
+  for (const drillName of (meta.drill_layers || [])) {
+    await drawPreviewLayer(ctx, drillName, cssVariable('--drill'), {viewBox, cache, shouldAbort});
   }
 }
 
-function buildStackButtons(){
-  const box = document.getElementById('stack-buttons');
-  const kinds = [['soldermask','Solder mask'], ['silk','Silkscreen'], ['drill','Drill']];
-  for(const [kind, label] of kinds){
-    if(![...stackEls.values()].some(el => el.classList.contains(kind))) continue;
-    const b = document.createElement('button');
-    b.textContent = label;
-    b.classList.toggle('active', stackOn[kind]);
-    b.onclick = () => {
-      stackOn[kind] = !stackOn[kind];
-      b.classList.toggle('active', stackOn[kind]);
-      applyStack();
-    };
-    box.appendChild(b);
-  }
-  if(!box.children.length){ box.textContent = 'none'; box.style.color = 'var(--muted)'; }
+async function buildTilePreview(tile, generation) {
+  const canvas = tile.querySelector('.tile-preview');
+  if (!canvas) return;
+  const scale = fullPreviewScale();
+  const width = Math.max(1, Math.round(boardW * scale));
+  const height = Math.max(1, Math.round(boardH * scale));
+  await paintTilePreview(canvas, tile.dataset.layer, width, height,
+    {shouldAbort: () => generation !== previewBuildGeneration});
+  if (generation === previewBuildGeneration) tile.classList.add('preview-ready');
 }
 
-/* Inner layers are buried: no mask, no silkscreen. Outer layers get the stack
-   for their own side only, so viewing F_Cu never paints B_Silkscreen on top. */
-function applyStack(){
-  const outer = isOuter(activeLayer);
-  const side = sideOf(activeLayer);
-  for(const [name, el] of stackEls){
-    const kind = el.classList.contains('soldermask') ? 'soldermask'
-               : el.classList.contains('silk') ? 'silk' : 'drill';
-    const sideOk = (kind === 'drill') || (outer && sideOf(name) === side);
-    el.hidden = !(stackOn[kind] && sideOk);
+async function buildNavigationPreviews(generation) {
+  for (const tile of gridInner.querySelectorAll('.tile')) {
+    if (generation !== previewBuildGeneration) return;
+    await idlePause();
+    if (generation !== previewBuildGeneration) return;
+    try {
+      await buildTilePreview(tile, generation);
+    } catch (error) {
+      console.warn(`Unable to build navigation preview for ${tile.dataset.layer}:`, error);
+    }
   }
 }
 
-function selectLayer(name){
-  activeLayer = name;
-  for(const [n, el] of copperEls) el.hidden = (n !== name);
-  for(const b of document.querySelectorAll('#layer-buttons button'))
-    b.classList.toggle('active', b.dataset.layer === name);
-
-  // Marks stay on every layer's geometry; only the visible layer is pickable.
-  for(const g of netRoot.querySelectorAll('g[data-layer]'))
-    g.classList.toggle('shown', g.dataset.layer === name);
-
-  applyStack();
+function schedulePreviewRebuild() {
+  const generation = ++previewBuildGeneration;
+  for (const tile of gridInner.querySelectorAll('.tile')) tile.classList.remove('preview-ready');
+  void buildNavigationPreviews(generation);
 }
 
-function cssEsc(s){ return (window.CSS && CSS.escape) ? CSS.escape(s) : s.replace(/"/g,'\\"'); }
 
-function selectNet(id){
-  netRoot.querySelectorAll('.net-shape.selected').forEach(e => e.classList.remove('selected'));
-  const layers = new Set();
-  for(const e of netRoot.querySelectorAll(`[data-net-id="${cssEsc(String(id))}"]`)){
-    e.classList.add('selected');
-    layers.add(e.closest('g[data-layer]').dataset.layer);
+function currentBoardCrop() {
+  clampContentPan();
+  return {
+    x: contentPanX,
+    y: contentPanY,
+    w: boardW / contentZoom,
+    h: boardH / contentZoom,
+  };
+}
+
+function computeLocalPreviewSpec() {
+  const visible = currentBoardCrop();
+  const w = Math.min(boardW, visible.w * LOCAL_PREVIEW_COVERAGE);
+  const h = Math.min(boardH, visible.h * LOCAL_PREVIEW_COVERAGE);
+  const centreX = visible.x + visible.w / 2;
+  const centreY = visible.y + visible.h / 2;
+  const x = clamp(centreX - w / 2, 0, Math.max(0, boardW - w));
+  const y = clamp(centreY - h / 2, 0, Math.max(0, boardH - h));
+
+  const dpr = Math.min(LOCAL_PREVIEW_DPR_MAX, Math.max(1, window.devicePixelRatio || 1));
+  const requestedScale = panelScale * contentZoom * dpr * LOCAL_PREVIEW_RESOLUTION_HEADROOM;
+  let pixelWidth = Math.max(1, Math.round(w * requestedScale));
+  let pixelHeight = Math.max(1, Math.round(h * requestedScale));
+  let reduction = Math.min(
+    1,
+    LOCAL_PREVIEW_MAX_DIMENSION / pixelWidth,
+    LOCAL_PREVIEW_MAX_DIMENSION / pixelHeight,
+    Math.sqrt(LOCAL_PREVIEW_MAX_PIXELS / Math.max(1, pixelWidth * pixelHeight)),
+  );
+  if (!Number.isFinite(reduction) || reduction <= 0) reduction = 1;
+  pixelWidth = Math.max(1, Math.floor(pixelWidth * reduction));
+  pixelHeight = Math.max(1, Math.floor(pixelHeight * reduction));
+
+  return {
+    x, y, w, h,
+    pixelWidth,
+    pixelHeight,
+    pixelScale: Math.min(pixelWidth / w, pixelHeight / h),
+  };
+}
+
+function localPreviewCoversCurrentView() {
+  const state = localPreviewState;
+  if (!state) return false;
+  const visible = currentBoardCrop();
+  const epsilon = 1e-4;
+  if (visible.x < state.x - epsilon || visible.y < state.y - epsilon ||
+      visible.x + visible.w > state.x + state.w + epsilon ||
+      visible.y + visible.h > state.y + state.h + epsilon) return false;
+
+  const dpr = Math.min(LOCAL_PREVIEW_DPR_MAX, Math.max(1, window.devicePixelRatio || 1));
+  const requiredPixelScale = panelScale * contentZoom * dpr;
+  return requiredPixelScale <= state.pixelScale * 1.08;
+}
+
+function clearNavigationPreviewChoice() {
+  for (const tile of tileElements) {
+    tile.classList.remove('preview-local-active', 'preview-full-active');
   }
-  currentNet = id;
-  document.getElementById('net').textContent = id;
-  document.getElementById('net-layers').textContent = layers.size ? [...layers].join(', ') : '';
-  for(const b of document.querySelectorAll('#layer-buttons button'))
-    b.classList.toggle('has-net', layers.has(b.dataset.layer));
 }
 
-function clearNet(){
-  if(!netRoot) return;
-  netRoot.querySelectorAll('.selected').forEach(e => e.classList.remove('selected'));
+function updateNavigationPreviewChoice() {
+  const useLocal = localPreviewCoversCurrentView();
+  for (const tile of tileElements) {
+    tile.classList.remove('preview-local-active', 'preview-full-active');
+    if (useLocal && tile.classList.contains('local-preview-ready')) {
+      tile.classList.add('preview-local-active');
+    } else if (tile.classList.contains('preview-ready')) {
+      tile.classList.add('preview-full-active');
+    }
+  }
+}
+
+function cancelLocalPreviewBuild() {
+  localPreviewBuildGeneration += 1;
+  if (localPreviewBuildTimer) {
+    clearTimeout(localPreviewBuildTimer);
+    localPreviewBuildTimer = 0;
+  }
+}
+
+async function buildLocalNavigationPreviews(spec, generation) {
+  const rendered = [];
+  localPreviewBitmapCache = new Map();
+  for (const tile of tileElements) {
+    if (generation !== localPreviewBuildGeneration) return;
+    await idlePause();
+    if (generation !== localPreviewBuildGeneration) return;
+    const canvas = document.createElement('canvas');
+    try {
+      await paintTilePreview(
+        canvas,
+        tile.dataset.layer,
+        spec.pixelWidth,
+        spec.pixelHeight,
+        {
+          viewBox: [spec.x, spec.y, spec.w, spec.h],
+          cache: localPreviewBitmapCache,
+          shouldAbort: () => generation !== localPreviewBuildGeneration,
+        },
+      );
+      if (generation !== localPreviewBuildGeneration) return;
+      rendered.push([tile, canvas]);
+    } catch (error) {
+      console.warn(`Unable to build local navigation preview for ${tile.dataset.layer}:`, error);
+      return;
+    }
+  }
+
+  if (generation !== localPreviewBuildGeneration ||
+      document.body.classList.contains('navigating') ||
+      document.body.classList.contains('navigation-settling')) return;
+
+  for (const [tile, sourceCanvas] of rendered) {
+    if (generation !== localPreviewBuildGeneration) return;
+    const target = tile.querySelector('.tile-local-preview-canvas');
+    if (!target) continue;
+    target.width = sourceCanvas.width;
+    target.height = sourceCanvas.height;
+    target.style.left = `${spec.x}px`;
+    target.style.top = `${spec.y}px`;
+    target.style.width = `${spec.w}px`;
+    target.style.height = `${spec.h}px`;
+    const ctx = target.getContext('2d', {alpha: false});
+    if (!ctx) continue;
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.clearRect(0, 0, target.width, target.height);
+    ctx.drawImage(sourceCanvas, 0, 0);
+    tile.classList.add('local-preview-ready');
+  }
+  localPreviewState = spec;
+}
+
+function scheduleLocalPreviewRebuild(delay=90) {
+  cancelLocalPreviewBuild();
+  const generation = localPreviewBuildGeneration;
+  localPreviewBuildTimer = window.setTimeout(() => {
+    localPreviewBuildTimer = 0;
+    if (generation !== localPreviewBuildGeneration ||
+        document.body.classList.contains('navigating') ||
+        document.body.classList.contains('navigation-settling')) return;
+    const spec = computeLocalPreviewSpec();
+    void buildLocalNavigationPreviews(spec, generation);
+  }, delay);
+}
+
+function invalidateLocalPreview() {
+  cancelLocalPreviewBuild();
+  localPreviewState = null;
+  for (const tile of tileElements) {
+    tile.classList.remove('local-preview-ready', 'preview-local-active');
+  }
+}
+
+function clamp(value, low, high) { return Math.max(low, Math.min(high, value)); }
+
+function clampContentPan() {
+  const cropW = boardW / contentZoom;
+  const cropH = boardH / contentZoom;
+  contentPanX = clamp(contentPanX, 0, Math.max(0, boardW - cropW));
+  contentPanY = clamp(contentPanY, 0, Math.max(0, boardH - cropH));
+}
+
+function contentMatrix() {
+  clampContentPan();
+  if (!flipped) {
+    return `matrix(${contentZoom},0,0,${contentZoom},${-contentPanX * contentZoom},${-contentPanY * contentZoom})`;
+  }
+  const cropW = boardW / contentZoom;
+  return `matrix(${-contentZoom},0,0,${contentZoom},${(contentPanX + cropW) * contentZoom},${-contentPanY * contentZoom})`;
+}
+
+function applyContentTransformNow() {
+  const matrix = contentMatrix();
+  for (const element of transformElements) element.style.transform = matrix;
+  if (document.body.classList.contains('navigating') ||
+      document.body.classList.contains('navigation-settling')) {
+    updateNavigationPreviewChoice();
+  }
+}
+
+function scheduleContentTransform() {
+  if (contentTransformFrame) return;
+  contentTransformFrame = requestAnimationFrame(() => {
+    contentTransformFrame = 0;
+    applyContentTransformNow();
+  });
+}
+
+function updateTileLabels() {
+  const inverse = 1 / Math.max(.001, panelScale);
+  for (const label of tileLabelElements) {
+    label.classList.toggle('flipped', flipped);
+    label.textContent = label.dataset.layer + (flipped ? ' ⟲ (back view)' : '');
+    label.style.left = `${6 * inverse}px`;
+    label.style.top = `${6 * inverse}px`;
+    label.style.transform = `scale(${inverse})`;
+  }
+}
+
+function fittedPanelScale() {
+  if (!gridW || !gridH) return 1;
+  const padding = 16;
+  const vw = Math.max(1, viewport.clientWidth - 2 * padding);
+  const vh = Math.max(1, viewport.clientHeight - 2 * padding);
+  const value = Math.min(1, vw / gridW, vh / gridH);
+  return Number.isFinite(value) && value > 0 ? value : 1;
+}
+
+function updatePanelScaleReadout() {
+  const fit = fittedPanelScale();
+  const relative = fit > 0 ? panelScale / fit : 1;
+  panelScaleReadout.textContent = `Window size: ${(relative * 100).toFixed(0)}% of fit (${(panelScale * 100).toFixed(1)}% source scale)`;
+}
+
+function updateScrollArea(preserveView=true) {
+  if (!gridW || !gridH) return;
+  const oldOriginX = scrollOriginX;
+  const oldOriginY = scrollOriginY;
+  const oldScrollLeft = viewport.scrollLeft;
+  const oldScrollTop = viewport.scrollTop;
+
+  const minX = Math.min(0, panelX) - SCROLL_PAD;
+  const minY = Math.min(0, panelY) - SCROLL_PAD;
+  const maxX = Math.max(viewport.clientWidth, panelX + gridW * panelScale) + SCROLL_PAD;
+  const maxY = Math.max(viewport.clientHeight, panelY + gridH * panelScale) + SCROLL_PAD;
+  scrollOriginX = minX;
+  scrollOriginY = minY;
+
+  world.style.width = `${Math.max(viewport.clientWidth, Math.ceil(maxX - minX))}px`;
+  world.style.height = `${Math.max(viewport.clientHeight, Math.ceil(maxY - minY))}px`;
+  gridStage.style.left = `${panelX - scrollOriginX}px`;
+  gridStage.style.top = `${panelY - scrollOriginY}px`;
+  gridStage.style.width = `${gridW * panelScale}px`;
+  gridStage.style.height = `${gridH * panelScale}px`;
+  gridInner.style.width = `${gridW}px`;
+  gridInner.style.height = `${gridH}px`;
+  gridInner.style.transform = `scale(${panelScale})`;
+
+  if (preserveView) {
+    viewport.scrollLeft = Math.max(0, oldScrollLeft + oldOriginX - scrollOriginX);
+    viewport.scrollTop = Math.max(0, oldScrollTop + oldOriginY - scrollOriginY);
+  }
+  updateTileLabels();
+}
+
+function scheduleScrollArea() {
+  if (scrollAreaFrame) return;
+  scrollAreaFrame = requestAnimationFrame(() => {
+    scrollAreaFrame = 0;
+    updateScrollArea(true);
+  });
+}
+
+function centerPanelGrid() {
+  panelX = Math.round((viewport.clientWidth - gridW * panelScale) / 2);
+  panelY = Math.round((viewport.clientHeight - gridH * panelScale) / 2);
+}
+
+function rememberViewportSize() {
+  lastViewportW = Math.max(1, viewport.clientWidth);
+  lastViewportH = Math.max(1, viewport.clientHeight);
+}
+
+function fitPanelWindows() {
+  panelScale = fittedPanelScale();
+  centerPanelGrid();
+  rememberViewportSize();
+  updateScrollArea(false);
+  viewport.scrollLeft = Math.max(0, -scrollOriginX);
+  viewport.scrollTop = Math.max(0, -scrollOriginY);
+  updatePanelScaleReadout();
+  scheduleLocalPreviewRebuild();
+}
+
+function fitToScreen() {
+  fitPanelWindows();
+  contentZoom = 1;
+  contentPanX = 0;
+  contentPanY = 0;
+  scheduleContentTransform();
+  scheduleLocalPreviewRebuild();
+}
+
+function setPanelScaleAt(clientX, clientY, newScale) {
+  const rect = viewport.getBoundingClientRect();
+  const anchorX = clientX - rect.left + viewport.scrollLeft + scrollOriginX;
+  const anchorY = clientY - rect.top + viewport.scrollTop + scrollOriginY;
+  const gridPointX = (anchorX - panelX) / Math.max(.001, panelScale);
+  const gridPointY = (anchorY - panelY) / Math.max(.001, panelScale);
+  panelScale = clamp(newScale, PANEL_SCALE_MIN, PANEL_SCALE_MAX);
+  panelX = anchorX - gridPointX * panelScale;
+  panelY = anchorY - gridPointY * panelScale;
+  updateScrollArea(true);
+  updatePanelScaleReadout();
+  if (document.body.classList.contains('navigating') ||
+      document.body.classList.contains('navigation-settling')) updateNavigationPreviewChoice();
+  else scheduleLocalPreviewRebuild();
+}
+
+function setPanelScaleAroundCentre(newScale) {
+  const rect = viewport.getBoundingClientRect();
+  setPanelScaleAt(rect.left + viewport.clientWidth / 2, rect.top + viewport.clientHeight / 2, newScale);
+}
+
+function tileAtClient(clientX, clientY) {
+  const rect = viewport.getBoundingClientRect();
+  const worldX = clientX - rect.left + viewport.scrollLeft + scrollOriginX;
+  const worldY = clientY - rect.top + viewport.scrollTop + scrollOriginY;
+  const gx = (worldX - panelX) / Math.max(.001, panelScale);
+  const gy = (worldY - panelY) / Math.max(.001, panelScale);
+  for (const [name, placement] of placements) {
+    if (gx >= placement.x && gx < placement.x + placement.w && gy >= placement.y && gy < placement.y + placement.h) {
+      return {name, placement, nx: (gx - placement.x) / placement.w, ny: (gy - placement.y) / placement.h};
+    }
+  }
+  return null;
+}
+
+function boardPointAtClient(clientX, clientY) {
+  const tile = tileAtClient(clientX, clientY);
+  if (!tile) return null;
+  const cropW = boardW / contentZoom;
+  const cropH = boardH / contentZoom;
+  const x = contentPanX + (flipped ? 1 - tile.nx : tile.nx) * cropW;
+  const y = contentPanY + tile.ny * cropH;
+  return {...tile, x, y};
+}
+
+function setZoomAt(clientX, clientY, newZoom) {
+  const point = boardPointAtClient(clientX, clientY);
+  const oldCropW = boardW / contentZoom;
+  const oldCropH = boardH / contentZoom;
+  const nx = point ? point.nx : .5;
+  const ny = point ? point.ny : .5;
+  const boardX = point ? point.x : contentPanX + oldCropW / 2;
+  const boardY = point ? point.y : contentPanY + oldCropH / 2;
+
+  contentZoom = clamp(newZoom, 1, 64);
+  const newCropW = boardW / contentZoom;
+  const newCropH = boardH / contentZoom;
+  contentPanX = boardX - (flipped ? 1 - nx : nx) * newCropW;
+  contentPanY = boardY - ny * newCropH;
+  clampContentPan();
+  scheduleContentTransform();
+}
+
+function analysisPickText(point) {
+  if (!point) return null;
+  const aw = Number(meta.analysis_width) || boardW;
+  const ah = Number(meta.analysis_height) || boardH;
+  const x = Math.floor(point.x * aw / boardW);
+  const y = Math.floor(point.y * ah / boardH);
+  return {layer: point.name, x, y, spec: `${point.name}:${x},${y}`};
+}
+
+function cssEscape(value) {
+  return window.CSS && CSS.escape ? CSS.escape(String(value)) : String(value).replaceAll('"', '\\"');
+}
+
+function clearSelectedNetElements() {
+  for (const element of selectedNetElements) element.classList.remove('selected');
+  selectedNetElements = [];
+}
+
+// Clone a netmap shape together with shallow copies of its ancestor groups,
+// preserving any transform/clip attributes on the chain without dragging the
+// rest of the (potentially huge) netmap along.
+function cloneShapeWithAncestors(shape, stopAt) {
+  let clone = shape.cloneNode(true);
+  clone.removeAttribute('id');
+  let node = shape.parentNode;
+  while (node && node !== stopAt && node.nodeType === 1 && node.tagName.toLowerCase() !== 'svg') {
+    const wrapper = node.cloneNode(false);
+    wrapper.removeAttribute('id');
+    wrapper.appendChild(clone);
+    clone = wrapper;
+    node = node.parentNode;
+  }
+  return clone;
+}
+
+// Mirror the current selection into the per-tile highlight overlays. These
+// hold only the selected net's geometry, so they can stay visible and be
+// transformed live during pan/zoom, unlike the full netmap.
+function updateNetHighlights() {
+  for (const svg of highlightSvgs.values()) {
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+  }
+  if (!currentNet || !netElements.has(currentNet)) return;
+  for (const shape of netElements.get(currentNet)) {
+    const target = highlightSvgs.get(shape.dataset.layer);
+    if (!target) continue;
+    target.appendChild(cloneShapeWithAncestors(shape, shape.ownerSVGElement));
+  }
+}
+
+function selectNet(netId) {
+  clearSelectedNetElements();
   currentNet = null;
-  document.getElementById('net').textContent = 'none';
-  document.getElementById('net-layers').textContent = '';
-  for(const b of document.querySelectorAll('#layer-buttons button')) b.classList.remove('has-net');
-}
-
-/* Back view mirrors the board about its own vertical centreline while keeping
-   the transform origin at 0 0. scaleX(-1) alone would flip it about the left
-   edge and push it to negative x, off the left of the scroll container; the
-   trailing translateX(-100%) (applied first, transforms compose right-to-left)
-   shifts it back so the mirrored board lands exactly where it started. */
-function applyView(){
-  board.style.transform = back
-    ? `scale(${zoom}) scaleX(-1) translateX(-100%)`
-    : `scale(${zoom})`;
-  document.getElementById('front').classList.toggle('active', !back);
-  document.getElementById('back').classList.toggle('active', back);
-}
-
-/* Flipping the board over shows you the other side, so move to the outer
-   layer on that side unless the user is already looking at an inner layer
-   (they are buried, and equally visible from either side). */
-function setSide(wantBack){
-  if(back === wantBack) return;
-  back = wantBack;
-  const copper = meta.layers || [];
-  if(isOuter(activeLayer)){
-    const target = copper.find(n => isOuter(n) && sideOf(n) === (back ? 'B' : 'F'));
-    if(target) selectLayer(target);
+  if (!Number.isInteger(netId) || netId <= 0 || !netElements.has(netId)) {
+    updateNetHighlights();
+    updateNetInfo(null, Number.isInteger(netId) && netId > 0 ? `Net ${netId} is not present in the viewer map.` : null);
+    return;
   }
-  applyView();
+  selectedNetElements = netElements.get(netId);
+  for (const element of selectedNetElements) element.classList.add('selected');
+  currentNet = netId;
+  updateNetHighlights();
+  document.getElementById('net-search').value = String(netId);
+  updateNetInfo(netId);
 }
 
-function fit(){
-  const w = meta.width || meta.tile_w, h = meta.height || meta.tile_h;
-  const pad = 56;
-  zoom = Math.max(0.02, Math.min((stage.clientWidth - pad) / w,
-                                 (stage.clientHeight - pad) / h));
-  applyView();
-  stage.scrollLeft = 0; stage.scrollTop = 0;
+function clearNet() {
+  clearSelectedNetElements();
+  currentNet = null;
+  updateNetHighlights();
+  updateNetInfo(null);
 }
 
-// Middle-drag, or click-drag on empty space, pans the scroll container.
-function enablePan(){
-  let panning = false, sx = 0, sy = 0, sl = 0, st = 0;
-  stage.addEventListener('pointerdown', e => {
-    if(e.button !== 1 && !(e.button === 0 && !e.target.closest('[data-net-id]'))) return;
-    panning = true; sx = e.clientX; sy = e.clientY;
-    sl = stage.scrollLeft; st = stage.scrollTop;
-    stage.classList.add('dragging');
-    stage.setPointerCapture(e.pointerId);
-  });
-  stage.addEventListener('pointermove', e => {
-    if(!panning) return;
-    stage.scrollLeft = sl - (e.clientX - sx);
-    stage.scrollTop  = st - (e.clientY - sy);
-  });
-  const end = e => { panning = false; stage.classList.remove('dragging'); };
-  stage.addEventListener('pointerup', end);
-  stage.addEventListener('pointercancel', end);
-
-  // Ctrl/⌘ + wheel zooms; plain wheel scrolls as usual.
-  stage.addEventListener('wheel', e => {
-    if(!e.ctrlKey && !e.metaKey) return;
-    e.preventDefault();
-    zoom *= e.deltaY < 0 ? 1.1 : 1/1.1;
-    zoom = Math.min(40, Math.max(0.02, zoom));
-    applyView();
-  }, {passive:false});
+function updateNetInfo(netId, message=null) {
+  const info = document.getElementById('net-info');
+  const clicked = lastPick
+    ? `<div style="color:var(--muted);font-size:11px">Clicked: <code>${lastPick.spec}</code></div>`
+    : '';
+  if (!netId) {
+    info.innerHTML = clicked + (message
+      ? `<div style="color:#ff9d9d">${message}</div>`
+      : '<em style="color:var(--muted)">Click a net</em>');
+    return;
+  }
+  const layers = [];
+  for (const [layer, ids] of layerNetIds) if (ids.has(netId)) layers.push(layer);
+  info.innerHTML = `<div><strong>Net ${netId}</strong></div>` + clicked +
+    `<div class="layer-list">${layers.length ? layers.map(layer => `<div>${layer}</div>`).join('') : 'No layer geometry'}</div>`;
 }
 
-document.getElementById('zin').onclick   = () => { zoom = Math.min(40, zoom*1.25); applyView(); };
-document.getElementById('zout').onclick  = () => { zoom = Math.max(0.02, zoom/1.25); applyView(); };
-document.getElementById('front').onclick = () => setSide(false);
-document.getElementById('back').onclick  = () => setSide(true);
-document.getElementById('fit').onclick   = fit;
-document.getElementById('clear').onclick = clearNet;
+function applyToggleStates() {
+  document.getElementById('toggle-flip').classList.toggle('active', flipped);
+  document.getElementById('toggle-silk').classList.toggle('active', silkOn);
+  document.getElementById('toggle-silk').textContent = silkOn ? 'Hide silk' : 'Show silk';
+  const collapsed = document.body.classList.contains('sidebar-collapsed');
+  document.getElementById('toggle-sidebar').textContent = collapsed ? 'Show panel' : 'Hide panel';
+  updatePanelScaleReadout();
+}
 
-init().catch(e => { errEl.textContent = e.message; });
+function setSidebarCollapsed(collapsed) {
+  const oldW = Math.max(1, viewport.clientWidth);
+  const oldH = Math.max(1, viewport.clientHeight);
+  document.body.classList.toggle('sidebar-collapsed', collapsed);
+  try { localStorage.setItem('pcbnets.sidebarCollapsed', collapsed ? '1' : '0'); } catch {}
+  applyToggleStates();
+  requestAnimationFrame(() => handleViewportGeometryChange(oldW, oldH));
+}
+
+function handleViewportGeometryChange(oldW=lastViewportW, oldH=lastViewportH) {
+  const newW = Math.max(1, viewport.clientWidth);
+  const newH = Math.max(1, viewport.clientHeight);
+  if (oldW > 0 && oldH > 0) {
+    panelX += (newW - oldW) / 2;
+    panelY += (newH - oldH) / 2;
+  } else {
+    centerPanelGrid();
+  }
+  rememberViewportSize();
+  updateScrollArea(true);
+  updatePanelScaleReadout();
+}
+
+function populateSidebar() {
+  const list = document.getElementById('tile-list');
+  list.innerHTML = (meta.layers || []).map(name => {
+    const correction = (meta.corrections || {})[name];
+    let note = '';
+    if (correction) {
+      if (correction.invert) note = ' (inverted)';
+      else if (correction.offset && (correction.offset[0] || correction.offset[1])) note = ` (offset ${correction.offset})`;
+    }
+    return `<div>· ${name}${note}</div>`;
+  }).join('');
+}
+
+function toggleSilk() {
+  silkOn = !silkOn;
+  for (const element of document.querySelectorAll('.silk-layer')) element.classList.toggle('silk-hidden', !silkOn);
+  invalidateLocalPreview();
+  schedulePreviewRebuild();
+  scheduleLocalPreviewRebuild();
+  applyToggleStates();
+}
+
+function toggleFlip() {
+  flipped = !flipped;
+  scheduleContentTransform();
+  updateTileLabels();
+  applyToggleStates();
+}
+
+function isUiTarget(target) {
+  return target && target.closest && target.closest('button,input,select,textarea,a,label');
+}
+
+function showNavigationMode() {
+  cancelLocalPreviewBuild();
+  if (navigationTimer) {
+    clearTimeout(navigationTimer);
+    navigationTimer = 0;
+  }
+  navigationSettleGeneration += 1;
+  for (const tile of tileElements) tile.classList.remove('board-revealed');
+  document.body.classList.remove('navigation-settling');
+  document.body.classList.add('navigating');
+  updateNavigationPreviewChoice();
+}
+
+function settleNavigationMode() {
+  if (pointerNavigating || navigationTimer) return;
+  const generation = ++navigationSettleGeneration;
+  applyContentTransformNow();
+  document.body.classList.remove('navigating');
+  document.body.classList.add('navigation-settling');
+  void revealBoardsProgressively(generation);
+}
+
+function nextFrame() {
+  return new Promise(resolve => requestAnimationFrame(resolve));
+}
+
+// Order tiles so the ones intersecting the viewport get their live SVG back
+// first; offscreen windows can wait.
+function tilesInRevealOrder() {
+  const originX = panelX - scrollOriginX - viewport.scrollLeft;
+  const originY = panelY - scrollOriginY - viewport.scrollTop;
+  const vw = viewport.clientWidth;
+  const vh = viewport.clientHeight;
+  const onscreen = [];
+  const offscreen = [];
+  for (const tile of tileElements) {
+    const placement = placements.get(tile.dataset.layer);
+    if (!placement) { offscreen.push(tile); continue; }
+    const x = originX + placement.x * panelScale;
+    const y = originY + placement.y * panelScale;
+    const w = placement.w * panelScale;
+    const h = placement.h * panelScale;
+    (x < vw && y < vh && x + w > 0 && y + h > 0 ? onscreen : offscreen).push(tile);
+  }
+  return [...onscreen, ...offscreen];
+}
+
+function settleAborted(generation) {
+  return generation !== navigationSettleGeneration || pointerNavigating || navigationTimer;
+}
+
+async function revealBoardsProgressively(generation) {
+  // Unhide one tile's live SVG per frame pair so each expensive raster is a
+  // short, separately-interruptible block. A new pan or wheel gesture bumps
+  // navigationSettleGeneration (via showNavigationMode) and we bail out,
+  // leaving the cheap canvas previews in charge.
+  for (const tile of tilesInRevealOrder()) {
+    tile.classList.add('board-revealed');
+    await nextFrame();
+    await nextFrame();
+    if (settleAborted(generation)) return;
+  }
+  document.body.classList.remove('navigation-settling');
+  for (const tile of tileElements) tile.classList.remove('board-revealed');
+  clearNavigationPreviewChoice();
+  scheduleLocalPreviewRebuild();
+}
+
+function beginPointerNavigation() {
+  pointerNavigating = true;
+  showNavigationMode();
+}
+
+function endPointerNavigation() {
+  pointerNavigating = false;
+  settleNavigationMode();
+}
+
+function pulseNavigation(delay=200) {
+  showNavigationMode();
+  navigationTimer = window.setTimeout(() => {
+    navigationTimer = 0;
+    settleNavigationMode();
+  }, delay);
+}
+
+function beginPan(event) {
+  if (isUiTarget(event.target) || ![0,1,2].includes(event.button)) return;
+  // Prevent native SVG/image dragging and text selection from stealing the gesture.
+  event.preventDefault();
+  isPanning = true;
+  isPanelPanning = event.button === 1 || event.button === 2 || event.altKey;
+  panMoved = false;
+  panNavigationStarted = false;
+  panStartX = event.clientX;
+  panStartY = event.clientY;
+  panOrigX = contentPanX;
+  panOrigY = contentPanY;
+  panelPanOrigX = panelX;
+  panelPanOrigY = panelY;
+  const shape = event.target.closest && event.target.closest('[data-net-id]');
+  pendingPickNet = shape ? Number(shape.dataset.netId) : null;
+  pendingPickLayer = shape ? shape.dataset.layer : null;
+  viewport.classList.add('dragging');
+  viewport.setPointerCapture(event.pointerId);
+}
+
+function movePan(event) {
+  if (!isPanning) return;
+  const dx = event.clientX - panStartX;
+  const dy = event.clientY - panStartY;
+  if (Math.abs(dx) + Math.abs(dy) > 4) {
+    panMoved = true;
+    if (!panNavigationStarted) {
+      panNavigationStarted = true;
+      beginPointerNavigation();
+    }
+  }
+
+  if (isPanelPanning) {
+    panelX = panelPanOrigX + dx;
+    panelY = panelPanOrigY + dy;
+    scheduleScrollArea();
+    return;
+  }
+
+  contentPanX = panOrigX + (flipped ? 1 : -1) * dx / Math.max(.001, panelScale * contentZoom);
+  contentPanY = panOrigY - dy / Math.max(.001, panelScale * contentZoom);
+  clampContentPan();
+  scheduleContentTransform();
+}
+
+function endPan(event) {
+  if (!isPanning) return;
+  const moved = panMoved;
+  isPanning = false;
+  isPanelPanning = false;
+  panMoved = false;
+  viewport.classList.remove('dragging');
+  if (panNavigationStarted) endPointerNavigation();
+  panNavigationStarted = false;
+  try { viewport.releasePointerCapture(event.pointerId); } catch {}
+
+  if (event.type === 'pointerup' && event.button === 0 && !moved) {
+    const point = boardPointAtClient(event.clientX, event.clientY);
+    lastPick = analysisPickText(point);
+    if (pendingPickNet) selectNet(pendingPickNet);
+    else clearNet();
+  }
+  pendingPickNet = null;
+  pendingPickLayer = null;
+}
+
+async function init() {
+  meta = JSON.parse(await fetchText('meta.json', 'metadata'));
+  boardW = Number(meta.width || meta.tile_w);
+  boardH = Number(meta.height || meta.tile_h);
+  if (!boardW || !boardH) fail('metadata is missing board dimensions (width/height)');
+  if (!Array.isArray(meta.layers) || !meta.layers.length) fail('metadata lists no copper layers');
+
+  const names = new Set([
+    ...meta.layers,
+    ...(meta.mask_layers || []),
+    ...(meta.silk_layers || []),
+    ...(meta.drill_layers || []),
+  ]);
+  const requiredLayers = new Set(meta.layers || []);
+  const netFile = meta.netmap || 'netmap.svg';
+  const netTextPromise = fetchText(netFile, 'netmap.svg');
+  const layerResults = await Promise.all([...names].map(async name => {
+    const file = (meta.layer_svgs && meta.layer_svgs[name]) || `${name}.svg`;
+    const text = requiredLayers.has(name)
+      ? await fetchText(file, `SVG layer ${name}`)
+      : await fetchOptionalText(file);
+    if (text === null) return null;
+    const root = parseSvg(text, file);
+    checkSvgSize(root, file, boardW, boardH);
+    return [name, root];
+  }));
+  for (const result of layerResults) if (result) layerSources.set(result[0], result[1]);
+
+  netSource = parseSvg(await netTextPromise, netFile);
+  netViewBox = svgViewBox(netSource,
+    Number(meta.netmap_width) || boardW * (Number(meta.netmap_scale) || 1),
+    Number(meta.netmap_height) || boardH * (Number(meta.netmap_scale) || 1));
+
+  buildPlacements();
+  buildTiles();
+  populateSidebar();
+
+  if (document.querySelector('.silk-layer')) document.getElementById('toggle-silk').style.display = 'inline-block';
+  document.getElementById('loading').style.display = 'none';
+  document.getElementById('controls').style.display = 'block';
+  try {
+    if (localStorage.getItem('pcbnets.sidebarCollapsed') === '1') document.body.classList.add('sidebar-collapsed');
+  } catch {}
+  applyToggleStates();
+  fitToScreen();
+  schedulePreviewRebuild();
+  scheduleLocalPreviewRebuild(300);
+}
+
+// Wheel events can arrive much faster than the display refresh (especially
+// from trackpads). Accumulate deltas and apply a single, delta-proportional
+// zoom step per animation frame: one layout read and one transform update
+// per frame instead of per event, and smooth pixel-level trackpad zooming
+// while a classic mouse notch (deltaY ~100) still gives the familiar ~1.17x.
+let wheelFrame = 0;
+let wheelZoomDelta = 0;
+let wheelPanelDelta = 0;
+let wheelClientX = 0;
+let wheelClientY = 0;
+
+function applyWheelFrame() {
+  wheelFrame = 0;
+  pulseNavigation();
+  if (wheelPanelDelta) {
+    const factor = Math.exp(-wheelPanelDelta * 0.0016);
+    wheelPanelDelta = 0;
+    setPanelScaleAt(wheelClientX, wheelClientY, panelScale * factor);
+  }
+  if (wheelZoomDelta) {
+    const factor = Math.exp(-wheelZoomDelta * 0.0016);
+    wheelZoomDelta = 0;
+    setZoomAt(wheelClientX, wheelClientY, contentZoom * factor);
+  }
+  // We are already inside an animation frame; letting scheduleContentTransform
+  // defer to the *next* frame would add a frame of latency to every wheel tick.
+  applyContentTransformNow();
+}
+
+viewport.addEventListener('wheel', event => {
+  event.preventDefault();
+  // Normalise line/page scrolling (Firefox) to approximate pixel deltas.
+  const unit = event.deltaMode === 1 ? 33 : event.deltaMode === 2 ? 330 : 1;
+  const delta = event.deltaY * unit;
+  wheelClientX = event.clientX;
+  wheelClientY = event.clientY;
+  if (event.shiftKey) wheelPanelDelta += delta;
+  else wheelZoomDelta += delta;
+  if (!wheelFrame) wheelFrame = requestAnimationFrame(applyWheelFrame);
+}, {passive:false});
+viewport.addEventListener('dblclick', event => {
+  event.preventDefault();
+  pulseNavigation();
+  setZoomAt(event.clientX, event.clientY, contentZoom < 1.5 ? 2 : 1);
+});
+viewport.addEventListener('pointerdown', beginPan);
+viewport.addEventListener('pointermove', movePan);
+// Inline SVG descendants can otherwise trigger the browser's native drag ghost.
+viewport.addEventListener('dragstart', event => event.preventDefault(), true);
+viewport.addEventListener('selectstart', event => {
+  if (!isUiTarget(event.target)) event.preventDefault();
+}, true);
+viewport.addEventListener('pointerup', endPan);
+viewport.addEventListener('pointercancel', endPan);
+viewport.addEventListener('contextmenu', event => event.preventDefault());
+
+window.addEventListener('resize', () => {
+  if (gridW && gridH) handleViewportGeometryChange();
+});
+window.addEventListener('keydown', event => {
+  const active = document.activeElement;
+  if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) return;
+  if (event.key === 'h' || event.key === 'H') {
+    event.preventDefault();
+    setSidebarCollapsed(!document.body.classList.contains('sidebar-collapsed'));
+  } else if (event.key === '+' || event.key === '=') {
+    event.preventDefault();
+    setPanelScaleAroundCentre(panelScale * 1.18);
+  } else if (event.key === '-' || event.key === '_') {
+    event.preventDefault();
+    setPanelScaleAroundCentre(panelScale / 1.18);
+  } else if (event.key === '0') {
+    event.preventDefault();
+    fitPanelWindows();
+  }
+});
+
+document.getElementById('toggle-fit').addEventListener('click', fitToScreen);
+document.getElementById('toggle-flip').addEventListener('click', toggleFlip);
+document.getElementById('toggle-silk').addEventListener('click', toggleSilk);
+document.getElementById('toggle-sidebar').addEventListener('click', () => setSidebarCollapsed(true));
+document.getElementById('panel-zoom-out').addEventListener('click', () => setPanelScaleAroundCentre(panelScale / 1.18));
+document.getElementById('panel-zoom-in').addEventListener('click', () => setPanelScaleAroundCentre(panelScale * 1.18));
+document.getElementById('panel-zoom-fit').addEventListener('click', fitPanelWindows);
+document.getElementById('net-search').addEventListener('input', event => {
+  const value = parseInt(event.target.value, 10);
+  if (Number.isFinite(value)) selectNet(value);
+  else clearNet();
+});
+sidebarTab.addEventListener('pointerdown', event => event.stopPropagation());
+sidebarTab.addEventListener('click', event => {
+  event.stopPropagation();
+  setSidebarCollapsed(false);
+});
+
+init().catch(error => {
+  document.getElementById('loading').textContent = 'Error: ' + error.message;
+  console.error(error);
+});
 </script>
 </body>
 </html>
