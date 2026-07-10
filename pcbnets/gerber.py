@@ -495,6 +495,7 @@ def _rasterise_svg_to_png(svg_path: pathlib.Path, png_path: pathlib.Path,
     subprocess.run(
         ['rsvg-convert', str(svg_path),
          '-w', str(width), '-h', str(height),
+         '-b', 'black',
          '-o', str(png_path)],
         check=True,
     )
