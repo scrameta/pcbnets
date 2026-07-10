@@ -1,10 +1,8 @@
-"""Gerber/Excellon detection and rasterisation.
+"""Gerber/Excellon detection and SVG export.
 
 Detects which files in a directory map to which KiCad-style layers,
 writes a ``layers.json`` so the mapping is inspectable and editable,
-and exports each file to SVG with ``gerbv``. PNG masks are then rasterised
-from those SVGs, so vector and raster outputs share the exact same geometry
-and avoid backend-specific offsets.
+and exports each file to SVG with ``gerbv``.
 
 gerbv is a runtime dependency only for this module; the rest of pcbnets
 works on any PNG masks regardless of how they were produced.
@@ -22,11 +20,6 @@ import subprocess
 import time
 from typing import Iterable
 import xml.etree.ElementTree as ET
-
-from PIL import Image
-
-Image.MAX_IMAGE_PIXELS = 1_000_000_000  # 1 gigapixel
-
 
 log = logging.getLogger('pcbnets.gerber')
 
@@ -407,12 +400,7 @@ def _svg_to_transparent(path_in, path_out, fill="#FFFFFF"):
     pathlib.Path(path_out).write_text(out)
 
 def _optimise_svg_with_tools(svg_path: pathlib.Path) -> tuple[int, int]:
-    """Optimise an SVG in-place using svgo.
-
-    The tools run in series so we avoid hand-editing path geometry in pcbnets:
-    ``svgo -i in.svg -o temp.svg`` with
-    viewboxing/comment/id cleanup enabled.  Returns ``(bytes_in, bytes_out)``.
-    """
+    """Optimise an SVG in-place using svgo without structural rewrites."""
     before = svg_path.stat().st_size
     try:
         svgo = subprocess.run(
@@ -426,12 +414,12 @@ def _optimise_svg_with_tools(svg_path: pathlib.Path) -> tuple[int, int]:
                 'svgo failed while optimising '
                 f'{svg_path.name}: {svgo.stderr.strip() or svgo.stdout.strip()}'
             )
-
         return before, svg_path.stat().st_size
     except FileNotFoundError as e:
         raise RuntimeError(
             f'{e.filename} is required for SVG optimisation; install svgo'
         ) from e
+
 
 
 def _export_one_svg(
@@ -483,77 +471,12 @@ def _export_one_svg(
     if stdout.strip():
         log.debug('gerbv stdout for %s:\n%s', output.name, stdout.strip())
 
-def _rasterise_svg_to_png(svg_path: pathlib.Path, png_path: pathlib.Path,
-                          window: tuple[float, float, float, float],
-                          dpi: int) -> tuple[int, int]:
-    """Rasterise an SVG layer to a 1-bit black-background PNG at ``dpi``."""
-    _ox, _oy, w_in, h_in = window
-    width = max(1, round(w_in * dpi))
-    height = max(1, round(h_in * dpi))
-
-    rsvg = subprocess.Popen(
-        [
-            'rsvg-convert', str(svg_path),
-            '-w', str(width),
-            '-h', str(height),
-            '-b', 'black',
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-
-    assert rsvg.stdout is not None
-
-    convert = subprocess.Popen(
-        [
-            'convert', 'png:-',
-            '-background', 'black',
-            '-alpha', 'remove',
-            '-alpha', 'off',
-            '-threshold', '50%',
-            '-type', 'bilevel',
-            '-depth', '1',
-            str(png_path),
-        ],
-        stdin=rsvg.stdout,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-
-    # Allow rsvg-convert to receive SIGPIPE if convert exits early.
-    rsvg.stdout.close()
-
-    _convert_stdout, convert_stderr = convert.communicate()
-    _rsvg_stdout, rsvg_stderr = rsvg.communicate()
-
-    if rsvg.returncode != 0:
-        raise subprocess.CalledProcessError(
-            rsvg.returncode,
-            rsvg.args,
-            stderr=rsvg_stderr,
-        )
-
-    if convert.returncode != 0:
-        raise subprocess.CalledProcessError(
-            convert.returncode,
-            convert.args,
-            stderr=convert_stderr,
-        )
-
-    if not png_path.exists():
-        raise RuntimeError(
-            f'SVG rasterizer claimed success but {png_path} was not written'
-        )
-
-    return width, height
-
-
 def _write_drill_aliases(output_dir: pathlib.Path,
                          written: list[pathlib.Path]) -> None:
-    """Create downstream-friendly drill/via aliases from rendered drill masks."""
-    pth_path = output_dir / 'PTH.png'
-    via_path = output_dir / 'via.png'
-    drill_alias = output_dir / 'drill.png'
+    """Create downstream-friendly drill/via aliases from rendered SVG masks."""
+    pth_path = output_dir / 'PTH.svg'
+    via_path = output_dir / 'via.svg'
+    drill_alias = output_dir / 'drill.svg'
 
     if not via_path.exists():
         source = None
@@ -580,21 +503,15 @@ def rasterise(
     output_dir: pathlib.Path,
     dpi: int = 1000,
     layers: Iterable[str] | None = None,
-    svg: bool = True,
 ) -> list[pathlib.Path]:
-    """Create aligned SVGs and PNGs for each layer using gerbv plus CairoSVG.
+    """Create aligned SVGs for each layer using gerbv.
 
-    Output PNGs are named ``{canonical_name}.png`` in ``output_dir``. The
-    electrical drill mask is also aliased to ``via.png`` where possible so
+    Output SVGs are named ``{canonical_name}.svg`` in ``output_dir``. The
+    electrical drill mask is also aliased to ``via.svg`` where possible so
     the render step can distinguish physical holes from electrical vertical
     connectors.
 
-    gerbv is only used to emit SVG. Each PNG is rasterised from that SVG, so
-    the raster and vector outputs share one geometry path. When ``svg`` is
-    false, the intermediate SVGs are removed after PNG creation. The
-    white=copper convention matches the SVGs; PNGs get a black background.
-
-    Returns the list of paths written (PNGs and SVGs).
+    Returns the list of SVG paths written.
     """
     check_gerbv()
     source_dir = pathlib.Path(source_dir)
@@ -606,11 +523,8 @@ def rasterise(
     if not targets:
         return []
 
-    # Pass 1: export each file as SVG in one shared origin/window, then
-    # rasterise those SVGs to PNG. This avoids small offsets between gerbv
-    # backend implementations because gerbv never writes PNG directly.
+    # Export each file as SVG in one shared origin/window.
     written: list[pathlib.Path] = []
-    rendered_sizes: dict[str, tuple[int, int]] = {}
     sources = []
     for name in targets:
         fname = mapping[name]
@@ -645,7 +559,6 @@ def rasterise(
         if not src.is_file():
             log.warning('  warning: %s not found (skipping %s)', src, name)
             continue
-        out = output_dir / f'{name}.png'
         svg_out = output_dir / f'{name}.svg'
         started = time.monotonic()
         log.info('  exporting %s.svg from %s', name, fname)
@@ -662,33 +575,16 @@ def rasterise(
             before_bytes, after_bytes = _optimise_svg_with_tools(svg_out)
         except RuntimeError as e:
             log.error('  ! SVG optimisation failed: %s', e)
-            if not svg:
-                svg_out.unlink(missing_ok=True)
             continue
         log.info('    → svg: %.1f→%.1f MB via svgo',
                  before_bytes / 1e6, after_bytes / 1e6)
 
-        log.info('  rasterising %s.png from %s.svg', name, name)
-        try:
-            _rasterise_svg_to_png(svg_out, out, svg_window, dpi)
-        except (ImportError, RuntimeError) as e:
-            log.error('  ! SVG→PNG rasterisation failed: %s', e)
-            if not svg:
-                svg_out.unlink(missing_ok=True)
-            continue
-        size = Image.open(out).size
-        rendered_sizes[name] = size
-        log.info('    → %s×%s px (%s)',
-                 size[0], size[1], _format_elapsed(time.monotonic() - started))
-        written.append(out)
-        if svg:
-            written.append(svg_out)
-        else:
-            svg_out.unlink(missing_ok=True)
+        log.info('    → %s (%s)', svg_out.name, _format_elapsed(time.monotonic() - started))
+        written.append(svg_out)
 
     # Convenience aliases for downstream use:
-    #   via.png   = preferred electrical connectivity mask
-    #   drill.png = physical hole mask, falling back to the electrical mask
+    #   via.svg   = preferred electrical connectivity mask
+    #   drill.svg = physical hole mask, falling back to the electrical mask
     #               only when no explicit drill mask was rendered
     _write_drill_aliases(output_dir, written)
 

@@ -1,12 +1,90 @@
-"""Grid composition and net-id encoding for the interactive viewer."""
+"""Render-time helpers for SVG-only viewer builds.
+
+The public viewer output is SVG-only.  This module also owns any temporary
+SVG→PNG rasterisation needed internally by net extraction, keeping the Gerber
+export step vector-only.
+"""
 
 from __future__ import annotations
 
 import json
+import pathlib
+import subprocess
 from typing import Callable, Mapping
 
 import numpy as np
 from PIL import Image
+
+
+def rasterise_svg_to_png(svg_path: pathlib.Path, png_path: pathlib.Path,
+                         size: tuple[int, int]) -> tuple[int, int]:
+    """Rasterise one SVG layer to a 1-bit black-background PNG.
+
+    This is an internal render/nets implementation detail: the generated PNGs
+    are masks for the existing connectivity code, not viewer artefacts.
+    """
+    width, height = size
+    rsvg = subprocess.Popen(
+        [
+            'rsvg-convert', str(svg_path),
+            '-w', str(width),
+            '-h', str(height),
+            '-b', 'black',
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert rsvg.stdout is not None
+    convert = subprocess.Popen(
+        [
+            'convert', 'png:-',
+            '-background', 'black',
+            '-alpha', 'remove',
+            '-alpha', 'off',
+            '-threshold', '50%',
+            '-type', 'bilevel',
+            '-depth', '1',
+            str(png_path),
+        ],
+        stdin=rsvg.stdout,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    rsvg.stdout.close()
+    _convert_stdout, convert_stderr = convert.communicate()
+    _rsvg_stdout, rsvg_stderr = rsvg.communicate()
+    if rsvg.returncode != 0:
+        raise subprocess.CalledProcessError(rsvg.returncode, rsvg.args, stderr=rsvg_stderr)
+    if convert.returncode != 0:
+        raise subprocess.CalledProcessError(convert.returncode, convert.args, stderr=convert_stderr)
+    if not png_path.exists():
+        raise RuntimeError(f'SVG rasterizer claimed success but {png_path} was not written')
+    return width, height
+
+
+def svg_size(svg_path: pathlib.Path) -> tuple[int, int]:
+    """Read an SVG's logical canvas size from its viewBox or width/height."""
+    import re
+    import xml.etree.ElementTree as ET
+
+    root = ET.parse(svg_path).getroot()
+    view_box = root.get('viewBox')
+    if view_box:
+        parts = [float(p) for p in re.split(r'[\s,]+', view_box.strip()) if p]
+        if len(parts) == 4:
+            return max(1, round(parts[2])), max(1, round(parts[3]))
+
+    def _num(value: str | None) -> float | None:
+        if value is None:
+            return None
+        match = re.match(r'\s*([0-9.]+)', value)
+        return float(match.group(1)) if match else None
+
+    width = _num(root.get('width'))
+    height = _num(root.get('height'))
+    if width is None or height is None:
+        raise ValueError(f'Cannot determine SVG dimensions for {svg_path}')
+    return max(1, round(width)), max(1, round(height))
 
 
 def _encode_ids_rgb(labels: np.ndarray) -> Image.Image:
@@ -191,3 +269,42 @@ def write_meta(meta: dict, path) -> None:
     """Write metadata as JSON. Convenience for CLI users."""
     with open(path, 'w') as fp:
         json.dump(meta, fp, indent=2)
+
+
+def labels_to_netmap_svg(net_labels: Mapping[str, np.ndarray], placements: Mapping[str, Mapping[str, int]], width: int, height: int) -> str:
+    """Serialize per-layer label arrays to an inline-pickable SVG net map."""
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {int(width)} {int(height)}">',
+        '<style>.net-shape{fill:transparent;stroke:transparent;pointer-events:all}.net-shape.selected{fill:rgba(255,80,80,0.7);stroke:rgba(255,80,80,0.7);pointer-events:all}</style>',
+    ]
+    for layer, labels in net_labels.items():
+        if layer not in placements:
+            raise ValueError(f'cannot generate netmap.svg: missing placement for {layer}')
+        p = placements[layer]
+        ox, oy = int(p['x']), int(p['y'])
+        arr = np.asarray(labels)
+        ids = [int(i) for i in np.unique(arr) if int(i) > 0]
+        parts.append(f'<g data-layer="{layer}">')
+        for net_id in ids:
+            runs: list[str] = []
+            ys, xs = np.where(arr == net_id)
+            if len(xs) == 0:
+                continue
+            for y in sorted(set(int(v) for v in ys)):
+                row = arr[y] == net_id
+                x = 0
+                w = row.shape[0]
+                while x < w:
+                    if not row[x]:
+                        x += 1
+                        continue
+                    x0 = x
+                    while x < w and row[x]:
+                        x += 1
+                    x1 = x
+                    runs.append(f'M{ox+x0} {oy+y}H{ox+x1}V{oy+y+1}H{ox+x0}Z')
+            d = ''.join(runs)
+            parts.append(f'<path class="net-shape" data-net-id="{net_id}" data-layer="{layer}" fill-rule="evenodd" d="{d}"/>')
+        parts.append('</g>')
+    parts.append('</svg>')
+    return '\n'.join(parts)

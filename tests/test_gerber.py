@@ -26,7 +26,7 @@ def touch(p: pathlib.Path) -> None:
     p.write_text('')
 
 
-def test_svg_tools_run_svgo_then_scour(monkeypatch, tmp_path):
+def test_svg_tools_runs_svgo_only(monkeypatch, tmp_path):
     from pcbnets.gerber import _optimise_svg_with_tools
 
     svg = tmp_path / 'layer.svg'
@@ -35,10 +35,7 @@ def test_svg_tools_run_svgo_then_scour(monkeypatch, tmp_path):
 
     def fake_run(cmd, stdout, stderr, text):
         calls.append(cmd)
-        if cmd[0] == 'svgo':
-            pathlib.Path(cmd[4]).write_text('<svg><path d="M0 0"/></svg>')
-        elif cmd[0] == 'scour':
-            pathlib.Path(cmd[4]).write_text('<svg><path d="M0 0"/></svg>')
+        pathlib.Path(cmd[4]).write_text('<svg><path d="M0 0"/></svg>')
         return type('Proc', (), {'returncode': 0, 'stdout': '', 'stderr': ''})()
 
     monkeypatch.setattr('pcbnets.gerber.subprocess.run', fake_run)
@@ -46,20 +43,8 @@ def test_svg_tools_run_svgo_then_scour(monkeypatch, tmp_path):
     before, after = _optimise_svg_with_tools(svg)
 
     assert before > after
-    assert calls == [
-        ['svgo', '-i', str(svg), '-o', str(tmp_path / 'layer.svgo.tmp.svg')],
-        [
-            'scour',
-            '-i', str(tmp_path / 'layer.svgo.tmp.svg'),
-            '-o', str(svg),
-            '--enable-viewboxing',
-            '--enable-id-stripping',
-            '--enable-comment-stripping',
-            '--shorten-ids',
-            '--indent=none',
-        ],
-    ]
-    assert not (tmp_path / 'layer.svgo.tmp.svg').exists()
+    assert calls == [['svgo', '-i', str(svg), '-o', str(svg)]]
+
 
 
 def test_detect_kicad_modern_4_layer(tmp_path):
@@ -164,16 +149,17 @@ def test_detect_plain_drl_treated_as_physical_drill(tmp_path):
 
 
 def test_pth_preferred_for_via_alias(tmp_path):
-    """PTH remains the preferred source for via.png when present."""
-    pth = tmp_path / 'PTH.png'
-    drill = tmp_path / 'drill.png'
+    """PTH remains the preferred source for via.svg when present."""
+    pth = tmp_path / 'PTH.svg'
+    drill = tmp_path / 'drill.svg'
     pth.write_bytes(b'pth')
     drill.write_bytes(b'drill')
     written = [pth, drill]
 
     _write_drill_aliases(tmp_path, written)
 
-    assert (tmp_path / 'via.png').read_bytes() == b'pth'
+    assert (tmp_path / 'via.svg').read_bytes() == b'pth'
+    assert not (tmp_path / 'via.png').exists()
 
 
 def test_detect_via_and_pth_drills(tmp_path):

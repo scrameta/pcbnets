@@ -14,6 +14,7 @@ import shutil
 import sys
 import tempfile
 import time
+import subprocess
 import zipfile
 from typing import Iterable
 
@@ -30,11 +31,9 @@ from .gerber import (
     write_layers_json,
 )
 from .masks import MASK_LAYERS, SILK_LAYERS, load_masks, threshold_mask
-from .mips import make_mips
-from .tiles import make_tiles
 from .nets import extract_nets, merge_nets_debug, explain_merge_path
 from .prepare import DEFAULT_OUTER_LAYERS, _shift_bool, prepare_masks
-from .render import build_grid_and_idmap
+from .render import build_grid_and_idmap, labels_to_netmap_svg, rasterise_svg_to_png, svg_size
 
 
 def _format_elapsed(seconds: float) -> str:
@@ -146,7 +145,7 @@ def _resolve_layers(directory: pathlib.Path,
     """
     if requested:
         return list(requested)
-    available = {p.stem for p in directory.glob('*.png')}
+    available = {p.stem for p in directory.glob('*.svg')} | {p.stem for p in directory.glob('*.png')}
 
     # Non-connectivity visual/assembly layers should not be auto-selected as copper.
     # Always exclude PTH/NPTH too: they are drill masks, not copper layers.
@@ -168,9 +167,9 @@ def _resolve_layers(directory: pathlib.Path,
     return []
 
 
-def _first_existing_png(directory: pathlib.Path, names: Iterable[str]) -> str | None:
+def _first_existing_artwork(directory: pathlib.Path, names: Iterable[str]) -> str | None:
     for name in names:
-        if name and (directory / f'{name}.png').is_file():
+        if name and ((directory / f'{name}.svg').is_file() or (directory / f'{name}.png').is_file()):
             return name
     return None
 
@@ -182,9 +181,9 @@ def _resolve_drill_name(directory: pathlib.Path, requested: str = 'auto') -> str
     but electrical merging should normally use :func:`_resolve_via_name`.
     """
     if requested in ('auto', 'drill'):
-        found = _first_existing_png(directory, ['drill', 'PTH', 'via'])
+        found = _first_existing_artwork(directory, ['drill', 'PTH', 'via'])
         return found or 'drill'
-    if (directory / f'{requested}.png').is_file():
+    if (directory / f'{requested}.svg').is_file() or (directory / f'{requested}.png').is_file():
         return requested
     return requested
 
@@ -193,16 +192,16 @@ def _resolve_via_name(directory: pathlib.Path, requested: str = 'auto') -> str:
     """Resolve the electrical vertical-connector mask.
 
     Preference order for automatic mode:
-      1. ``via.png``  -- explicit/generated electrical via mask
-      2. ``PTH.png``  -- plated through-hole drill mask
-      3. ``drill.png`` -- compatibility fallback when no separate via/PTH exists
+      1. ``via.svg``/``via.png``  -- explicit/generated electrical via mask
+      2. ``PTH.svg``/``PTH.png``  -- plated through-hole drill mask
+      3. ``drill.svg``/``drill.png`` -- fallback when no separate via/PTH exists
 
     ``NPTH.png`` is deliberately never selected automatically.
     """
     if requested in ('auto', 'via'):
-        found = _first_existing_png(directory, ['via', 'PTH', 'drill'])
+        found = _first_existing_artwork(directory, ['via', 'PTH', 'drill'])
         return found or 'via'
-    if (directory / f'{requested}.png').is_file():
+    if (directory / f'{requested}.svg').is_file() or (directory / f'{requested}.png').is_file():
         return requested
     return requested
 
@@ -215,6 +214,10 @@ def _connector_mode(directory: pathlib.Path, via_name: str) -> str:
         via_path = directory / 'via.png'
         drill_path = directory / 'drill.png'
         pth_path = directory / 'PTH.png'
+        if not via_path.exists():
+            via_path = directory / 'via.svg'
+            drill_path = directory / 'drill.svg'
+            pth_path = directory / 'PTH.svg'
         if (not pth_path.exists() and via_path.exists() and drill_path.exists()
                 and filecmp.cmp(via_path, drill_path, shallow=False)):
             return 'infer'
@@ -681,54 +684,139 @@ def _run_pipeline(directory: pathlib.Path,
     return grid, idmap, meta, masks, report
 
 
+
+def _decode_ids_rgb_by_placement(idmap: Image.Image, placements: dict) -> dict[str, np.ndarray]:
+    arr = np.asarray(idmap.convert('RGB')).astype(np.uint32)
+    labels = (arr[..., 0] | (arr[..., 1] << 8) | (arr[..., 2] << 16)).astype(np.int32)
+    out = {}
+    for name, p in placements.items():
+        out[name] = labels[p['y']:p['y'] + p['h'], p['x']:p['x'] + p['w']]
+    return out
+
+
+def _command_required(cmd: str, src: pathlib.Path) -> None:
+    if shutil.which(cmd) is None:
+        pkg = 'imagemagick' if cmd == 'magick' else cmd
+        raise RuntimeError(f'Cannot convert {src.name} to SVG: {cmd} was not found.\nInstall it with: sudo apt install {pkg}')
+
+
+def _normalise_potrace_svg(svg_path: pathlib.Path, source_size: tuple[int, int]) -> None:
+    text = svg_path.read_text()
+    w, h = source_size
+    text = re.sub(r'<svg\b[^>]*>', f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}">', text, count=1)
+    text = re.sub(r'<rect\b[^>]*/>\s*', '', text)
+    svg_path.write_text(text)
+
+
+def _convert_png_to_svg(src: pathlib.Path, dst: pathlib.Path, threshold: int = 50) -> None:
+    _command_required('magick', src)
+    _command_required('potrace', src)
+    try:
+        with Image.open(src) as im:
+            size = im.size
+        magick = subprocess.Popen([
+            'magick', str(src), '-colorspace', 'Gray', '-threshold', f'{threshold}%', '-negate', 'pbm:-'
+        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        potrace = subprocess.run([
+            'potrace', '--svg', '--alphamax', '0', '--opttolerance', '0', '--turdsize', '0', '--output', str(dst), '-'
+        ], stdin=magick.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if magick.stdout:
+            magick.stdout.close()
+        _, magick_err = magick.communicate()
+        if magick.returncode != 0:
+            raise RuntimeError(magick_err.decode(errors='replace') if isinstance(magick_err, bytes) else str(magick_err))
+        if potrace.returncode != 0:
+            raise RuntimeError(potrace.stderr)
+        if not dst.exists():
+            raise RuntimeError('potrace did not write an SVG')
+        _normalise_potrace_svg(dst, size)
+    except Exception as e:
+        raise RuntimeError(f'Cannot convert {src.name} to SVG: {e}') from e
+
+
 def _copy_visual_svgs(src_dir: pathlib.Path, build_dir: pathlib.Path,
-                      names: Iterable[str]) -> None:
+                      names: Iterable[str]) -> dict[str, str]:
+    """Copy existing visible SVG layers into a build directory.
+
+    Legacy PNG inputs are intentionally not converted here; run
+    ``pcbnets png2svg`` first when a viewer layer exists only as PNG.
+    """
     log = logging.getLogger('pcbnets.render')
+    layer_svgs: dict[str, str] = {}
     for name in sorted(set(names)):
-        src = src_dir / f'{name}.svg'
-        if not src.exists():
+        src_svg = src_dir / f'{name}.svg'
+        if not src_svg.exists():
             continue
         dst = build_dir / f'{name}.svg'
-        shutil.copy2(src, dst)
+        shutil.copy2(src_svg, dst)
         log.info('  copied %s.svg', name)
+        layer_svgs[name] = dst.name
+    return layer_svgs
+
+
+def _rasterise_render_svgs(src_dir: pathlib.Path,
+                           png_dir: pathlib.Path,
+                           names: Iterable[str]) -> None:
+    """Rasterise SVG inputs into temporary PNG masks for connectivity code."""
+    selected = list(dict.fromkeys(names))
+    sizes: dict[str, tuple[int, int]] = {}
+    for name in selected:
+        svg = src_dir / f'{name}.svg'
+        if not svg.exists():
+            continue
+        sizes[name] = svg_size(svg)
+    if len(set(sizes.values())) > 1:
+        details = '\n  '.join(f'{name}: {size}' for name, size in sizes.items())
+        raise ValueError(f'SVG layer dimensions differ:\n  {details}')
+    for name in sizes:
+        rasterise_svg_to_png(src_dir / f'{name}.svg', png_dir / f'{name}.png', sizes[name])
+
+
+def convert_png_layers_to_svg(src_dir: pathlib.Path,
+                              out_dir: pathlib.Path,
+                              names: Iterable[str] | None = None,
+                              threshold: int = 50,
+                              overwrite: bool = False) -> dict[str, str]:
+    """Convert legacy white-on-black PNG artwork masks to SVG files."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    selected = sorted(set(names)) if names else sorted(p.stem for p in src_dir.glob('*.png'))
+    written: dict[str, str] = {}
+    for name in selected:
+        src_svg = src_dir / f'{name}.svg'
+        dst = out_dir / f'{name}.svg'
+        if src_svg.exists() and src_svg.resolve() != dst.resolve():
+            shutil.copy2(src_svg, dst)
+            written[name] = dst.name
+            continue
+        src_png = src_dir / f'{name}.png'
+        if not src_png.exists():
+            raise FileNotFoundError(f'Cannot convert {name}: neither {name}.svg nor {name}.png exists')
+        if dst.exists() and not overwrite:
+            written[name] = dst.name
+            continue
+        _convert_png_to_svg(src_png, dst, threshold=threshold)
+        written[name] = dst.name
+    return written
 
 
 def _write_build(build_dir: pathlib.Path,
                  grid: Image.Image,
                  idmap: Image.Image,
                  meta: dict,
-                 masks: dict[str, Image.Image]) -> None:
+                 masks: dict[str, Image.Image],
+                 netmap_svg: str | None = None) -> None:
     build_dir.mkdir(parents=True, exist_ok=True)
-    grid.save(build_dir / 'grid.png', optimize=True)
-    idmap.save(build_dir / 'idmap.png', optimize=True)
+    if netmap_svg is None:
+        netmap_svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {0} {1}"></svg>'.format(
+            meta.get('grid_w', grid.size[0]), meta.get('grid_h', grid.size[1]))
+    (build_dir / 'netmap.svg').write_text(netmap_svg)
+    meta['netmap'] = 'netmap.svg'
+    meta.setdefault('layer_svgs', {})
     with open(build_dir / 'meta.json', 'w') as fp:
         json.dump(meta, fp, indent=2)
-
-    for visual_name in (*SILK_LAYERS, *MASK_LAYERS):
-        if visual_name in masks:
-            masks[visual_name].convert('L').save(build_dir / f'{visual_name}.png',
-                                                 optimize=True)
-            logging.getLogger('pcbnets.render').info('  wrote %s.png', visual_name)
-    drill_name = meta.get('drill_name')
-    if drill_name in masks:
-        masks[drill_name].convert('L').save(build_dir / 'drill.png', optimize=True)
-        logging.getLogger('pcbnets.render').info('  wrote drill.png')
-
-    logging.getLogger('pcbnets.render').info('  wrote %s/grid.png, idmap.png, meta.json', build_dir)
+    logging.getLogger('pcbnets.render').info('  wrote %s/netmap.svg, meta.json', build_dir)
 
 
-def _write_mips_and_tiles(build_dir: pathlib.Path,
-                           progress: _Progress | None = None) -> None:
-    """Create all progressive-loading assets expected by the web viewer."""
-    if progress:
-        progress.step('generating mip PNGs')
-    mip_paths = make_mips(build_dir, progress=progress.detail if progress else None)
-    logging.getLogger('pcbnets.render').info('  wrote %s mip PNG(s)', len(mip_paths))
-
-    if progress:
-        progress.step('generating tile PNGs')
-    tile_paths = make_tiles(build_dir, progress=progress.detail if progress else None)
-    logging.getLogger('pcbnets.render').info('  wrote %s tile PNG(s)', len(tile_paths))
 
 
 # ---------- subcommands ----------
@@ -769,6 +857,23 @@ def cmd_audit(args: argparse.Namespace) -> int:
     return 0 if not report.warnings else 1
 
 
+def cmd_png2svg(args: argparse.Namespace) -> int:
+    _configure_cli_logging()
+    src_dir = pathlib.Path(args.directory).resolve()
+    out_dir = pathlib.Path(args.output).resolve() if args.output else src_dir
+    names = args.layers
+    written = convert_png_layers_to_svg(
+        src_dir,
+        out_dir,
+        names=names,
+        threshold=args.threshold,
+        overwrite=args.overwrite,
+    )
+    for name, filename in written.items():
+        print(f'wrote {name}: {out_dir / filename}')
+    return 0
+
+
 def cmd_render(args: argparse.Namespace) -> int:
     _configure_cli_logging()
     directory = pathlib.Path(args.directory).resolve()
@@ -785,22 +890,34 @@ def cmd_render(args: argparse.Namespace) -> int:
     logging.getLogger('pcbnets.render').info('  mode  : %s', _connector_mode(directory, via_name))
 
     progress = _Progress(total=9)
-    grid, idmap, meta, masks, _ = _run_pipeline(
-        directory, layers, drill_name, via_name,
-        args.drill_grow, args.threshold, args.scale, args.cols,
-        cache=not args.no_cache,
-        nets_dir=pathlib.Path(args.nets).resolve() if args.nets else None,
-        prep_kwargs=overrides,
-        auto_invert=not args.no_auto_invert,
-        auto_align=args.auto_align,
-        progress=progress,
-    )
-    progress.step('writing build artifacts')
-    _write_build(build_dir, grid, idmap, meta, masks)
     svg_names = set(layers) | set(SILK_LAYERS) | set(MASK_LAYERS) | {'PTH', 'NPTH', drill_name, via_name}
-    progress.detail('copying visual SVGs when available')
-    _copy_visual_svgs(directory, build_dir, svg_names)
-    _write_mips_and_tiles(build_dir, progress=progress)
+    required_mask_names = set(layers) | {via_name}
+    if drill_name != via_name:
+        required_mask_names.add(drill_name)
+    with tempfile.TemporaryDirectory(prefix='pcbnets-render-masks-') as tmp:
+        mask_dir = pathlib.Path(tmp)
+        progress.step('rasterising SVG inputs for internal net extraction')
+        _rasterise_render_svgs(directory, mask_dir, sorted(required_mask_names | set(SILK_LAYERS) | set(MASK_LAYERS)))
+        grid, idmap, meta, masks, _ = _run_pipeline(
+            mask_dir, layers, drill_name, via_name,
+            args.drill_grow, args.threshold, args.scale, args.cols,
+            cache=False,
+            nets_dir=pathlib.Path(args.nets).resolve() if args.nets else None,
+            prep_kwargs=overrides,
+            auto_invert=not args.no_auto_invert,
+            auto_align=args.auto_align,
+            progress=progress,
+        )
+    meta['source_dir'] = str(directory)
+    progress.step('writing SVG build artifacts')
+    build_dir.mkdir(parents=True, exist_ok=True)
+    progress.detail('copying visual SVGs')
+    meta['layer_svgs'] = _copy_visual_svgs(directory, build_dir, svg_names)
+    for required in layers:
+        if required not in meta['layer_svgs']:
+            raise FileNotFoundError(f'Missing required SVG layer {required}.svg; run `pcbnets png2svg {directory} -o {directory}` first for PNG-only inputs')
+    netmap_svg = labels_to_netmap_svg(_decode_ids_rgb_by_placement(idmap, meta['placements']), meta['placements'], meta['grid_w'], meta['grid_h'])
+    _write_build(build_dir, grid, idmap, meta, masks, netmap_svg)
     progress.finish()
     return 0
 
@@ -1208,8 +1325,8 @@ def cmd_drill_identify(args: argparse.Namespace) -> int:
             print(
                 'drill_identify needs either a PNG mask directory or '
                 '`--excellon` with a Gerber/Excellon directory to rasterise. '
-                'For PNG mode, run `pcbnets gerber ... -o pngs` first, then '
-                '`pcbnets drill_identify pngs -o identified`.',
+                'For Gerber mode, pass `--excellon`; for legacy PNG mode, '
+                'run it on a directory that already contains PNG masks.',
                 file=sys.stderr,
             )
             return 2
@@ -1230,7 +1347,8 @@ def cmd_drill_identify(args: argparse.Namespace) -> int:
             layer_targets.append('drill')
         try:
             rasterise(directory, mapping, png_dir, dpi=args.dpi, layers=layer_targets)
-        except (GerbvMissingError, RuntimeError) as e:
+            _rasterise_render_svgs(png_dir, png_dir, layer_targets)
+        except (GerbvMissingError, RuntimeError, subprocess.CalledProcessError, ValueError) as e:
             if temp_pngs is not None:
                 temp_pngs.cleanup()
             print(str(e), file=sys.stderr)
@@ -1454,9 +1572,9 @@ def cmd_explain(args: argparse.Namespace) -> int:
 def cmd_serve(args: argparse.Namespace) -> int:
     from .server import serve
     build_dir = pathlib.Path(args.build_dir).resolve()
-    if not build_dir.exists() or not (build_dir / 'grid.png').exists():
+    if not build_dir.exists() or not (build_dir / 'meta.json').exists() or not (build_dir / 'netmap.svg').exists():
         candidate = build_dir / 'pcbnets-build'
-        if (build_dir / 'drill.png').exists() or any(build_dir.glob('*.png')):
+        if (build_dir / 'drill.png').exists() or any(build_dir.glob('*.png')) or any(build_dir.glob('*.svg')):
             print(f'no build artefacts in {build_dir}, rendering first...')
             render_args = argparse.Namespace(
                 directory=str(build_dir),
@@ -1488,7 +1606,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
 def _validate_build_dir(build_dir: pathlib.Path) -> list[str]:
     """Return required build artefacts, or raise FileNotFoundError."""
-    required = ['grid.png', 'idmap.png', 'meta.json']
+    required = ['meta.json', 'netmap.svg']
     missing = [name for name in required if not (build_dir / name).exists()]
     if missing:
         miss = ', '.join(missing)
@@ -1499,46 +1617,20 @@ def _validate_build_dir(build_dir: pathlib.Path) -> list[str]:
 
 
 def _bundle_file_names(build_dir: pathlib.Path) -> list[str]:
-    """List build artefacts needed by the static HTML viewer."""
+    """List SVG-only build artefacts needed by the static HTML viewer."""
     names = _validate_build_dir(build_dir)
-
-    # The viewer prefers visual SVGs when present and keeps generated PNG
-    # mips/tiles for idmap picking/highlighting and legacy visual fallback.
-    visual_names: set[str] = set()
-    try:
-        meta = json.loads((build_dir / 'meta.json').read_text())
-        visual_names.update(meta.get('layers', []))
-        visual_names.update(meta.get('silk_layers', []))
-        visual_names.update(meta.get('mask_layers', []))
-        visual_names.update(meta.get('drill_layers', []))
-        visual_names.update(meta.get('hole_layers', []))
-        if meta.get('drill_name'):
-            visual_names.add(str(meta['drill_name']))
-    except Exception:
-        # Keep packaging useful even if metadata has a non-fatal issue.
-        pass
-    visual_names.update((*SILK_LAYERS, *MASK_LAYERS))
-    visual_names.add('drill')
-
-    for visual_name in sorted(visual_names):
-        png = f'{visual_name}.png'
-        if (build_dir / png).exists():
-            names.append(png)
-        svg = f'{visual_name}.svg'
+    meta = json.loads((build_dir / 'meta.json').read_text())
+    for svg in set((meta.get('layer_svgs') or {}).values()):
+        if not str(svg).lower().endswith('.svg'):
+            continue
         if (build_dir / svg).exists():
             names.append(svg)
-
-    return names
+    return sorted(set(names))
 
 
 def _bundle_paths(build_dir: pathlib.Path) -> list[tuple[pathlib.Path, str]]:
-    """Return build bundle files as ``(source_path, relative_name)`` pairs."""
-    paths = [(build_dir / name, name) for name in _bundle_file_names(build_dir)]
-    mips_dir = build_dir / 'mips'
-    if mips_dir.is_dir():
-        for path in sorted(p for p in mips_dir.rglob('*') if p.is_file()):
-            paths.append((path, path.relative_to(build_dir).as_posix()))
-    return paths
+    """Return SVG-only build bundle files as ``(source_path, relative_name)`` pairs."""
+    return [(build_dir / name, name) for name in _bundle_file_names(build_dir)]
 
 
 def _copy_static_bundle(build_dir: pathlib.Path,
@@ -1852,12 +1944,12 @@ def cmd_deploy(args: argparse.Namespace) -> int:
 
 
 def cmd_gerber(args: argparse.Namespace) -> int:
-    """Rasterise Gerber/Excellon files in a directory to PNG masks."""
+    """Export Gerber/Excellon files in a directory to aligned SVG masks."""
     _configure_cli_logging()
     log = logging.getLogger('pcbnets.gerber')
     directory = pathlib.Path(args.directory).resolve()
     out_dir = pathlib.Path(args.output).resolve() if args.output \
-              else directory / 'pngs'
+              else directory / 'svgs'
 
     if not directory.is_dir():
         log.error('%s is not a directory', directory)
@@ -1889,8 +1981,7 @@ def cmd_gerber(args: argparse.Namespace) -> int:
                 log.error('    %s', p.name)
         return 1
 
-    log.info('rasterising %s layers at %s DPI into %s',
-             len(mapping), args.dpi, out_dir)
+    log.info('exporting %s layer SVG(s) into %s', len(mapping), out_dir)
     from .gerber import _sort_key
     for name in sorted(mapping, key=_sort_key):
         log.info('  %-14s ← %s', name, mapping[name])
@@ -1903,51 +1994,11 @@ def cmd_gerber(args: argparse.Namespace) -> int:
         log.error('%s', e)
         return 2
 
-    log.info('wrote %s PNG(s) to %s', len(written), out_dir)
+    log.info('wrote %s SVG(s) to %s', len(written), out_dir)
     if created:
         log.info('Edit %s if needed, then pass it explicitly with --mapping.',
                  directory / "layers.json")
     return 0
-
-
-def cmd_all(args: argparse.Namespace) -> int:
-    """One-shot: gerber + render in sequence, writing into a single output dir."""
-    out_dir = pathlib.Path(args.output).resolve()
-    out_dir.mkdir(parents=True, exist_ok=True)
-    pngs_dir = out_dir / 'pngs'
-    build_dir = out_dir / 'build'
-
-    gerber_args = argparse.Namespace(
-        directory=args.directory,
-        output=str(pngs_dir),
-        dpi=args.dpi,
-        mapping=args.mapping,
-        force_detect=args.force_detect
-    )
-    rc = cmd_gerber(gerber_args)
-    if rc != 0:
-        return rc
-
-    render_args = argparse.Namespace(
-        directory=str(pngs_dir),
-        output=str(build_dir),
-        layers=args.layers,
-        drill=getattr(args, 'drill', 'auto'),
-        via=getattr(args, 'via', 'auto'),
-        drill_grow=args.drill_grow,
-        threshold=0,
-        scale=args.scale,
-        cols=args.cols,
-        no_cache=False,
-        nets=args.nets,
-        no_auto_invert=args.no_auto_invert,
-        auto_align=args.auto_align,
-        invert=args.invert or [],
-        no_invert=args.no_invert or [],
-        offset=args.offset or [],
-        outer=args.outer,
-    )
-    return cmd_render(render_args)
 
 
 def cmd_index(args: argparse.Namespace) -> int:
@@ -2033,12 +2084,25 @@ def _add_audit_flags(p: argparse.ArgumentParser, *, include_auto_align: bool = T
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog='pcbnets',
-        description='Interactive PCB net explorer from rasterised Gerber layers.',
+        description='Interactive PCB net explorer from PCB mask layers.',
     )
     p.add_argument('--version', action='version', version=f'pcbnets {__version__}')
     sub = p.add_subparsers(dest='command', required=True)
 
-    pr = sub.add_parser('render', help='Process a directory of PNGs into a build dir')
+    psvg = sub.add_parser('png2svg', aliases=['png-to-svg'],
+                          help='Convert legacy PNG artwork masks to SVG before rendering')
+    psvg.add_argument('directory')
+    psvg.add_argument('-o', '--output',
+                      help='Output directory for SVGs (default: update input directory)')
+    psvg.add_argument('--layers', nargs='+',
+                      help='Layer names to convert (default: every PNG in directory)')
+    psvg.add_argument('--threshold', type=int, default=50,
+                      help='ImageMagick threshold percentage before Potrace (default: 50)')
+    psvg.add_argument('--overwrite', action='store_true',
+                      help='Overwrite existing generated SVGs')
+    psvg.set_defaults(func=cmd_png2svg)
+
+    pr = sub.add_parser('render', help='Process PCB masks and SVG artwork into an SVG-only build dir')
     pr.add_argument('directory')
     pr.add_argument('-o', '--output', default='./pcbnets-build')
     pr.add_argument('--layers', nargs='+')
@@ -2157,40 +2221,18 @@ def build_parser() -> argparse.ArgumentParser:
     pi.set_defaults(func=cmd_index)
 
     pg = sub.add_parser('gerber',
-                        help='Rasterise Gerber/Excellon files to PNG masks (needs gerbv)')
+                        help='Export Gerber/Excellon files to aligned SVG masks (needs gerbv)')
     pg.add_argument('directory', help='Directory containing Gerber/Excellon files')
     pg.add_argument('-o', '--output',
-                    help='Output PNG directory (default: <directory>/pngs)')
+                    help='Output SVG directory (default: <directory>/svgs)')
     pg.add_argument('--dpi', type=int, default=1000,
-                    help='Rasterisation DPI (default: 1000)')
+                    help='Compatibility option; internal rasterisation is owned by render (default: 1000)')
     pg.add_argument('--mapping',
                     help='Path to a layers.json (skips auto-detect)')
     pg.add_argument('--force-detect', action='store_true', dest='force_detect',
                     help='Re-detect layers and overwrite layers.json '
                          '(useful after upgrading pcbnets)')
     pg.set_defaults(func=cmd_gerber)
-
-    pall = sub.add_parser('all',
-                          help='One-shot: gerber + render (needs gerbv)')
-    pall.add_argument('directory', help='Directory containing Gerber/Excellon files')
-    pall.add_argument('-o', '--output', required=True,
-                      help='Output directory; will contain pngs/ and build/')
-    pall.add_argument('--dpi', type=int, default=1000)
-    pall.add_argument('--mapping', help='Path to a layers.json')
-    pall.add_argument('--force-detect', action='store_true', dest='force_detect',
-                      help='Re-detect layers and overwrite layers.json')
-    pall.add_argument('--layers', nargs='+')
-    pall.add_argument('--drill', default='auto',
-                       help='Physical drill-hole mask name (default: auto)')
-    pall.add_argument('--via', default='auto',
-                       help='Electrical vertical-connector mask name (default: auto: via, PTH, drill)')
-    pall.add_argument('--drill-grow', type=int, default=0, dest='drill_grow')
-    pall.add_argument('--scale', type=float, default=1.0)
-    pall.add_argument('--cols', type=int, default=2)
-    pall.add_argument('--nets',
-                      help='Use net-labels.npz from `pcbnets nets -o DIR` during render')
-    _add_audit_flags(pall)
-    pall.set_defaults(func=cmd_all)
 
     return p
 
