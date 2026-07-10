@@ -611,24 +611,6 @@ def test_scaled_idmap_prefers_trace_ids_over_blank_space():
     assert decoded[0, 0] == 42
 
 
-def test_mip_idmap_prefers_trace_ids_over_blank_space(tmp_path):
-    from pcbnets.mips import make_mips
-
-    build = tmp_path / 'build'
-    build.mkdir()
-    Image.new('L', (2, 2), 0).save(build / 'grid.png')
-    _, idmap, _ = build_grid_and_idmap(
-        {'top': Image.new('L', (2, 2), 0)},
-        {'top': np.array([[0, 0], [0, 7]], dtype=np.int32)},
-        cols=1,
-    )
-    idmap.save(build / 'idmap.png')
-
-    make_mips(build, levels=(2,))
-
-    decoded = _decode_idmap_labels(Image.open(build / 'mips' / '2' / 'idmap.png'))
-    assert decoded.shape == (1, 1)
-    assert decoded[0, 0] == 7
 
 def test_write_build_is_svg_only_and_writes_netmap(tmp_path):
     from pcbnets.cli import _write_build
@@ -685,6 +667,35 @@ def test_copy_visual_svgs_preserves_source_text(tmp_path):
     _copy_visual_svgs(src_dir, build_dir, ['F_Cu'])
 
     assert (build_dir / 'F_Cu.svg').read_text() == svg
+
+
+def test_png2svg_prefers_existing_svg_without_potrace(tmp_path, monkeypatch):
+    from pcbnets.cli import convert_png_layers_to_svg
+
+    src_dir = tmp_path / 'src'
+    out_dir = tmp_path / 'out'
+    src_dir.mkdir()
+    svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"></svg>'
+    (src_dir / 'F_Cu.svg').write_text(svg)
+    Image.new('L', (1, 1), 255).save(src_dir / 'F_Cu.png')
+    monkeypatch.setattr('pcbnets.cli._convert_png_to_svg', lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError('should not convert')))
+
+    written = convert_png_layers_to_svg(src_dir, out_dir, names=['F_Cu'])
+
+    assert written == {'F_Cu': 'F_Cu.svg'}
+    assert (out_dir / 'F_Cu.svg').read_text() == svg
+
+
+def test_png2svg_reports_missing_potrace_dependency(tmp_path, monkeypatch):
+    from pcbnets.cli import convert_png_layers_to_svg
+
+    src_dir = tmp_path / 'src'
+    src_dir.mkdir()
+    Image.new('L', (1, 1), 255).save(src_dir / 'F_Cu.png')
+    monkeypatch.setattr('pcbnets.cli.shutil.which', lambda cmd: None if cmd == 'potrace' else f'/usr/bin/{cmd}')
+
+    with pytest.raises(RuntimeError, match='potrace was not found'):
+        convert_png_layers_to_svg(src_dir, src_dir, names=['F_Cu'], overwrite=True)
 
 
 def test_export_copies_svg_only_bundle(tmp_path):

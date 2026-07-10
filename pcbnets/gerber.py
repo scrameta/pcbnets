@@ -407,12 +407,11 @@ def _svg_to_transparent(path_in, path_out, fill="#FFFFFF"):
     pathlib.Path(path_out).write_text(out)
 
 def _optimise_svg_with_tools(svg_path: pathlib.Path) -> tuple[int, int]:
-    """Optimise an SVG in-place using svgo followed by scour."""
+    """Optimise an SVG in-place using svgo without structural rewrites."""
     before = svg_path.stat().st_size
-    tmp = svg_path.with_name(f'{svg_path.stem}.svgo.tmp{svg_path.suffix}')
     try:
         svgo = subprocess.run(
-            ['svgo', '-i', str(svg_path), '-o', str(tmp)],
+            ['svgo', '-i', str(svg_path), '-o', str(svg_path)],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -422,36 +421,11 @@ def _optimise_svg_with_tools(svg_path: pathlib.Path) -> tuple[int, int]:
                 'svgo failed while optimising '
                 f'{svg_path.name}: {svgo.stderr.strip() or svgo.stdout.strip()}'
             )
-        scour = subprocess.run(
-            [
-                'scour',
-                '-i', str(tmp),
-                '-o', str(svg_path),
-                '--enable-viewboxing',
-                '--enable-id-stripping',
-                '--enable-comment-stripping',
-                '--shorten-ids',
-                '--indent=none',
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        if scour.returncode != 0:
-            raise RuntimeError(
-                'scour failed while optimising '
-                f'{svg_path.name}: {scour.stderr.strip() or scour.stdout.strip()}'
-            )
         return before, svg_path.stat().st_size
     except FileNotFoundError as e:
         raise RuntimeError(
-            f'{e.filename} is required for SVG optimisation; install svgo and scour'
+            f'{e.filename} is required for SVG optimisation; install svgo'
         ) from e
-    finally:
-        try:
-            tmp.unlink()
-        except FileNotFoundError:
-            pass
 
 
 

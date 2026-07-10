@@ -43,7 +43,8 @@ pcbnets drill_identify ./pngs -o ./pngs-identified
 pcbnets nets ./pngs -o ./nets-debug
 pcbnets explain ./nets-debug --from F_Cu:123,456 --to B_Cu:42
 
-# 4. Build the net map, grid, mip-maps, and tiles
+# 4. Convert legacy PNG artwork to SVGs, then build the SVG viewer output
+pcbnets png2svg ./pngs -o ./pngs
 pcbnets render ./pngs -o ./build --nets ./nets-debug
 
 # 5. Serve the interactive viewer
@@ -198,11 +199,11 @@ across layers to produce board-wide nets. Writes:
 
 ```
 build/
-├── grid.png              # all layers tiled together (display image)
-├── idmap.png             # same geometry, RGB-encoded net IDs per pixel
-├── meta.json             # layer placements, applied corrections, net counts
-├── F_Silkscreen.png      # passed through if present in input
-└── B_Silkscreen.png
+├── F_Cu.svg              # visible artwork copied from input or made by png2svg
+├── B_Cu.svg
+├── netmap.svg            # atlas-aligned vector pick/highlight geometry
+├── meta.json             # layer SVGs, placements, corrections, net counts
+└── index.html            # when exported/deployed
 ```
 
 Key options:
@@ -492,9 +493,9 @@ for w in check.warnings:
    edges. Each connected set is one electrical net.
 8. **Remap**: rewrite each layer's label array so the same integer means
    the same net everywhere.
-9. **Encode** net ids into the RGB channels of `idmap.png` so the browser
-   can read them with `getImageData` and highlight matching pixels in one
-   pass.
+9. **Serialize** per-layer net labels into `netmap.svg` paths with `data-net-id`
+   and `data-layer`, so the browser can pick and highlight nets with SVG events
+   and CSS rather than pixel scans.
 10. **Post-merge sanity checks**: warn if one net dominates the board
     (likely polarity error) or if only one net was found (likely drill
     alignment).

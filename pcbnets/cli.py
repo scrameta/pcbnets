@@ -732,21 +732,49 @@ def _convert_png_to_svg(src: pathlib.Path, dst: pathlib.Path, threshold: int = 5
 
 def _copy_visual_svgs(src_dir: pathlib.Path, build_dir: pathlib.Path,
                       names: Iterable[str]) -> dict[str, str]:
+    """Copy existing visible SVG layers into a build directory.
+
+    Legacy PNG inputs are intentionally not converted here; run
+    ``pcbnets png2svg`` first when a viewer layer exists only as PNG.
+    """
     log = logging.getLogger('pcbnets.render')
     layer_svgs: dict[str, str] = {}
     for name in sorted(set(names)):
-        dst = build_dir / f'{name}.svg'
         src_svg = src_dir / f'{name}.svg'
-        src_png = src_dir / f'{name}.png'
-        if src_svg.exists():
-            shutil.copy2(src_svg, dst)
-            log.info('  copied %s.svg', name)
-            layer_svgs[name] = dst.name
-        elif src_png.exists():
-            _convert_png_to_svg(src_png, dst)
-            log.info('  converted %s.png to %s.svg', name, name)
-            layer_svgs[name] = dst.name
+        if not src_svg.exists():
+            continue
+        dst = build_dir / f'{name}.svg'
+        shutil.copy2(src_svg, dst)
+        log.info('  copied %s.svg', name)
+        layer_svgs[name] = dst.name
     return layer_svgs
+
+
+def convert_png_layers_to_svg(src_dir: pathlib.Path,
+                              out_dir: pathlib.Path,
+                              names: Iterable[str] | None = None,
+                              threshold: int = 50,
+                              overwrite: bool = False) -> dict[str, str]:
+    """Convert legacy white-on-black PNG artwork masks to SVG files."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    selected = sorted(set(names)) if names else sorted(p.stem for p in src_dir.glob('*.png'))
+    written: dict[str, str] = {}
+    for name in selected:
+        src_svg = src_dir / f'{name}.svg'
+        dst = out_dir / f'{name}.svg'
+        if src_svg.exists() and src_svg.resolve() != dst.resolve():
+            shutil.copy2(src_svg, dst)
+            written[name] = dst.name
+            continue
+        src_png = src_dir / f'{name}.png'
+        if not src_png.exists():
+            raise FileNotFoundError(f'Cannot convert {name}: neither {name}.svg nor {name}.png exists')
+        if dst.exists() and not overwrite:
+            written[name] = dst.name
+            continue
+        _convert_png_to_svg(src_png, dst, threshold=threshold)
+        written[name] = dst.name
+    return written
 
 
 def _write_build(build_dir: pathlib.Path,
@@ -760,22 +788,12 @@ def _write_build(build_dir: pathlib.Path,
         netmap_svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {0} {1}"></svg>'.format(
             meta.get('grid_w', grid.size[0]), meta.get('grid_h', grid.size[1]))
     (build_dir / 'netmap.svg').write_text(netmap_svg)
-    meta.pop('mip_levels', None)
-    meta.pop('tiled_levels', None)
-    meta.pop('tile_grids', None)
     meta['netmap'] = 'netmap.svg'
     meta.setdefault('layer_svgs', {})
     with open(build_dir / 'meta.json', 'w') as fp:
         json.dump(meta, fp, indent=2)
     logging.getLogger('pcbnets.render').info('  wrote %s/netmap.svg, meta.json', build_dir)
 
-
-def _write_mips_and_tiles(build_dir: pathlib.Path,
-                           progress: _Progress | None = None) -> None:
-    """SVG-only viewer builds do not generate mipmaps or tiles."""
-    if progress:
-        progress.step('skipping raster mipmaps and tiles')
-    logging.getLogger('pcbnets.render').info('  SVG-only build: no mips/ or tiles/ generated')
 
 
 
@@ -817,6 +835,23 @@ def cmd_audit(args: argparse.Namespace) -> int:
     return 0 if not report.warnings else 1
 
 
+def cmd_png2svg(args: argparse.Namespace) -> int:
+    _configure_cli_logging()
+    src_dir = pathlib.Path(args.directory).resolve()
+    out_dir = pathlib.Path(args.output).resolve() if args.output else src_dir
+    names = args.layers
+    written = convert_png_layers_to_svg(
+        src_dir,
+        out_dir,
+        names=names,
+        threshold=args.threshold,
+        overwrite=args.overwrite,
+    )
+    for name, filename in written.items():
+        print(f'wrote {name}: {out_dir / filename}')
+    return 0
+
+
 def cmd_render(args: argparse.Namespace) -> int:
     _configure_cli_logging()
     directory = pathlib.Path(args.directory).resolve()
@@ -846,11 +881,11 @@ def cmd_render(args: argparse.Namespace) -> int:
     progress.step('writing SVG build artifacts')
     build_dir.mkdir(parents=True, exist_ok=True)
     svg_names = set(layers) | set(SILK_LAYERS) | set(MASK_LAYERS) | {'PTH', 'NPTH', drill_name, via_name}
-    progress.detail('copying or converting visual SVGs')
+    progress.detail('copying visual SVGs')
     meta['layer_svgs'] = _copy_visual_svgs(directory, build_dir, svg_names)
     for required in layers:
         if required not in meta['layer_svgs']:
-            raise FileNotFoundError(f'Neither SVG nor PNG exists for required layer {required}')
+            raise FileNotFoundError(f'Missing required SVG layer {required}.svg; run `pcbnets png2svg {directory} -o {directory}` first for PNG-only inputs')
     netmap_svg = labels_to_netmap_svg(_decode_ids_rgb_by_placement(idmap, meta['placements']), meta['placements'], meta['grid_w'], meta['grid_h'])
     _write_build(build_dir, grid, idmap, meta, masks, netmap_svg)
     progress.finish()
@@ -2059,12 +2094,25 @@ def _add_audit_flags(p: argparse.ArgumentParser, *, include_auto_align: bool = T
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog='pcbnets',
-        description='Interactive PCB net explorer from rasterised Gerber layers.',
+        description='Interactive PCB net explorer from PCB mask layers.',
     )
     p.add_argument('--version', action='version', version=f'pcbnets {__version__}')
     sub = p.add_subparsers(dest='command', required=True)
 
-    pr = sub.add_parser('render', help='Process a directory of PNGs into a build dir')
+    psvg = sub.add_parser('png2svg', aliases=['png-to-svg'],
+                          help='Convert legacy PNG artwork masks to SVG before rendering')
+    psvg.add_argument('directory')
+    psvg.add_argument('-o', '--output',
+                      help='Output directory for SVGs (default: update input directory)')
+    psvg.add_argument('--layers', nargs='+',
+                      help='Layer names to convert (default: every PNG in directory)')
+    psvg.add_argument('--threshold', type=int, default=50,
+                      help='ImageMagick threshold percentage before Potrace (default: 50)')
+    psvg.add_argument('--overwrite', action='store_true',
+                      help='Overwrite existing generated SVGs')
+    psvg.set_defaults(func=cmd_png2svg)
+
+    pr = sub.add_parser('render', help='Process PCB masks and SVG artwork into an SVG-only build dir')
     pr.add_argument('directory')
     pr.add_argument('-o', '--output', default='./pcbnets-build')
     pr.add_argument('--layers', nargs='+')
