@@ -275,78 +275,150 @@ def _format_elapsed(seconds: float) -> str:
 #   svg_x = 72*X_in + e ;  svg_y = -72*Y_in + f
 # so window_inch = canvas_pt / 72, and the gerber origin (lower-left) inverts
 # from the transform. We recover both from one all-loaded SVG probe.
-_SVG_MATRIX_RE = re.compile(r'matrix\(([^)]*)\)')
+_SVG_NUMBER_RE = re.compile(
+    r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?'
+)
 
-def _parse_svg_length(s: str) -> float:
+
+def _svg_numbers(value: str) -> list[float]:
+    return [float(v) for v in _SVG_NUMBER_RE.findall(value)]
+
+
+def _svg_canvas_size(root: ET.Element) -> tuple[float, float]:
+    """Return the SVG canvas width and height in viewBox units."""
+
+    view_box = root.get('viewBox')
+    if view_box:
+        values = _svg_numbers(view_box)
+        if len(values) == 4:
+            return values[2], values[3]
+
+    # Cairo SVG normally uses values such as "281pt"; the newer writer
+    # generally uses plain pixel/viewBox values such as "281".
+    width = _svg_numbers(root.get('width', ''))
+    height = _svg_numbers(root.get('height', ''))
+
+    if not width or not height:
+        raise ValueError('SVG has no usable viewBox or width/height')
+
+    return width[0], height[0]
+
+
+def _parse_global_svg_transform(
+    transform: str,
+) -> tuple[float, float, float, float] | None:
+    """Return sx, sy, tx, ty for a Y-flipped Gerbv transform.
+
+    Supports:
+
+        matrix(sx, 0, 0, -sy, tx, ty)
+
+    and:
+
+        translate(tx, ty) scale(sx, -sy)
     """
-    Return numeric part of an SVG length.
 
-    For our gerbv use case, we deliberately ignore the written unit and work
-    in the SVG coordinate/user units used by the transform matrix.
+    matrix_match = re.fullmatch(
+        r'\s*matrix\s*\((.*?)\)\s*',
+        transform,
+    )
+    if matrix_match:
+        values = _svg_numbers(matrix_match.group(1))
+        if len(values) != 6:
+            return None
+
+        a, b, c, d, tx, ty = values
+
+        # Gerbv's global transform has no rotation or skew and flips Y.
+        if abs(b) > 1e-8 or abs(c) > 1e-8 or a <= 0 or d >= 0:
+            return None
+
+        return a, -d, tx, ty
+
+    translate_scale_match = re.fullmatch(
+        r'\s*translate\s*\((.*?)\)\s*'
+        r'scale\s*\((.*?)\)\s*',
+        transform,
+    )
+    if translate_scale_match:
+        translate = _svg_numbers(translate_scale_match.group(1))
+        scale = _svg_numbers(translate_scale_match.group(2))
+
+        if not translate or not scale:
+            return None
+
+        tx = translate[0]
+        ty = translate[1] if len(translate) >= 2 else 0.0
+
+        sx = scale[0]
+        scale_y = scale[1] if len(scale) >= 2 else sx
+
+        if sx <= 0 or scale_y >= 0:
+            return None
+
+        return sx, -scale_y, tx, ty
+
+    return None
+
+
+def _derive_window(
+    probe_svg: pathlib.Path,
+) -> tuple[float, float, float, float]:
+    """Return origin_x, origin_y, width_in, height_in from a Gerbv SVG.
+
+    Supports both the legacy Cairo SVG exporter and Gerbv's newer direct
+    SVG writer.
     """
-    m = re.match(r'\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)', s)
-    if not m:
-        raise ValueError(f"bad SVG length: {s!r}")
-    return float(m.group(1))
 
+    root = ET.parse(probe_svg).getroot()
+    canvas_width, canvas_height = _svg_canvas_size(root)
 
-def _parse_matrix_values(s: str) -> tuple[float, float, float, float, float, float]:
-    # SVG matrices may be comma-separated or whitespace-separated.
-    vals = [v for v in re.split(r'[\s,]+', s.strip()) if v]
-    if len(vals) != 6:
-        raise ValueError(f"bad SVG matrix: {s!r}")
-    return tuple(float(v) for v in vals)
+    candidates: list[tuple[float, bool, float, float, float, float]] = []
+    direct_children = set(root)
 
+    for element in root.iter():
+        transform = element.get('transform')
+        if not transform:
+            continue
 
-def _derive_window(probe_svg: pathlib.Path) -> tuple[float, float, float, float]:
-    """From an all-loaded SVG, return (origin_x, origin_y, width_in, height_in).
+        parsed = _parse_global_svg_transform(transform)
+        if parsed is None:
+            continue
 
-    Robust to gerbv SVGs that use either:
-      width="123pt" height="456pt"
-    or:
-      width="123" height="456" viewBox="0 0 123 456"
+        sx, sy, tx, ty = parsed
 
-    The transform matrix gives the real SVG-units-per-inch scale.
-    """
-    text = probe_svg.read_text()
+        # The global Gerbv scale is normally 72 or the requested DPI,
+        # whereas incidental object transforms are usually around 1.
+        candidates.append((
+            min(sx, sy),
+            element in direct_children,
+            sx,
+            sy,
+            tx,
+            ty,
+        ))
 
-    root = ET.fromstring(text)
-    width_attr = root.attrib.get("width")
-    height_attr = root.attrib.get("height")
+    if not candidates:
+        raise ValueError(
+            f'Could not find a Gerbv global transform in {probe_svg}'
+        )
 
-    if width_attr is not None and height_attr is not None:
-        w_svg = _parse_svg_length(width_attr)
-        h_svg = _parse_svg_length(height_attr)
-    else:
-        viewbox = root.attrib.get("viewBox")
-        if not viewbox:
-            raise RuntimeError(f"could not parse SVG size from {probe_svg.name}")
-        vb = [float(x) for x in re.split(r'[\s,]+', viewbox.strip())]
-        if len(vb) != 4:
-            raise RuntimeError(f"bad SVG viewBox in {probe_svg.name}: {viewbox!r}")
-        _, _, w_svg, h_svg = vb
+    # Prefer the largest Y-flipped scale. Direct children win ties.
+    _, _, sx, sy, tx, ty = max(
+        candidates,
+        key=lambda candidate: (candidate[0], candidate[1]),
+    )
 
-    mat = _SVG_MATRIX_RE.search(text)
-    if not mat:
-        raise RuntimeError(f"could not parse transform matrix from {probe_svg.name}")
-
-    a, b, c, d, e, f = _parse_matrix_values(mat.group(1))
-
-    if abs(b) > 1e-9 or abs(c) > 1e-9:
-        raise RuntimeError(f"unexpected rotated/skewed SVG matrix in {probe_svg.name}")
-
-    # a/d are SVG units per Gerber inch. Usually a ~= +72 or +96,
-    # and d is negative because SVG y goes downward.
-    width_in = w_svg / abs(a)
-    height_in = h_svg / abs(d)
-
-    # Invert:
-    #   svg_x = a * X_in + e
-    #   svg_y = d * Y_in + f
+    # Gerbv's transform is:
     #
-    # Lower-left of exported window is SVG x=0, y=h_svg.
-    origin_x = (0.0 - e) / a
-    origin_y = (h_svg - f) / d
+    #   translate(-origin_x*sx, origin_y*sy + canvas_height)
+    #   scale(sx, -sy)
+    #
+    origin_x = -tx / sx
+    origin_y = (ty - canvas_height) / sy
+
+    width_in = canvas_width / sx
+    height_in = canvas_height / sy
 
     return origin_x, origin_y, width_in, height_in
 
