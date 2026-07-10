@@ -191,3 +191,42 @@ def write_meta(meta: dict, path) -> None:
     """Write metadata as JSON. Convenience for CLI users."""
     with open(path, 'w') as fp:
         json.dump(meta, fp, indent=2)
+
+
+def labels_to_netmap_svg(net_labels: Mapping[str, np.ndarray], placements: Mapping[str, Mapping[str, int]], width: int, height: int) -> str:
+    """Serialize per-layer label arrays to an inline-pickable SVG net map."""
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {int(width)} {int(height)}">',
+        '<style>.net-shape{fill:transparent;stroke:transparent;pointer-events:all}.net-shape.selected{fill:rgba(255,80,80,0.7);stroke:rgba(255,80,80,0.7);pointer-events:all}</style>',
+    ]
+    for layer, labels in net_labels.items():
+        if layer not in placements:
+            raise ValueError(f'cannot generate netmap.svg: missing placement for {layer}')
+        p = placements[layer]
+        ox, oy = int(p['x']), int(p['y'])
+        arr = np.asarray(labels)
+        ids = [int(i) for i in np.unique(arr) if int(i) > 0]
+        parts.append(f'<g data-layer="{layer}">')
+        for net_id in ids:
+            runs: list[str] = []
+            ys, xs = np.where(arr == net_id)
+            if len(xs) == 0:
+                continue
+            for y in sorted(set(int(v) for v in ys)):
+                row = arr[y] == net_id
+                x = 0
+                w = row.shape[0]
+                while x < w:
+                    if not row[x]:
+                        x += 1
+                        continue
+                    x0 = x
+                    while x < w and row[x]:
+                        x += 1
+                    x1 = x
+                    runs.append(f'M{ox+x0} {oy+y}H{ox+x1}V{oy+y+1}H{ox+x0}Z')
+            d = ''.join(runs)
+            parts.append(f'<path class="net-shape" data-net-id="{net_id}" data-layer="{layer}" fill-rule="evenodd" d="{d}"/>')
+        parts.append('</g>')
+    parts.append('</svg>')
+    return '\n'.join(parts)

@@ -11,9 +11,9 @@ def make_app(build_dir: pathlib.Path) -> Flask:
     build_dir = pathlib.Path(build_dir).resolve()
     static_dir = pathlib.Path(__file__).parent / 'static'
 
-    if not (build_dir / 'grid.png').exists():
+    if not (build_dir / 'meta.json').exists() or not (build_dir / 'netmap.svg').exists():
         raise FileNotFoundError(
-            f"build directory missing grid.png: {build_dir}\n"
+            f"build directory missing SVG viewer artifacts: {build_dir}\n"
             f"Run `pcbnets render` first."
         )
 

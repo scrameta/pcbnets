@@ -14,6 +14,7 @@ import shutil
 import sys
 import tempfile
 import time
+import subprocess
 import zipfile
 from typing import Iterable
 
@@ -30,11 +31,9 @@ from .gerber import (
     write_layers_json,
 )
 from .masks import MASK_LAYERS, SILK_LAYERS, load_masks, threshold_mask
-from .mips import make_mips
-from .tiles import make_tiles
 from .nets import extract_nets, merge_nets_debug, explain_merge_path
 from .prepare import DEFAULT_OUTER_LAYERS, _shift_bool, prepare_masks
-from .render import build_grid_and_idmap
+from .render import build_grid_and_idmap, labels_to_netmap_svg
 
 
 def _format_elapsed(seconds: float) -> str:
@@ -681,54 +680,103 @@ def _run_pipeline(directory: pathlib.Path,
     return grid, idmap, meta, masks, report
 
 
+
+def _decode_ids_rgb_by_placement(idmap: Image.Image, placements: dict) -> dict[str, np.ndarray]:
+    arr = np.asarray(idmap.convert('RGB')).astype(np.uint32)
+    labels = (arr[..., 0] | (arr[..., 1] << 8) | (arr[..., 2] << 16)).astype(np.int32)
+    out = {}
+    for name, p in placements.items():
+        out[name] = labels[p['y']:p['y'] + p['h'], p['x']:p['x'] + p['w']]
+    return out
+
+
+def _command_required(cmd: str, src: pathlib.Path) -> None:
+    if shutil.which(cmd) is None:
+        pkg = 'imagemagick' if cmd == 'magick' else cmd
+        raise RuntimeError(f'Cannot convert {src.name} to SVG: {cmd} was not found.\nInstall it with: sudo apt install {pkg}')
+
+
+def _normalise_potrace_svg(svg_path: pathlib.Path, source_size: tuple[int, int]) -> None:
+    text = svg_path.read_text()
+    w, h = source_size
+    text = re.sub(r'<svg\b[^>]*>', f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}">', text, count=1)
+    text = re.sub(r'<rect\b[^>]*/>\s*', '', text)
+    svg_path.write_text(text)
+
+
+def _convert_png_to_svg(src: pathlib.Path, dst: pathlib.Path, threshold: int = 50) -> None:
+    _command_required('magick', src)
+    _command_required('potrace', src)
+    try:
+        with Image.open(src) as im:
+            size = im.size
+        magick = subprocess.Popen([
+            'magick', str(src), '-colorspace', 'Gray', '-threshold', f'{threshold}%', '-negate', 'pbm:-'
+        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        potrace = subprocess.run([
+            'potrace', '--svg', '--alphamax', '0', '--opttolerance', '0', '--turdsize', '0', '--output', str(dst), '-'
+        ], stdin=magick.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if magick.stdout:
+            magick.stdout.close()
+        _, magick_err = magick.communicate()
+        if magick.returncode != 0:
+            raise RuntimeError(magick_err.decode(errors='replace') if isinstance(magick_err, bytes) else str(magick_err))
+        if potrace.returncode != 0:
+            raise RuntimeError(potrace.stderr)
+        if not dst.exists():
+            raise RuntimeError('potrace did not write an SVG')
+        _normalise_potrace_svg(dst, size)
+    except Exception as e:
+        raise RuntimeError(f'Cannot convert {src.name} to SVG: {e}') from e
+
+
 def _copy_visual_svgs(src_dir: pathlib.Path, build_dir: pathlib.Path,
-                      names: Iterable[str]) -> None:
+                      names: Iterable[str]) -> dict[str, str]:
     log = logging.getLogger('pcbnets.render')
+    layer_svgs: dict[str, str] = {}
     for name in sorted(set(names)):
-        src = src_dir / f'{name}.svg'
-        if not src.exists():
-            continue
         dst = build_dir / f'{name}.svg'
-        shutil.copy2(src, dst)
-        log.info('  copied %s.svg', name)
+        src_svg = src_dir / f'{name}.svg'
+        src_png = src_dir / f'{name}.png'
+        if src_svg.exists():
+            shutil.copy2(src_svg, dst)
+            log.info('  copied %s.svg', name)
+            layer_svgs[name] = dst.name
+        elif src_png.exists():
+            _convert_png_to_svg(src_png, dst)
+            log.info('  converted %s.png to %s.svg', name, name)
+            layer_svgs[name] = dst.name
+    return layer_svgs
 
 
 def _write_build(build_dir: pathlib.Path,
                  grid: Image.Image,
                  idmap: Image.Image,
                  meta: dict,
-                 masks: dict[str, Image.Image]) -> None:
+                 masks: dict[str, Image.Image],
+                 netmap_svg: str | None = None) -> None:
     build_dir.mkdir(parents=True, exist_ok=True)
-    grid.save(build_dir / 'grid.png', optimize=True)
-    idmap.save(build_dir / 'idmap.png', optimize=True)
+    if netmap_svg is None:
+        netmap_svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {0} {1}"></svg>'.format(
+            meta.get('grid_w', grid.size[0]), meta.get('grid_h', grid.size[1]))
+    (build_dir / 'netmap.svg').write_text(netmap_svg)
+    meta.pop('mip_levels', None)
+    meta.pop('tiled_levels', None)
+    meta.pop('tile_grids', None)
+    meta['netmap'] = 'netmap.svg'
+    meta.setdefault('layer_svgs', {})
     with open(build_dir / 'meta.json', 'w') as fp:
         json.dump(meta, fp, indent=2)
-
-    for visual_name in (*SILK_LAYERS, *MASK_LAYERS):
-        if visual_name in masks:
-            masks[visual_name].convert('L').save(build_dir / f'{visual_name}.png',
-                                                 optimize=True)
-            logging.getLogger('pcbnets.render').info('  wrote %s.png', visual_name)
-    drill_name = meta.get('drill_name')
-    if drill_name in masks:
-        masks[drill_name].convert('L').save(build_dir / 'drill.png', optimize=True)
-        logging.getLogger('pcbnets.render').info('  wrote drill.png')
-
-    logging.getLogger('pcbnets.render').info('  wrote %s/grid.png, idmap.png, meta.json', build_dir)
+    logging.getLogger('pcbnets.render').info('  wrote %s/netmap.svg, meta.json', build_dir)
 
 
 def _write_mips_and_tiles(build_dir: pathlib.Path,
                            progress: _Progress | None = None) -> None:
-    """Create all progressive-loading assets expected by the web viewer."""
+    """SVG-only viewer builds do not generate mipmaps or tiles."""
     if progress:
-        progress.step('generating mip PNGs')
-    mip_paths = make_mips(build_dir, progress=progress.detail if progress else None)
-    logging.getLogger('pcbnets.render').info('  wrote %s mip PNG(s)', len(mip_paths))
+        progress.step('skipping raster mipmaps and tiles')
+    logging.getLogger('pcbnets.render').info('  SVG-only build: no mips/ or tiles/ generated')
 
-    if progress:
-        progress.step('generating tile PNGs')
-    tile_paths = make_tiles(build_dir, progress=progress.detail if progress else None)
-    logging.getLogger('pcbnets.render').info('  wrote %s tile PNG(s)', len(tile_paths))
 
 
 # ---------- subcommands ----------
@@ -784,7 +832,7 @@ def cmd_render(args: argparse.Namespace) -> int:
     logging.getLogger('pcbnets.render').info('  via   : %s', via_name)
     logging.getLogger('pcbnets.render').info('  mode  : %s', _connector_mode(directory, via_name))
 
-    progress = _Progress(total=9)
+    progress = _Progress(total=8)
     grid, idmap, meta, masks, _ = _run_pipeline(
         directory, layers, drill_name, via_name,
         args.drill_grow, args.threshold, args.scale, args.cols,
@@ -795,12 +843,16 @@ def cmd_render(args: argparse.Namespace) -> int:
         auto_align=args.auto_align,
         progress=progress,
     )
-    progress.step('writing build artifacts')
-    _write_build(build_dir, grid, idmap, meta, masks)
+    progress.step('writing SVG build artifacts')
+    build_dir.mkdir(parents=True, exist_ok=True)
     svg_names = set(layers) | set(SILK_LAYERS) | set(MASK_LAYERS) | {'PTH', 'NPTH', drill_name, via_name}
-    progress.detail('copying visual SVGs when available')
-    _copy_visual_svgs(directory, build_dir, svg_names)
-    _write_mips_and_tiles(build_dir, progress=progress)
+    progress.detail('copying or converting visual SVGs')
+    meta['layer_svgs'] = _copy_visual_svgs(directory, build_dir, svg_names)
+    for required in layers:
+        if required not in meta['layer_svgs']:
+            raise FileNotFoundError(f'Neither SVG nor PNG exists for required layer {required}')
+    netmap_svg = labels_to_netmap_svg(_decode_ids_rgb_by_placement(idmap, meta['placements']), meta['placements'], meta['grid_w'], meta['grid_h'])
+    _write_build(build_dir, grid, idmap, meta, masks, netmap_svg)
     progress.finish()
     return 0
 
@@ -1454,9 +1506,9 @@ def cmd_explain(args: argparse.Namespace) -> int:
 def cmd_serve(args: argparse.Namespace) -> int:
     from .server import serve
     build_dir = pathlib.Path(args.build_dir).resolve()
-    if not build_dir.exists() or not (build_dir / 'grid.png').exists():
+    if not build_dir.exists() or not (build_dir / 'meta.json').exists() or not (build_dir / 'netmap.svg').exists():
         candidate = build_dir / 'pcbnets-build'
-        if (build_dir / 'drill.png').exists() or any(build_dir.glob('*.png')):
+        if (build_dir / 'drill.png').exists() or any(build_dir.glob('*.png')) or any(build_dir.glob('*.svg')):
             print(f'no build artefacts in {build_dir}, rendering first...')
             render_args = argparse.Namespace(
                 directory=str(build_dir),
@@ -1488,7 +1540,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
 def _validate_build_dir(build_dir: pathlib.Path) -> list[str]:
     """Return required build artefacts, or raise FileNotFoundError."""
-    required = ['grid.png', 'idmap.png', 'meta.json']
+    required = ['meta.json', 'netmap.svg']
     missing = [name for name in required if not (build_dir / name).exists()]
     if missing:
         miss = ', '.join(missing)
@@ -1499,46 +1551,20 @@ def _validate_build_dir(build_dir: pathlib.Path) -> list[str]:
 
 
 def _bundle_file_names(build_dir: pathlib.Path) -> list[str]:
-    """List build artefacts needed by the static HTML viewer."""
+    """List SVG-only build artefacts needed by the static HTML viewer."""
     names = _validate_build_dir(build_dir)
-
-    # The viewer prefers visual SVGs when present and keeps generated PNG
-    # mips/tiles for idmap picking/highlighting and legacy visual fallback.
-    visual_names: set[str] = set()
-    try:
-        meta = json.loads((build_dir / 'meta.json').read_text())
-        visual_names.update(meta.get('layers', []))
-        visual_names.update(meta.get('silk_layers', []))
-        visual_names.update(meta.get('mask_layers', []))
-        visual_names.update(meta.get('drill_layers', []))
-        visual_names.update(meta.get('hole_layers', []))
-        if meta.get('drill_name'):
-            visual_names.add(str(meta['drill_name']))
-    except Exception:
-        # Keep packaging useful even if metadata has a non-fatal issue.
-        pass
-    visual_names.update((*SILK_LAYERS, *MASK_LAYERS))
-    visual_names.add('drill')
-
-    for visual_name in sorted(visual_names):
-        png = f'{visual_name}.png'
-        if (build_dir / png).exists():
-            names.append(png)
-        svg = f'{visual_name}.svg'
+    meta = json.loads((build_dir / 'meta.json').read_text())
+    for svg in set((meta.get('layer_svgs') or {}).values()):
+        if not str(svg).lower().endswith('.svg'):
+            continue
         if (build_dir / svg).exists():
             names.append(svg)
-
-    return names
+    return sorted(set(names))
 
 
 def _bundle_paths(build_dir: pathlib.Path) -> list[tuple[pathlib.Path, str]]:
-    """Return build bundle files as ``(source_path, relative_name)`` pairs."""
-    paths = [(build_dir / name, name) for name in _bundle_file_names(build_dir)]
-    mips_dir = build_dir / 'mips'
-    if mips_dir.is_dir():
-        for path in sorted(p for p in mips_dir.rglob('*') if p.is_file()):
-            paths.append((path, path.relative_to(build_dir).as_posix()))
-    return paths
+    """Return SVG-only build bundle files as ``(source_path, relative_name)`` pairs."""
+    return [(build_dir / name, name) for name in _bundle_file_names(build_dir)]
 
 
 def _copy_static_bundle(build_dir: pathlib.Path,

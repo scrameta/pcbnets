@@ -630,51 +630,42 @@ def test_mip_idmap_prefers_trace_ids_over_blank_space(tmp_path):
     assert decoded.shape == (1, 1)
     assert decoded[0, 0] == 7
 
-def test_render_writes_mips_and_tiles(tmp_path):
-    from pcbnets.mips import make_mips
-    from pcbnets.tiles import make_tiles
-
-    build = tmp_path / 'build'
-    build.mkdir()
-    Image.new('L', (32, 32), 255).save(build / 'grid.png')
-    Image.new('RGB', (32, 32), (1, 2, 3)).save(build / 'idmap.png')
-
-    make_mips(build)
-    make_tiles(build)
-
-    assert (build / 'mips' / '2' / 'grid.png').is_file()
-    assert (build / 'mips' / '16' / 'idmap.png').is_file()
-    assert Image.open(build / 'mips' / '2' / 'grid.png').size == (16, 16)
-    assert Image.open(build / 'mips' / '16' / 'idmap.png').size == (2, 2)
-    assert (build / 'mips' / '1' / 'tiles' / 'grid_15_15.png').is_file()
-    assert (build / 'mips' / '2' / 'tiles' / 'idmap_7_7.png').is_file()
-    assert (build / 'mips' / '4' / 'tiles' / 'idmap_3_3.png').is_file()
-    assert (build / 'mips' / '8' / 'tiles' / 'idmap_1_1.png').is_file()
-    assert len(list((build / 'mips' / '1' / 'tiles').glob('grid_*.png'))) == 256
-    assert len(list((build / 'mips' / '2' / 'tiles').glob('grid_*.png'))) == 64
-    assert len(list((build / 'mips' / '4' / 'tiles').glob('grid_*.png'))) == 16
-    assert len(list((build / 'mips' / '8' / 'tiles').glob('grid_*.png'))) == 4
-
-
-def test_write_build_emits_drill_overlay_for_tiles(tmp_path):
+def test_write_build_is_svg_only_and_writes_netmap(tmp_path):
     from pcbnets.cli import _write_build
-    from pcbnets.mips import make_mips
-    from pcbnets.tiles import make_tiles
 
     build = tmp_path / 'build'
     grid = Image.new('L', (32, 32), 255)
     idmap = Image.new('RGB', (32, 32), (0, 0, 0))
-    drill = make_mask(w=32, h=32, shapes=[('ellipse', 12, 12, 20, 20)])
-    meta = {'drill_name': 'PTH', 'drill_layers': ['drill']}
+    meta = {'grid_w': 32, 'grid_h': 32, 'layers': ['F_Cu']}
 
-    _write_build(build, grid, idmap, meta, {'PTH': drill})
-    make_mips(build)
-    make_tiles(build)
+    _write_build(build, grid, idmap, meta, {}, '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><path class="net-shape" data-net-id="1" data-layer="F_Cu" d="M0 0H1V1H0Z"/></svg>')
 
-    assert (build / 'drill.png').is_file()
-    assert (build / 'mips' / '4' / 'drill.png').is_file()
-    assert (build / 'mips' / '4' / 'tiles' / 'drill_0_1.png').is_file()
-    assert (build / 'mips' / '4' / 'tiles' / 'drill_1_1.png').is_file()
+    assert (build / 'meta.json').is_file()
+    assert (build / 'netmap.svg').is_file()
+    assert not (build / 'grid.png').exists()
+    assert not (build / 'idmap.png').exists()
+    assert not (build / 'mips').exists()
+    assert not (build / 'tiles').exists()
+    assert 'data-net-id="1"' in (build / 'netmap.svg').read_text()
+
+
+def test_labels_to_netmap_svg_groups_net_geometry_by_layer():
+    from pcbnets.render import labels_to_netmap_svg
+
+    labels = {
+        'F_Cu': np.array([[1, 0, 1], [0, 2, 2]], dtype=np.int32),
+        'B_Cu': np.array([[1, 1, 0], [0, 0, 0]], dtype=np.int32),
+    }
+    svg = labels_to_netmap_svg(labels, {
+        'F_Cu': {'x': 0, 'y': 0, 'w': 3, 'h': 2},
+        'B_Cu': {'x': 3, 'y': 0, 'w': 3, 'h': 2},
+    }, 6, 2)
+
+    assert 'viewBox="0 0 6 2"' in svg
+    assert 'data-layer="F_Cu"' in svg
+    assert 'data-layer="B_Cu"' in svg
+    assert svg.count('data-net-id="1"') == 2
+    assert 'class="net-shape"' in svg
 
 
 def test_copy_visual_svgs_preserves_source_text(tmp_path):
@@ -696,26 +687,25 @@ def test_copy_visual_svgs_preserves_source_text(tmp_path):
     assert (build_dir / 'F_Cu.svg').read_text() == svg
 
 
-def test_export_copies_mips_and_tiles(tmp_path):
+def test_export_copies_svg_only_bundle(tmp_path):
     from pcbnets.cli import cmd_export
     import argparse
     import json
 
     build = tmp_path / 'build'
     build.mkdir()
-    Image.new('L', (2, 2), 0).save(build / 'grid.png')
-    Image.new('RGB', (2, 2), 0).save(build / 'idmap.png')
-    (build / 'meta.json').write_text(json.dumps({}))
-    mip_tile = build / 'mips' / '1' / 'tiles'
-    mip_tile.mkdir(parents=True)
-    Image.new('L', (1, 1), 0).save(mip_tile / 'grid_0_0.png')
+    (build / 'netmap.svg').write_text('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2 2"></svg>')
+    (build / 'F_Cu.svg').write_text('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2 2"></svg>')
+    (build / 'meta.json').write_text(json.dumps({'layer_svgs': {'F_Cu': 'F_Cu.svg'}, 'netmap': 'netmap.svg'}))
 
     out = tmp_path / 'static'
     args = argparse.Namespace(
         build_dir=str(build), output=str(out), title=None, description=None,
     )
     assert cmd_export(args) == 0
-    assert (out / 'mips' / '1' / 'tiles' / 'grid_0_0.png').is_file()
+    assert (out / 'netmap.svg').is_file()
+    assert (out / 'F_Cu.svg').is_file()
+    assert not (out / 'mips').exists()
 
 
 def test_deploy_zip_contains_static_bundle(tmp_path):
@@ -726,18 +716,17 @@ def test_deploy_zip_contains_static_bundle(tmp_path):
 
     build = tmp_path / 'build'
     build.mkdir()
-    Image.new('L', (2, 2), 0).save(build / 'grid.png')
-    Image.new('RGB', (2, 2), 0).save(build / 'idmap.png')
+    (build / 'netmap.svg').write_text('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2 2"></svg>')
+    (build / 'F_Cu.svg').write_text('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2 2"></svg>')
+    (build / 'F_Silkscreen.svg').write_text('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2 2"></svg>')
+    (build / 'F_Mask.svg').write_text('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2 2"></svg>')
     (build / 'meta.json').write_text(json.dumps({
-        'layers': ['F_Cu', 'B_Cu'],
+        'layers': ['F_Cu'],
         'silk_layers': ['F_Silkscreen'],
         'mask_layers': ['F_Mask'],
+        'layer_svgs': {'F_Cu': 'F_Cu.svg', 'F_Silkscreen': 'F_Silkscreen.svg', 'F_Mask': 'F_Mask.svg'},
+        'netmap': 'netmap.svg',
     }))
-    Image.new('L', (2, 2), 0).save(build / 'F_Silkscreen.png')
-    Image.new('L', (2, 2), 0).save(build / 'F_Mask.png')
-    mip_tile = build / 'mips' / '1' / 'tiles'
-    mip_tile.mkdir(parents=True)
-    Image.new('L', (1, 1), 0).save(mip_tile / 'grid_0_0.png')
 
     out = tmp_path / 'board.zip'
     args = argparse.Namespace(
@@ -748,10 +737,11 @@ def test_deploy_zip_contains_static_bundle(tmp_path):
 
     with ZipFile(out) as zf:
         names = set(zf.namelist())
-        assert {'index.html', 'grid.png', 'idmap.png', 'meta.json'} <= names
-        assert 'F_Silkscreen.png' in names
-        assert 'F_Mask.png' in names
-        assert 'mips/1/tiles/grid_0_0.png' in names
+        assert {'index.html', 'netmap.svg', 'meta.json'} <= names
+        assert 'F_Cu.svg' in names
+        assert 'F_Silkscreen.svg' in names
+        assert 'F_Mask.svg' in names
+        assert not any(name.endswith('.png') or name.startswith('mips/') or name.startswith('tiles/') for name in names)
         assert 'Test Board' in zf.read('index.html').decode('utf-8')
 
 
@@ -762,9 +752,8 @@ def test_deploy_zip_prefix(tmp_path):
 
     build = tmp_path / 'build'
     build.mkdir()
-    Image.new('L', (2, 2), 0).save(build / 'grid.png')
-    Image.new('RGB', (2, 2), 0).save(build / 'idmap.png')
-    (build / 'meta.json').write_text('{}')
+    (build / 'netmap.svg').write_text('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2 2"></svg>')
+    (build / 'meta.json').write_text('{"netmap": "netmap.svg", "layer_svgs": {}}')
 
     out = tmp_path / 'board.zip'
     args = argparse.Namespace(
@@ -776,4 +765,5 @@ def test_deploy_zip_prefix(tmp_path):
     with ZipFile(out) as zf:
         names = set(zf.namelist())
         assert 'boards/test/index.html' in names
-        assert 'boards/test/grid.png' in names
+        assert 'boards/test/netmap.svg' in names
+        assert not any(name.endswith('.png') for name in names)
