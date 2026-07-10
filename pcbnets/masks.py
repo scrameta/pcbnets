@@ -30,24 +30,13 @@ MASK_POSITION = {
 }
 
 
-def alpha_to_mask(img: Image.Image) -> Image.Image:
+def threshold_mask(img: Image.Image, threshold: int = 0) -> Image.Image:
     """Convert an arbitrary image to a clean 1-bit mask.
 
     RGBA render outputs are treated as alpha masks. Non-alpha images fall back
     to luminance thresholding. The result is mode ``'1'`` and safe to feed to
     ``ImageChops.logical_*`` and ``scipy.ndimage.label`` (after going via
     numpy).
-    """
-    if 'A' in img.getbands():
-        return img.getchannel('A').point(lambda p: p > 128, mode='1')
-    return threshold_mask(img)
-
-
-def threshold_mask(img: Image.Image, threshold: int = 0) -> Image.Image:
-    """Convert an image to a clean 1-bit mask using a luminance threshold.
-
-    Avoids ``convert('1')``'s dithering — pixels above ``threshold`` become
-    white and all others become black.
     """
     return img.convert('L').point(lambda p: p > threshold, mode='1')
 
@@ -56,6 +45,7 @@ def load_masks(
     directory: pathlib.Path,
     layer_names: Iterable[str],
     drill_name: str = 'drill',
+    threshold: int = 0,
     silk: bool = True,
     extra_names: Iterable[str] = (),
     progress: Callable[[str], None] | None = None,
@@ -89,7 +79,7 @@ def load_masks(
         path = directory / f'{name}.png'
         if not path.is_file():
             raise FileNotFoundError(f'expected mask file not found: {path}')
-        masks[name] = alpha_to_mask(Image.open(path))
+        masks[name] = threshold_mask(Image.open(path), threshold)
 
     if silk:
         optional = (*SILK_LAYERS, *MASK_LAYERS)
@@ -100,7 +90,7 @@ def load_masks(
             if path.is_file():
                 if progress:
                     progress(f'loading optional visual mask: {name}.png')
-                masks[name] = alpha_to_mask(Image.open(path))
+                masks[name] = threshold_mask(Image.open(path), threshold)
 
     # Sanity-check: every mask must have the same dimensions.
     if progress:
