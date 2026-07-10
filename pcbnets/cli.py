@@ -30,11 +30,14 @@ from .gerber import (
     write_layers_json,
 )
 from .masks import MASK_LAYERS, SILK_LAYERS, load_masks, threshold_mask
-from .mips import make_mips
-from .tiles import make_tiles
 from .nets import extract_nets, merge_nets_debug, explain_merge_path
 from .prepare import DEFAULT_OUTER_LAYERS, _shift_bool, prepare_masks
-from .render import build_grid_and_idmap
+from .render import (
+    build_grid_and_idmap,
+    labels_to_netmap_svg,
+    resize_labels_for_netmap,
+    svg_size,
+)
 
 
 def _format_elapsed(seconds: float) -> str:
@@ -504,8 +507,14 @@ def _run_pipeline(directory: pathlib.Path,
                   prep_kwargs: dict,
                   auto_invert: bool,
                   auto_align: bool,
-                  progress: _Progress | None = None) -> tuple:
-    """Returns (grid, idmap, meta, masks, report).
+                  progress: _Progress | None = None,
+                  build_legacy_atlas: bool = True) -> tuple:
+    """Run preparation and net extraction.
+
+    With the compatibility default, returns ``(grid, idmap, meta, masks,
+    report)``. The SVG viewer calls this with ``build_legacy_atlas=False`` and
+    receives ``(display_images, display_net_labels, meta, masks, report)`` so
+    no giant contact-sheet grid or RGB id map is allocated.
 
     ``drill_name`` is the physical hole mask.  ``via_name`` is the electrical
     vertical-connector mask used for net merging.  They can be the same file
@@ -611,8 +620,9 @@ def _run_pipeline(directory: pathlib.Path,
 
     logging.getLogger('pcbnets.render').info('  %s distinct nets across the board', check.n_nets)
     if progress:
-        progress.step('building display grid + id map')
-    logging.getLogger('pcbnets.render').info('  building display grid + id map...')
+        progress.step('preparing viewer net geometry' if not build_legacy_atlas else 'building display grid + id map')
+    if build_legacy_atlas:
+        logging.getLogger('pcbnets.render').info('  building display grid + id map...')
 
     # ``arrs`` and ``net_labels`` are deliberately kept unpunched for the
     # electrical extraction above.  For the viewer, physical drill holes should
@@ -634,13 +644,26 @@ def _run_pipeline(directory: pathlib.Path,
         layer_names=layer_names,
     )
 
-    grid, idmap, meta = build_grid_and_idmap(
-        layer_images=display_images,
-        net_labels=display_net_labels,
-        cols=cols,
-        scale=scale,
-        progress=progress.detail if progress else None,
-    )
+    if build_legacy_atlas:
+        grid, idmap, meta = build_grid_and_idmap(
+            layer_images=display_images,
+            net_labels=display_net_labels,
+            cols=cols,
+            scale=scale,
+            progress=progress.detail if progress else None,
+        )
+    else:
+        width, height = masks[layer_names[0]].size
+        grid = display_images
+        idmap = display_net_labels
+        meta = {
+            'layers': list(layer_names),
+            'width': width,
+            'height': height,
+            'analysis_width': width,
+            'analysis_height': height,
+            'show_labels': True,
+        }
     meta['n_nets'] = check.n_nets
     meta['source_dir'] = str(directory)
     meta['render_scale'] = scale
@@ -693,6 +716,143 @@ def _copy_visual_svgs(src_dir: pathlib.Path, build_dir: pathlib.Path,
         log.info('  copied %s.svg', name)
 
 
+_SVG_ID_RE = re.compile(r'\bid="([^"]+)"')
+_SVG_OPEN_RE = re.compile(r'<svg\b[^>]*>')
+
+
+def _normalise_layer_svg(text: str, name: str,
+                         size: tuple[int, int]) -> str:
+    """Make a gerbv/potrace layer safe to inline with sibling SVGs.
+
+    gerbv reuses short ids such as ``a`` in every exported layer. Since the
+    viewer inlines the SVG documents, those ids must be namespaced. The painted
+    artwork is also changed from fixed white to ``currentColor`` so CSS can
+    colour copper, mask, silk, and drill layers independently.
+    """
+    ids = set(_SVG_ID_RE.findall(text))
+    for old in sorted(ids, key=len, reverse=True):
+        new = f'{name}-{old}'
+        text = text.replace(f'id="{old}"', f'id="{new}"')
+        text = text.replace(f'url(#{old})', f'url(#{new})')
+
+    text = re.sub(
+        r'(<path fill=)"#(?:FFF|FFFFFF|fff|ffffff)"(?=[^>]*mask=)',
+        r'\1"currentColor"',
+        text,
+    )
+    # Potrace normally puts a fixed black fill on a top-level group. Converting
+    # that to currentColor lets raster-derived SVGs use the same viewer CSS as
+    # gerbv layers without altering gerbv's near-black mask luminance (#010101).
+    text = re.sub(
+        r'\bfill="(?:#000000|#000|black)"',
+        'fill="currentColor"',
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    width, height = size
+    match = _SVG_OPEN_RE.search(text)
+    if match and 'viewBox' not in match.group(0):
+        old = match.group(0)
+        new = old[:-1].rstrip()
+        if new.endswith('/'):
+            new = new[:-1].rstrip()
+        new += (f' viewBox="0 0 {width} {height}" '
+                f'preserveAspectRatio="none">')
+        text = text.replace(old, new, 1)
+    return text
+
+
+def _copy_svg_viewer_layers(src_dir: pathlib.Path,
+                            build_dir: pathlib.Path,
+                            names: Iterable[str],
+                            size: tuple[int, int]) -> dict[str, str]:
+    """Copy and normalise all available SVG viewer layers."""
+    log = logging.getLogger('pcbnets.render')
+    written: dict[str, str] = {}
+    for name in sorted(set(names)):
+        src = src_dir / f'{name}.svg'
+        if not src.is_file():
+            continue
+        actual = svg_size(src)
+        if actual != size:
+            raise ValueError(
+                f'SVG layer {src.name} has canvas {actual[0]}x{actual[1]}, '
+                f'expected {size[0]}x{size[1]}'
+            )
+        dst = build_dir / src.name
+        dst.write_text(_normalise_layer_svg(src.read_text(), name, size))
+        written[name] = dst.name
+        log.info('  wrote %s', dst.name)
+    return written
+
+
+def _viewer_svg_size(directory: pathlib.Path,
+                     layer_names: Iterable[str]) -> tuple[int, int]:
+    """Return and validate the shared canvas of required copper SVGs."""
+    sizes: dict[str, tuple[int, int]] = {}
+    for name in layer_names:
+        path = directory / f'{name}.svg'
+        if not path.is_file():
+            raise FileNotFoundError(
+                f'Missing required viewer layer {path}. '
+                'The short-term SVG viewer requires SVGs alongside the '
+                'high-resolution PNG masks.'
+            )
+        sizes[name] = svg_size(path)
+    if len(set(sizes.values())) != 1:
+        details = ', '.join(f'{name}={w}x{h}' for name, (w, h) in sizes.items())
+        raise ValueError(f'Copper SVG canvases differ: {details}')
+    return next(iter(sizes.values()))
+
+
+def _check_svg_corrections(meta: dict, layer_names: Iterable[str]) -> None:
+    """Reject corrections that have not also been applied to source SVGs."""
+    unsupported: list[str] = []
+    corrections = meta.get('corrections') or {}
+    for name in layer_names:
+        corr = corrections.get(name) or {}
+        offset = tuple(corr.get('offset') or (0, 0))
+        if bool(corr.get('invert')) or offset != (0, 0):
+            unsupported.append(
+                f'{name}: invert={bool(corr.get("invert"))}, offset={offset}'
+            )
+    if unsupported:
+        raise ValueError(
+            'SVG viewer output cannot yet mirror PNG-only polarity/alignment '
+            'corrections. First create aligned/correct SVG inputs or disable '
+            'the correction. Unsupported corrections: ' + '; '.join(unsupported)
+        )
+
+
+def _remove_legacy_viewer_artifacts(build_dir: pathlib.Path) -> None:
+    """Remove obsolete raster-viewer outputs from an existing build dir."""
+    if not build_dir.exists():
+        return
+    for path in build_dir.glob('*.png'):
+        path.unlink()
+    for name in ('grid.png', 'idmap.png'):
+        path = build_dir / name
+        if path.exists():
+            path.unlink()
+    shutil.rmtree(build_dir / 'mips', ignore_errors=True)
+    shutil.rmtree(build_dir / 'tiles', ignore_errors=True)
+
+
+def _write_svg_build(build_dir: pathlib.Path,
+                     meta: dict,
+                     netmap_svg: str) -> None:
+    """Write the artefacts consumed by the SVG-only viewer."""
+    build_dir.mkdir(parents=True, exist_ok=True)
+    (build_dir / 'netmap.svg').write_text(netmap_svg)
+    with open(build_dir / 'meta.json', 'w') as fp:
+        json.dump(meta, fp, indent=2)
+        fp.write('\n')
+    logging.getLogger('pcbnets.render').info(
+        '  wrote %s/meta.json and netmap.svg', build_dir
+    )
+
+
 def _write_build(build_dir: pathlib.Path,
                  grid: Image.Image,
                  idmap: Image.Image,
@@ -715,21 +875,6 @@ def _write_build(build_dir: pathlib.Path,
         logging.getLogger('pcbnets.render').info('  wrote drill.png')
 
     logging.getLogger('pcbnets.render').info('  wrote %s/grid.png, idmap.png, meta.json', build_dir)
-
-
-def _write_mips_and_tiles(build_dir: pathlib.Path,
-                           progress: _Progress | None = None) -> None:
-    """Create all progressive-loading assets expected by the web viewer."""
-    if progress:
-        progress.step('generating mip PNGs')
-    mip_paths = make_mips(build_dir, progress=progress.detail if progress else None)
-    logging.getLogger('pcbnets.render').info('  wrote %s mip PNG(s)', len(mip_paths))
-
-    if progress:
-        progress.step('generating tile PNGs')
-    tile_paths = make_tiles(build_dir, progress=progress.detail if progress else None)
-    logging.getLogger('pcbnets.render').info('  wrote %s tile PNG(s)', len(tile_paths))
-
 
 # ---------- subcommands ----------
 
@@ -770,6 +915,7 @@ def cmd_audit(args: argparse.Namespace) -> int:
 
 
 def cmd_render(args: argparse.Namespace) -> int:
+    """Build the SVG viewer while retaining main's PNG net extraction."""
     _configure_cli_logging()
     directory = pathlib.Path(args.directory).resolve()
     build_dir = pathlib.Path(args.output).resolve()
@@ -777,15 +923,18 @@ def cmd_render(args: argparse.Namespace) -> int:
     via_name = _resolve_via_name(directory, args.via)
     layers = _resolve_layers(directory, args.layers, drill_name, via_name)
     overrides = _collect_overrides(args)
+    netmap_scale = max(1, int(getattr(args, 'netmap_scale', 2)))
 
-    logging.getLogger('pcbnets.render').info('rendering nets from %s', directory)
-    logging.getLogger('pcbnets.render').info('  layers: %s', ', '.join(layers))
-    logging.getLogger('pcbnets.render').info('  drill : %s', drill_name)
-    logging.getLogger('pcbnets.render').info('  via   : %s', via_name)
-    logging.getLogger('pcbnets.render').info('  mode  : %s', _connector_mode(directory, via_name))
+    log = logging.getLogger('pcbnets.render')
+    log.info('rendering SVG viewer from %s', directory)
+    log.info('  layers: %s', ', '.join(layers))
+    log.info('  drill : %s', drill_name)
+    log.info('  via   : %s', via_name)
+    log.info('  mode  : %s', _connector_mode(directory, via_name))
+    log.info('  netmap: %sx SVG canvas', netmap_scale)
 
-    progress = _Progress(total=9)
-    grid, idmap, meta, masks, _ = _run_pipeline(
+    progress = _Progress(total=10)
+    display_images, display_net_labels, meta, masks, _ = _run_pipeline(
         directory, layers, drill_name, via_name,
         args.drill_grow, args.threshold, args.scale, args.cols,
         cache=not args.no_cache,
@@ -794,15 +943,74 @@ def cmd_render(args: argparse.Namespace) -> int:
         auto_invert=not args.no_auto_invert,
         auto_align=args.auto_align,
         progress=progress,
+        build_legacy_atlas=False,
     )
-    progress.step('writing build artifacts')
-    _write_build(build_dir, grid, idmap, meta, masks)
-    svg_names = set(layers) | set(SILK_LAYERS) | set(MASK_LAYERS) | {'PTH', 'NPTH', drill_name, via_name}
-    progress.detail('copying visual SVGs when available')
-    _copy_visual_svgs(directory, build_dir, svg_names)
-    _write_mips_and_tiles(build_dir, progress=progress)
+    # ``display_images`` is retained only because the common pipeline returns
+    # it; the SVG viewer consumes the source vectors and the punched labels.
+    del display_images
+
+    progress.step('validating SVG viewer layers')
+    nominal = _viewer_svg_size(directory, layers)
+    _check_svg_corrections(meta, layers)
+
+    build_dir.mkdir(parents=True, exist_ok=True)
+    _remove_legacy_viewer_artifacts(build_dir)
+    svg_names = (
+        set(layers) | set(SILK_LAYERS) | set(MASK_LAYERS)
+        | {'PTH', 'NPTH', 'drill', 'via', drill_name, via_name}
+    )
+    progress.step('copying and normalising SVG layers')
+    layer_svgs = _copy_svg_viewer_layers(
+        directory, build_dir, svg_names, nominal
+    )
+    missing = [name for name in layers if name not in layer_svgs]
+    if missing:
+        raise FileNotFoundError(
+            'Missing required copper SVG layer(s): ' + ', '.join(missing)
+        )
+
+    net_width = nominal[0] * netmap_scale
+    net_height = nominal[1] * netmap_scale
+    progress.step(
+        f'converting full-resolution net labels to {net_width}x{net_height} SVG map'
+    )
+    viewer_labels: dict[str, np.ndarray] = {}
+    for index, name in enumerate(layers, 1):
+        progress.detail(f'resampling net labels {index}/{len(layers)}: {name}')
+        viewer_labels[name] = resize_labels_for_netmap(
+            display_net_labels[name], net_width, net_height
+        )
+    netmap_svg = labels_to_netmap_svg(viewer_labels, net_width, net_height)
+
+    meta['analysis_width'] = int(meta.get('analysis_width', masks[layers[0]].size[0]))
+    meta['analysis_height'] = int(meta.get('analysis_height', masks[layers[0]].size[1]))
+    meta['width'], meta['height'] = nominal
+    meta['tile_w'], meta['tile_h'] = nominal  # viewer compatibility aliases
+    meta['netmap'] = 'netmap.svg'
+    meta['netmap_scale'] = netmap_scale
+    meta['netmap_width'] = net_width
+    meta['netmap_height'] = net_height
+    meta['layer_svgs'] = layer_svgs
+    meta['mask_layers'] = [
+        name for name in meta.get('mask_layers', []) if name in layer_svgs
+    ]
+    meta['silk_layers'] = [
+        name for name in meta.get('silk_layers', []) if name in layer_svgs
+    ]
+
+    # ``drill.png`` is often a generated union with no matching SVG. Prefer it
+    # when present; otherwise display the source PTH and NPTH vectors together.
+    drill_layers: list[str] = []
+    for name in (drill_name, 'PTH', 'NPTH'):
+        if name in layer_svgs and name not in drill_layers:
+            drill_layers.append(name)
+    meta['drill_layers'] = drill_layers
+
+    progress.step('writing SVG viewer build')
+    _write_svg_build(build_dir, meta, netmap_svg)
     progress.finish()
     return 0
+
 
 
 def _load_prepared_net_inputs(args: argparse.Namespace) -> tuple[pathlib.Path, list[str], str, str, dict, dict[str, np.ndarray], np.ndarray, object]:
@@ -1454,10 +1662,17 @@ def cmd_explain(args: argparse.Namespace) -> int:
 def cmd_serve(args: argparse.Namespace) -> int:
     from .server import serve
     build_dir = pathlib.Path(args.build_dir).resolve()
-    if not build_dir.exists() or not (build_dir / 'grid.png').exists():
+    ready = (
+        build_dir.exists()
+        and (build_dir / 'meta.json').is_file()
+        and (build_dir / 'netmap.svg').is_file()
+    )
+    if not ready:
         candidate = build_dir / 'pcbnets-build'
-        if (build_dir / 'drill.png').exists() or any(build_dir.glob('*.png')):
-            print(f'no build artefacts in {build_dir}, rendering first...')
+        if build_dir.is_dir() and (
+            any(build_dir.glob('*.png')) or any(build_dir.glob('*.svg'))
+        ):
+            print(f'no SVG viewer build in {build_dir}, rendering first...')
             render_args = argparse.Namespace(
                 directory=str(build_dir),
                 output=str(candidate),
@@ -1467,6 +1682,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
                 drill_grow=0,
                 threshold=0,
                 scale=1.0,
+                netmap_scale=2,
                 cols=2,
                 no_cache=False,
                 nets=None,
@@ -1477,33 +1693,53 @@ def cmd_serve(args: argparse.Namespace) -> int:
                 offset=[],
                 outer=None,
             )
-            cmd_render(render_args)
+            rc = cmd_render(render_args)
+            if rc:
+                return rc
             build_dir = candidate
         else:
-            print(f'no PNGs in {build_dir}', file=sys.stderr)
+            print(f'no SVG viewer build or source layers in {build_dir}', file=sys.stderr)
             return 1
     serve(build_dir, host=args.host, port=args.port)
     return 0
 
 
+
 def _validate_build_dir(build_dir: pathlib.Path) -> list[str]:
-    """Return required build artefacts, or raise FileNotFoundError."""
-    required = ['grid.png', 'idmap.png', 'meta.json']
-    missing = [name for name in required if not (build_dir / name).exists()]
-    if missing:
-        miss = ', '.join(missing)
-        raise FileNotFoundError(
-            f'missing {miss} in {build_dir}; run `pcbnets render` first'
-        )
-    return required
+    """Return required build artefacts, accepting SVG and legacy builds."""
+    svg_required = ['meta.json', 'netmap.svg']
+    if all((build_dir / name).is_file() for name in svg_required):
+        return svg_required
+
+    # Compatibility for exporting old builds that pre-date this overlay. New
+    # renders never create these files or their mips/tiles.
+    legacy_required = ['grid.png', 'idmap.png', 'meta.json']
+    if all((build_dir / name).is_file() for name in legacy_required):
+        return legacy_required
+
+    raise FileNotFoundError(
+        f'missing meta.json/netmap.svg in {build_dir}; '
+        'run `pcbnets render` first'
+    )
+
 
 
 def _bundle_file_names(build_dir: pathlib.Path) -> list[str]:
-    """List build artefacts needed by the static HTML viewer."""
+    """List build artefacts required by the static viewer."""
     names = _validate_build_dir(build_dir)
+    if 'netmap.svg' in names:
+        meta = json.loads((build_dir / 'meta.json').read_text())
+        for filename in sorted(set((meta.get('layer_svgs') or {}).values())):
+            path = build_dir / filename
+            if not path.is_file():
+                raise FileNotFoundError(
+                    f'metadata references missing SVG layer: {path}'
+                )
+            names.append(str(filename))
+        return sorted(set(names))
 
-    # The viewer prefers visual SVGs when present and keeps generated PNG
-    # mips/tiles for idmap picking/highlighting and legacy visual fallback.
+    # Legacy packaging compatibility only. The new render path does not emit
+    # PNG overlays, grids, id maps, mips, or tiles.
     visual_names: set[str] = set()
     try:
         meta = json.loads((build_dir / 'meta.json').read_text())
@@ -1511,34 +1747,28 @@ def _bundle_file_names(build_dir: pathlib.Path) -> list[str]:
         visual_names.update(meta.get('silk_layers', []))
         visual_names.update(meta.get('mask_layers', []))
         visual_names.update(meta.get('drill_layers', []))
-        visual_names.update(meta.get('hole_layers', []))
-        if meta.get('drill_name'):
-            visual_names.add(str(meta['drill_name']))
     except Exception:
-        # Keep packaging useful even if metadata has a non-fatal issue.
         pass
-    visual_names.update((*SILK_LAYERS, *MASK_LAYERS))
-    visual_names.add('drill')
-
     for visual_name in sorted(visual_names):
-        png = f'{visual_name}.png'
-        if (build_dir / png).exists():
-            names.append(png)
-        svg = f'{visual_name}.svg'
-        if (build_dir / svg).exists():
-            names.append(svg)
+        for suffix in ('.png', '.svg'):
+            filename = f'{visual_name}{suffix}'
+            if (build_dir / filename).is_file():
+                names.append(filename)
+    return sorted(set(names))
 
-    return names
 
 
 def _bundle_paths(build_dir: pathlib.Path) -> list[tuple[pathlib.Path, str]]:
-    """Return build bundle files as ``(source_path, relative_name)`` pairs."""
-    paths = [(build_dir / name, name) for name in _bundle_file_names(build_dir)]
-    mips_dir = build_dir / 'mips'
-    if mips_dir.is_dir():
-        for path in sorted(p for p in mips_dir.rglob('*') if p.is_file()):
-            paths.append((path, path.relative_to(build_dir).as_posix()))
+    """Return bundle files as ``(source_path, relative_name)`` pairs."""
+    names = _bundle_file_names(build_dir)
+    paths = [(build_dir / name, name) for name in names]
+    if 'netmap.svg' not in names:
+        mips_dir = build_dir / 'mips'
+        if mips_dir.is_dir():
+            for path in sorted(p for p in mips_dir.rglob('*') if p.is_file()):
+                paths.append((path, path.relative_to(build_dir).as_posix()))
     return paths
+
 
 
 def _copy_static_bundle(build_dir: pathlib.Path,
@@ -1937,6 +2167,7 @@ def cmd_all(args: argparse.Namespace) -> int:
         drill_grow=args.drill_grow,
         threshold=0,
         scale=args.scale,
+        netmap_scale=getattr(args, 'netmap_scale', 2),
         cols=args.cols,
         no_cache=False,
         nets=args.nets,
@@ -2033,12 +2264,12 @@ def _add_audit_flags(p: argparse.ArgumentParser, *, include_auto_align: bool = T
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog='pcbnets',
-        description='Interactive PCB net explorer from rasterised Gerber layers.',
+        description='Interactive PCB net explorer using high-resolution analysis masks and an SVG viewer.',
     )
     p.add_argument('--version', action='version', version=f'pcbnets {__version__}')
     sub = p.add_subparsers(dest='command', required=True)
 
-    pr = sub.add_parser('render', help='Process a directory of PNGs into a build dir')
+    pr = sub.add_parser('render', help='Build an SVG viewer from matching PNG analysis masks and SVG layers')
     pr.add_argument('directory')
     pr.add_argument('-o', '--output', default='./pcbnets-build')
     pr.add_argument('--layers', nargs='+')
@@ -2048,7 +2279,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help='Electrical vertical-connector mask name (default: auto: via, PTH, drill)')
     pr.add_argument('--drill-grow', type=int, default=0, dest='drill_grow')
     pr.add_argument('--threshold', type=int, default=0)
-    pr.add_argument('--scale', type=float, default=1.0)
+    pr.add_argument('--scale', type=float, default=1.0,
+                    help='Legacy option retained for command compatibility; SVG layers are resolution-independent')
+    pr.add_argument('--netmap-scale', type=int, default=2, dest='netmap_scale',
+                    help='Pick/highlight SVG resolution relative to the layer SVG canvas (default: 2)')
     pr.add_argument('--cols', type=int, default=2)
     pr.add_argument('--no-cache', action='store_true')
     pr.add_argument('--nets',
@@ -2186,6 +2420,7 @@ def build_parser() -> argparse.ArgumentParser:
                        help='Electrical vertical-connector mask name (default: auto: via, PTH, drill)')
     pall.add_argument('--drill-grow', type=int, default=0, dest='drill_grow')
     pall.add_argument('--scale', type=float, default=1.0)
+    pall.add_argument('--netmap-scale', type=int, default=2, dest='netmap_scale')
     pall.add_argument('--cols', type=int, default=2)
     pall.add_argument('--nets',
                       help='Use net-labels.npz from `pcbnets nets -o DIR` during render')

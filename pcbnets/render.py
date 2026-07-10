@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import html
 import json
+import pathlib
+import re
 from typing import Callable, Mapping
 
 import numpy as np
 from PIL import Image
+from scipy import ndimage
 
 
 def _encode_ids_rgb(labels: np.ndarray) -> Image.Image:
@@ -191,3 +195,171 @@ def write_meta(meta: dict, path) -> None:
     """Write metadata as JSON. Convenience for CLI users."""
     with open(path, 'w') as fp:
         json.dump(meta, fp, indent=2)
+
+
+
+def svg_size(svg_path: pathlib.Path) -> tuple[int, int]:
+    """Read an SVG canvas size from its viewBox or width/height attributes.
+
+    gerbv commonly writes lengths such as ``1303pt`` and omits ``viewBox``.
+    The numeric values are its SVG user-coordinate canvas and are therefore
+    the correct dimensions for the browser-facing layer stack.
+    """
+    import xml.etree.ElementTree as ET
+
+    root = ET.parse(svg_path).getroot()
+    view_box = root.get('viewBox')
+    if view_box:
+        parts = [float(v) for v in re.split(r'[\s,]+', view_box.strip()) if v]
+        if len(parts) == 4:
+            return max(1, round(parts[2])), max(1, round(parts[3]))
+
+    def number(value: str | None) -> float | None:
+        if value is None:
+            return None
+        match = re.match(r'\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)', value)
+        return float(match.group(1)) if match else None
+
+    width = number(root.get('width'))
+    height = number(root.get('height'))
+    if width is None or height is None:
+        raise ValueError(f'Cannot determine SVG dimensions for {svg_path}')
+    return max(1, round(width)), max(1, round(height))
+
+
+def resize_labels_for_netmap(labels: np.ndarray,
+                             width: int,
+                             height: int) -> np.ndarray:
+    """Resize an analysis-resolution label map for browser picking.
+
+    The electrical net ids have already been decided at full analysis
+    resolution. Nearest-neighbour resizing therefore cannot merge electrical
+    nets; it only chooses which already-assigned id owns each browser pick-map
+    pixel. This supports the non-integer 1000-DPI-to-72-unit SVG ratio.
+    """
+    arr = np.asarray(labels, dtype=np.int32)
+    if arr.ndim != 2:
+        raise ValueError(f'label map must be 2-D, got shape {arr.shape}')
+    width = max(1, int(width))
+    height = max(1, int(height))
+    if arr.shape == (height, width):
+        return arr
+    image = Image.fromarray(arr, mode='I')
+    resized = image.resize((width, height), Image.Resampling.NEAREST)
+    out = np.asarray(resized, dtype=np.int32).copy()
+
+    # A very small copper island can fall between nearest-neighbour sample
+    # centres. Keep every id represented on this layer by adding one pick-map
+    # pixel at the original component's location. This changes only browser
+    # hit-testing/highlighting; electrical connectivity remains the full-size
+    # source label map.
+    max_id = int(arr.max(initial=0))
+    if max_id:
+        source_present = np.bincount(arr.ravel(), minlength=max_id + 1) > 0
+        output_present = np.bincount(out.ravel(), minlength=max_id + 1) > 0
+        missing = np.flatnonzero(source_present & ~output_present)
+        missing = missing[missing > 0]
+        if missing.size:
+            objects = ndimage.find_objects(arr, max_label=max_id)
+            src_h, src_w = arr.shape
+            for net_id in missing:
+                bounds = objects[int(net_id) - 1]
+                if bounds is None:
+                    continue
+                local = np.argwhere(arr[bounds] == net_id)
+                if local.size == 0:
+                    continue
+                sy = int(bounds[0].start + local[0, 0])
+                sx = int(bounds[1].start + local[0, 1])
+                oy = min(height - 1, int((sy + 0.5) * height / src_h))
+                ox = min(width - 1, int((sx + 0.5) * width / src_w))
+
+                placed = False
+                for radius in range(0, 4):
+                    y0, y1 = max(0, oy - radius), min(height, oy + radius + 1)
+                    x0, x1 = max(0, ox - radius), min(width, ox + radius + 1)
+                    region = out[y0:y1, x0:x1]
+                    free = np.argwhere(region == 0)
+                    if free.size:
+                        py, px = free[0]
+                        out[y0 + int(py), x0 + int(px)] = int(net_id)
+                        placed = True
+                        break
+                if not placed:
+                    out[oy, ox] = int(net_id)
+    return out
+
+
+def _row_runs(row: np.ndarray) -> list[tuple[int, int, int]]:
+    """Return non-background ``(net_id, x0, x1)`` runs for one label row."""
+    if row.size == 0:
+        return []
+    changes = np.flatnonzero(row[1:] != row[:-1]) + 1
+    starts = np.concatenate(([0], changes))
+    ends = np.concatenate((changes, [row.size]))
+    ids = row[starts]
+    return [
+        (int(net_id), int(x0), int(x1))
+        for net_id, x0, x1 in zip(ids, starts, ends)
+        if int(net_id) > 0
+    ]
+
+
+def _paths_by_net(labels: np.ndarray) -> dict[int, str]:
+    """Convert a label raster to compact rectangle paths grouped by net id.
+
+    Equal horizontal runs on consecutive rows are merged vertically. This is
+    deliberately simpler than contour tracing: paths stay pixel-exact, do not
+    acquire topology from curve simplification, and require no new dependency.
+    """
+    arr = np.asarray(labels)
+    active: dict[tuple[int, int, int], int] = {}
+    commands: dict[int, list[str]] = {}
+
+    def finish(key: tuple[int, int, int], y1: int) -> None:
+        net_id, x0, x1 = key
+        y0 = active[key]
+        commands.setdefault(net_id, []).append(
+            f'M{x0} {y0}H{x1}V{y1}H{x0}Z'
+        )
+
+    for y in range(arr.shape[0]):
+        keys = set(_row_runs(arr[y]))
+        for key in active.keys() - keys:
+            finish(key, y)
+        next_active = {key: active.get(key, y) for key in keys}
+        active = next_active
+
+    for key in list(active):
+        finish(key, arr.shape[0])
+
+    return {net_id: ''.join(parts) for net_id, parts in commands.items()}
+
+
+def labels_to_netmap_svg(net_labels: Mapping[str, np.ndarray],
+                         width: int,
+                         height: int) -> str:
+    """Serialize per-layer browser label maps as an interactive SVG.
+
+    Each copper layer occupies the same coordinate space and receives its own
+    ``<g data-layer>``. The viewer exposes one group at a time, while selecting
+    a net highlights every path carrying the same board-wide net id.
+    """
+    width = int(width)
+    height = int(height)
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" preserveAspectRatio="none">',
+        '<style>.net-shape{fill:transparent;stroke:transparent;pointer-events:all}'
+        '.net-shape.selected{fill:rgba(255,80,80,.75);stroke:rgba(255,80,80,.75);pointer-events:all}</style>',
+    ]
+    for layer, labels in net_labels.items():
+        escaped_layer = html.escape(str(layer), quote=True)
+        parts.append(f'<g data-layer="{escaped_layer}">')
+        for net_id, path_data in sorted(_paths_by_net(labels).items()):
+            parts.append(
+                f'<path class="net-shape" data-net-id="{net_id}" '
+                f'data-layer="{escaped_layer}" d="{path_data}"/>'
+            )
+        parts.append('</g>')
+    parts.append('</svg>')
+    return '\n'.join(parts)
