@@ -49,9 +49,17 @@ def test_polarity_outer_high_fill_warns():
     assert v.is_outer is True
 
 
-def test_polarity_inner_high_fill_inverts():
+def test_polarity_inner_high_fill_keeps_positive_plane():
     arr = np.ones((100, 200), dtype=bool)
     arr[40:60, 40:60] = False  # ~97% fill
+    v = detect_polarity(arr, 'inner2', {'top', 'bottom'})
+    assert v.action == 'none'
+    assert v.is_outer is False
+
+
+def test_polarity_inner_low_fill_inverts_negative_plane():
+    arr = np.zeros((100, 200), dtype=bool)
+    arr[40:60, 40:60] = True  # ~3% fill: likely clearances/antipads only
     v = detect_polarity(arr, 'inner2', {'top', 'bottom'})
     assert v.action == 'invert'
     assert v.is_outer is False
@@ -136,8 +144,8 @@ def test_detect_offset_finds_shift():
 
 # --- prepare_masks integration ---
 
-def test_prepare_inverts_high_fill_inner():
-    """An inner layer with very high fill should come out inverted."""
+def test_prepare_keeps_high_fill_inner_positive_plane():
+    """An inner layer with very high fill is already a positive plane."""
     # 98% fill plane
     plane = Image.new('L', (200, 100), 255)
     d = ImageDraw.Draw(plane)
@@ -153,8 +161,29 @@ def test_prepare_inverts_high_fill_inner():
         layer_names=['top', 'inner1', 'bottom'],
         drill_name='drill',
     )
-    # Inner1 should be inverted: post-inversion, fill should be tiny.
-    assert arrs['inner1'].mean() < 0.05
+    # Inner1 should not be inverted: high fill means copper is already white.
+    assert arrs['inner1'].mean() > 0.95
+    assert report.corrections['inner1'].invert is False
+    assert report.corrections['inner1'].source == 'auto'
+
+
+def test_prepare_inverts_low_fill_inner_negative_plane():
+    """A low-fill inner layer is likely a negative plane mask."""
+    plane = Image.new('L', (200, 100), 0)
+    d = ImageDraw.Draw(plane)
+    d.ellipse((90, 40, 110, 60), fill=255)  # antipad/clearance drawn white
+    masks = {
+        'top':    make_mask(200, 100, [('rect', 40, 30, 60, 50)]),
+        'inner1': plane,
+        'bottom': make_mask(200, 100, [('rect', 40, 30, 60, 50)]),
+        'drill':  make_mask(200, 100, [('ellipse', 45, 35, 55, 45)]),
+    }
+    arrs, _, report = prepare_masks(
+        masks=masks,
+        layer_names=['top', 'inner1', 'bottom'],
+        drill_name='drill',
+    )
+    assert arrs['inner1'].mean() > 0.95
     assert report.corrections['inner1'].invert is True
     assert report.corrections['inner1'].source == 'auto'
 
@@ -177,7 +206,9 @@ def test_prepare_invert_override_force():
 
 
 def test_prepare_no_invert_override_blocks_auto():
-    plane = Image.new('L', (200, 100), 255)
+    plane = Image.new('L', (200, 100), 0)
+    d = ImageDraw.Draw(plane)
+    d.ellipse((90, 40, 110, 60), fill=255)
     masks = {
         'top': make_mask(200, 100, [('rect', 40, 30, 60, 50)]),
         'inner1': plane,
@@ -189,8 +220,8 @@ def test_prepare_no_invert_override_blocks_auto():
         drill_name='drill',
         no_invert_overrides={'inner1'},
     )
-    # inner1 should NOT have been inverted despite high fill
-    assert arrs['inner1'].mean() > 0.95
+    # inner1 should NOT have been inverted despite low fill
+    assert arrs['inner1'].mean() < 0.05
     assert report.corrections['inner1'].invert is False
     assert report.corrections['inner1'].source == 'override'
 

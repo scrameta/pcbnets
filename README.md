@@ -180,7 +180,7 @@ auditing /path/to/board
   Layer            Fill%  Kind    Action             Note
   F_Cu              8.0%  outer   keep
   In1_Cu            6.5%  inner   keep
-  In2_Cu           92.1%  inner   invert (auto)      92% fill suggests a plane stored positive
+  In2_Cu           92.1%  inner   keep               92% fill suggests a positive plane; keeping as-is
   B_Cu              4.4%  outer   keep
   drill            96.7%  drill   none               58/60 drills on copper
 ```
@@ -399,21 +399,22 @@ issues, with automatic detection:
 
 Inner-layer planes (GND, VCC) are sometimes stored as the negative of
 their copper, depending on the EDA tool's export convention. pcbnets
-detects high-fill inner layers (> 60% white pixels) and auto-inverts
-them, on the assumption that you've encountered a polarity-flipped plane.
+expects masks where white means copper. Correctly-rendered positive
+planes therefore usually look mostly white, with black antipads and
+clearances. Auto-invert now treats those high-fill inner planes as already
+correct and keeps them as-is.
 
-**Important caveat:** correctly-rendered positive planes also look "mostly
-white" and don't need inverting. A plane image and its inversion are
-visually indistinguishable from pixel statistics alone — only context
-tells you which form your file is in.
+For negative plane masks, only the antipads/clearances tend to be white,
+so the fill is very low. pcbnets auto-inverts low-fill inner layers
+(< 40% white pixels) to restore white=copper semantics. Mid-fill inner
+layers are ambiguous from pixel statistics alone, so pcbnets warns and
+leaves them unchanged unless you use `--invert` or `--no-invert`.
 
-**Rule of thumb:** if your workflow is KiCad → gerbv → PNG, your planes
-are likely already correct (white = copper) and you should pass
-`--no-auto-invert`. If you see the post-merge warning *"one net occupies
+**Rule of thumb:** if you see one giant "plane net" merging everything
+through it, a negative plane may have been kept positive by mistake — try
+`--invert LAYER`. If you see the post-merge warning *"one net occupies
 N% of all copper — likely an inverted plane swallowed the board"* after
-a render, the auto-invert has likely done the wrong thing — try
-`--no-auto-invert`. If you see one giant "plane net" merging everything
-through it, the heuristic was needed and you've forced it off.
+a render, check whether a manual `--invert` was applied incorrectly.
 
 Outer layers (top, bottom) are essentially never inverted in practice;
 high fill on an outer triggers a warning rather than auto-inversion,

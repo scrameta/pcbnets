@@ -408,16 +408,17 @@ def _svg_to_transparent(path_in, path_out, fill="#FFFFFF"):
     pathlib.Path(path_out).write_text(out)
 
 def _optimise_svg_with_tools(svg_path: pathlib.Path) -> tuple[int, int]:
-    """Optimise an SVG in-place using svgo.
+    """Optimise an SVG in-place using svgo and scour.
 
     The tools run in series so we avoid hand-editing path geometry in pcbnets:
     ``svgo -i in.svg -o temp.svg`` with
     viewboxing/comment/id cleanup enabled.  Returns ``(bytes_in, bytes_out)``.
     """
     before = svg_path.stat().st_size
+    tmp_path = svg_path.with_suffix('.svgo.tmp.svg')
     try:
         svgo = subprocess.run(
-            ['svgo', '-i', str(svg_path), '-o', str(svg_path)],
+            ['svgo', '-i', str(svg_path), '-o', str(tmp_path)],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -428,11 +429,34 @@ def _optimise_svg_with_tools(svg_path: pathlib.Path) -> tuple[int, int]:
                 f'{svg_path.name}: {svgo.stderr.strip() or svgo.stdout.strip()}'
             )
 
+        scour = subprocess.run(
+            [
+                'scour',
+                '-i', str(tmp_path),
+                '-o', str(svg_path),
+                '--enable-viewboxing',
+                '--enable-id-stripping',
+                '--enable-comment-stripping',
+                '--shorten-ids',
+                '--indent=none',
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if scour.returncode != 0:
+            raise RuntimeError(
+                'scour failed while optimising '
+                f'{svg_path.name}: {scour.stderr.strip() or scour.stdout.strip()}'
+            )
+
         return before, svg_path.stat().st_size
     except FileNotFoundError as e:
         raise RuntimeError(
-            f'{e.filename} is required for SVG optimisation; install svgo'
+            f'{e.filename} is required for SVG optimisation; install svgo and scour'
         ) from e
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
 def _export_one_svg(

@@ -1,8 +1,8 @@
 """Polarity and alignment auditing.
 
 A common source of garbage output is masks that look fine but are:
-  - inverted (a plane stored positive — copper = white, but the file has
-    copper = black, or vice versa), or
+  - inverted (a plane should be mostly copper/white, but the rendered mask
+    has copper and clearances swapped), or
   - offset (drill mask exported with a different canvas origin or DPI
     than the copper layers).
 
@@ -36,10 +36,14 @@ class PolarityVerdict:
 
 # Outer layers are essentially always exported positive (copper = white).
 # A high fill on an outer is suspicious; we don't auto-invert it, we warn.
-# Inner planes, by contrast, regularly come through as positive copper
-# pours, where "everything except the antipads is set" produces ~85%+ fill.
-INVERT_FILL_THRESHOLD = 0.6
-AMBIGUOUS_LOW = 0.4
+# Inner planes should be positive copper masks by the time net extraction sees
+# them. A correctly rendered plane is usually mostly white (copper with black
+# antipads). If a plane is rendered negative, only the antipads/clearances are
+# white, so the fill is very low and the mask should be inverted. Pixel fill
+# alone cannot prove polarity for middling fills, so those are left untouched
+# with a warning.
+PLANE_POSITIVE_FILL_THRESHOLD = 0.6
+NEGATIVE_PLANE_FILL_THRESHOLD = 0.4
 
 
 def detect_polarity(arr: np.ndarray, layer: str, outer: set[str]) -> PolarityVerdict:
@@ -48,7 +52,7 @@ def detect_polarity(arr: np.ndarray, layer: str, outer: set[str]) -> PolarityVer
     is_outer = layer in outer
 
     if is_outer:
-        if fill > INVERT_FILL_THRESHOLD:
+        if fill > PLANE_POSITIVE_FILL_THRESHOLD:
             return PolarityVerdict(
                 layer=layer, fill=fill, is_outer=True, action='warn',
                 reason=(f'outer layer with {fill:.0%} fill — likely wrong '
@@ -57,16 +61,19 @@ def detect_polarity(arr: np.ndarray, layer: str, outer: set[str]) -> PolarityVer
         return PolarityVerdict(layer=layer, fill=fill, is_outer=True, action='none')
 
     # Inner layer
-    if fill > INVERT_FILL_THRESHOLD:
+    if fill > PLANE_POSITIVE_FILL_THRESHOLD:
+        return PolarityVerdict(
+            layer=layer, fill=fill, is_outer=False, action='none',
+            reason=f'{fill:.0%} fill suggests a positive plane; keeping as-is',
+        )
+    if fill < NEGATIVE_PLANE_FILL_THRESHOLD:
         return PolarityVerdict(
             layer=layer, fill=fill, is_outer=False, action='invert',
-            reason=f'{fill:.0%} fill suggests a plane stored positive',
+            reason=f'{fill:.0%} fill suggests a negative plane mask',
         )
-    if fill < AMBIGUOUS_LOW:
-        return PolarityVerdict(layer=layer, fill=fill, is_outer=False, action='none')
     return PolarityVerdict(
         layer=layer, fill=fill, is_outer=False, action='ambiguous',
-        reason=f'{fill:.0%} fill is between signal-layer and plane ranges',
+        reason=f'{fill:.0%} fill is between negative-plane and positive-plane ranges',
     )
 
 

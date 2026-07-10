@@ -33,13 +33,23 @@ MASK_POSITION = {
 def alpha_to_mask(img: Image.Image) -> Image.Image:
     """Convert an arbitrary image to a clean 1-bit mask.
 
-    Avoids ``convert('1')``'s dithering — anything above ``threshold`` becomes
-    white, everything else black. The result is mode ``'1'`` and safe to feed
-    to ``ImageChops.logical_*`` and ``scipy.ndimage.label`` (after going via
+    RGBA render outputs are treated as alpha masks. Non-alpha images fall back
+    to luminance thresholding. The result is mode ``'1'`` and safe to feed to
+    ``ImageChops.logical_*`` and ``scipy.ndimage.label`` (after going via
     numpy).
     """
-    img = img.getchannel('A').point(lambda p: p > 128, mode='1')
-    return img
+    if 'A' in img.getbands():
+        return img.getchannel('A').point(lambda p: p > 128, mode='1')
+    return threshold_mask(img)
+
+
+def threshold_mask(img: Image.Image, threshold: int = 0) -> Image.Image:
+    """Convert an image to a clean 1-bit mask using a luminance threshold.
+
+    Avoids ``convert('1')``'s dithering — pixels above ``threshold`` become
+    white and all others become black.
+    """
+    return img.convert('L').point(lambda p: p > threshold, mode='1')
 
 
 def load_masks(
