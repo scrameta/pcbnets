@@ -394,7 +394,6 @@ def _svg_to_transparent(path_in, path_out, fill="#FFFFFF"):
     header = re.sub(r'<svg\b', '<svg shape-rendering="crispEdges"', header, count=1)    
     body = text[m.end():text.rindex('</svg>')]
     # Snap gerbv's off-black/off-white so luminance hits exactly 0/255.
-    body = body.replace('#010101', '#000000').replace('#FEFEFE', '#FFFFFF')
     vb = re.search(r'viewBox="([\d.eE+-]+)[ ,]+([\d.eE+-]+)[ ,]+'
                    r'([\d.eE+-]+)[ ,]+([\d.eE+-]+)"', header)
     if not vb:
@@ -484,25 +483,68 @@ def _export_one_svg(
     if stdout.strip():
         log.debug('gerbv stdout for %s:\n%s', output.name, stdout.strip())
 
-
 def _rasterise_svg_to_png(svg_path: pathlib.Path, png_path: pathlib.Path,
                           window: tuple[float, float, float, float],
                           dpi: int) -> tuple[int, int]:
-    """Rasterise an SVG layer to a black-background PNG at ``dpi``."""
+    """Rasterise an SVG layer to a 1-bit black-background PNG at ``dpi``."""
     _ox, _oy, w_in, h_in = window
     width = max(1, round(w_in * dpi))
     height = max(1, round(h_in * dpi))
-    subprocess.run(
-        ['rsvg-convert', str(svg_path),
-         '-w', str(width), '-h', str(height),
-         '-b', 'black',
-         '-o', str(png_path)],
-        check=True,
+
+    rsvg = subprocess.Popen(
+        [
+            'rsvg-convert', str(svg_path),
+            '-w', str(width),
+            '-h', str(height),
+            '-b', 'black',
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
+
+    assert rsvg.stdout is not None
+
+    convert = subprocess.Popen(
+        [
+            'convert', 'png:-',
+            '-background', 'black',
+            '-alpha', 'remove',
+            '-alpha', 'off',
+            '-threshold', '50%',
+            '-type', 'bilevel',
+            '-depth', '1',
+            str(png_path),
+        ],
+        stdin=rsvg.stdout,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    # Allow rsvg-convert to receive SIGPIPE if convert exits early.
+    rsvg.stdout.close()
+
+    _convert_stdout, convert_stderr = convert.communicate()
+    _rsvg_stdout, rsvg_stderr = rsvg.communicate()
+
+    if rsvg.returncode != 0:
+        raise subprocess.CalledProcessError(
+            rsvg.returncode,
+            rsvg.args,
+            stderr=rsvg_stderr,
+        )
+
+    if convert.returncode != 0:
+        raise subprocess.CalledProcessError(
+            convert.returncode,
+            convert.args,
+            stderr=convert_stderr,
+        )
+
     if not png_path.exists():
         raise RuntimeError(
             f'SVG rasterizer claimed success but {png_path} was not written'
         )
+
     return width, height
 
 
