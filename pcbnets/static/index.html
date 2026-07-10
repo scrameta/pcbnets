@@ -1,9 +1,8 @@
 <!DOCTYPE html>
-
 <html lang="en">
 <head>
 <meta charset="utf-8"/>
-<meta content="width=device-width, initial-scale=1" name="viewport"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>pcbnets viewer</title>
 <style>
   :root {
@@ -11,1059 +10,1088 @@
     --panel: #242424;
     --fg: #e0e0e0;
     --muted: #888;
-    --accent: #4ac;
-    --highlight: rgba(255, 80, 80, 0.7);
+    --highlight: rgba(255, 80, 80, 0.72);
+    --substrate: #2b2416;
+    --outer-copper: #c79a32;
+    --inner-copper: #a9b0b8;
+    --soldermask: #123d25;
+    --silk: #fff;
+    --drill: #050505;
   }
   * { box-sizing: border-box; }
   html, body {
-    margin: 0; padding: 0;
-    background: var(--bg); color: var(--fg);
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    margin: 0;
     height: 100%;
+    overflow: hidden;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   }
-  body { display: flex; flex-direction: row; }
+  body { display: flex; }
+
   #sidebar {
-    width: 280px; flex-shrink: 0;
-    padding: 16px; background: var(--panel);
-    border-right: 1px solid #333;
+    width: 280px;
+    flex: 0 0 280px;
+    padding: 16px;
     overflow-y: auto;
+    background: var(--panel);
+    border-right: 1px solid #333;
   }
   body.sidebar-collapsed #sidebar { display: none; }
-  #sidebar h1 { font-size: 16px; margin: 0 0 12px; }
-  #sidebar p { font-size: 12px; color: var(--muted); margin: 4px 0; }
-  #sidebar input[type=number], #sidebar input[type=text] {
-    width: 100%; padding: 6px; background: #111; color: var(--fg);
-    border: 1px solid #333; border-radius: 3px; font-family: inherit;
+  #sidebar h1 { margin: 0 0 12px; font-size: 16px; }
+  #sidebar p { margin: 4px 0; color: var(--muted); font-size: 12px; }
+  #sidebar label.section {
+    display: block;
+    margin-top: 12px;
+    color: var(--muted);
+    font-size: 11px;
+    text-transform: uppercase;
   }
-  #sidebar label.section { font-size: 11px; color: var(--muted);
-                   text-transform: uppercase; display: block; margin-top: 12px; }
-  #sidebar button {
-    margin-top: 6px; padding: 6px 10px;
-    background: #333; color: var(--fg);
-    border: 1px solid #444; border-radius: 3px; cursor: pointer;
-    font-family: inherit; font-size: 12px;
+  #sidebar input[type=number] {
+    width: 100%;
+    padding: 6px;
+    color: var(--fg);
+    background: #111;
+    border: 1px solid #333;
+    border-radius: 3px;
+    font: inherit;
   }
-  #sidebar button:hover { background: #444; }
-  #sidebar button.active { background: #2a5a7a; border-color: #4ac; }
-  .toggle-row { display: flex; gap: 6px; flex-wrap: wrap; }
+  button {
+    margin-top: 6px;
+    padding: 6px 10px;
+    color: var(--fg);
+    background: #333;
+    border: 1px solid #444;
+    border-radius: 3px;
+    cursor: pointer;
+    font: inherit;
+    font-size: 12px;
+  }
+  button:hover { background: #444; }
+  button.active { background: #2a5a7a; border-color: #4ac; }
+  .toggle-row { display: flex; flex-wrap: wrap; gap: 6px; }
+  .hint { color: var(--muted); font-size: 11px; line-height: 1.35; }
+  .readout { margin-top: 4px; color: var(--muted); font-size: 11px; }
   #net-info { margin-top: 16px; font-size: 13px; }
-  #net-info .layer-list { color: var(--muted); margin-top: 4px; }
+  #net-info .layer-list { margin-top: 4px; color: var(--muted); }
+  #error { margin-top: 12px; color: #ff9d9d; white-space: pre-wrap; }
+
   #viewport {
-    flex: 1; overflow: auto;
     position: relative;
-    padding: 0;
+    flex: 1;
+    min-width: 0;
+    overflow: auto;
+    background: #050505;
     cursor: crosshair;
     touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-user-drag: none;
     scrollbar-color: #555 #181818;
+  }
+  #viewport *,
+  #viewport svg,
+  #viewport canvas {
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-user-drag: none;
   }
   #viewport.dragging { cursor: move; }
   #sidebar-tab {
-    position: fixed; left: 10px; top: 10px; z-index: 30;
+    position: fixed;
+    z-index: 100;
+    top: 10px;
+    left: 10px;
     display: none;
     padding: 6px 10px;
-    background: rgba(36, 36, 36, 0.9); color: var(--fg);
-    border: 1px solid #444; border-radius: 3px; cursor: pointer;
-    font-family: inherit; font-size: 14px;
+    color: var(--fg);
+    background: rgba(36, 36, 36, .92);
+    border: 1px solid #444;
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 14px;
   }
-  #sidebar-tab:hover { background: rgba(60, 60, 60, 0.95); }
   body.sidebar-collapsed #sidebar-tab { display: block; }
-  .hint { font-size: 11px; color: var(--muted); line-height: 1.35; }
-  .readout { font-size: 11px; color: var(--muted); margin-top: 4px; }
-  .stack {
-    position: absolute; left: 0; top: 0;
-    width: 100%; height: 100%;
-    display: block;
-    transform-origin: 0 0;
-    z-index: 2;
-    pointer-events: none;
+
+  #world {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    min-width: 100%;
+    min-height: 100%;
   }
-  #scroll-spacer {
-    position: absolute; left: 0; top: 0;
-    width: 100%; height: 100%;
-    min-width: 100%; min-height: 100%;
-    pointer-events: none;
-    z-index: 0;
-  }
-  .stack canvas {
-    position: absolute; left: 0; top: 0;
-    width: 100%; height: 100%;
-    display: block;
-  }
-  #display { background: #000; }
-  #highlight, #silk {
-    position: absolute; left: 0; top: 0;
-    width: 100%; height: 100%;
-    pointer-events: none;
-  }
-  #highlight.drag-follow { will-change: transform; }
-  #labels {
-    position: absolute; left: 0; top: 0;
-    width: 100%; height: 100%;
-    pointer-events: none;
-  }
-  #labels .tag {
+  #grid-stage {
     position: absolute;
-    background: rgba(0, 0, 0, 0.75);
-    color: #fff;
-    padding: 2px 6px;
-    font-size: 11px;
-    border-radius: 2px;
+    left: 0;
+    top: 0;
   }
-  #labels .tag.flipped { background: rgba(120, 60, 0, 0.85); }
-  /* The panel grid itself is fitted with a CSS transform.  Mouse-wheel
-     zooming/panning changes the board crop drawn *inside* every panel, so
-     all layer windows stay fixed while their contents move in sync. */
+  #grid-inner {
+    position: absolute;
+    left: 0;
+    top: 0;
+    transform-origin: 0 0;
+  }
+  .tile {
+    position: absolute;
+    overflow: hidden;
+    background: #050505;
+    box-shadow: inset 0 0 0 1px #333;
+    contain: layout paint style;
+  }
+  .tile-board,
+  .tile-preview,
+  .tile-local-preview,
+  .tile-netmap,
+  .tile-net-highlight {
+    position: absolute;
+    left: 0;
+    top: 0;
+    transform-origin: 0 0;
+    will-change: transform;
+  }
+  .tile-board { z-index: 0; pointer-events: none; }
+  .tile-preview,
+  .tile-local-preview {
+    z-index: 10;
+    visibility: hidden;
+    pointer-events: none;
+    image-rendering: auto;
+  }
+  .tile-local-preview { z-index: 11; }
+  .tile-local-preview-canvas {
+    position: absolute;
+    image-rendering: auto;
+    pointer-events: none;
+  }
+  /* The source SVGs may request crispEdges for mask/PNG generation.
+     Override that only for the visible vector artwork so the browser
+     anti-aliases the final display normally. */
+  .tile-board svg,
+  .tile-board svg * {
+    shape-rendering: geometricPrecision !important;
+  }
+  .tile-board > svg,
+  .tile-netmap > svg {
+    position: absolute;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+  }
+  .tile-netmap { z-index: 20; pointer-events: none; }
+  .tile-netmap svg { pointer-events: none; }
+  body.navigating .tile-netmap,
+  body.navigation-settling .tile-netmap { visibility: hidden; }
+  /* Hide the live vector artwork while navigating. During the settling phase
+     each tile's board is revealed one at a time (see
+     revealBoardsProgressively) *underneath* the opaque preview canvases, so
+     the expensive SVG re-raster happens in small per-tile chunks that can be
+     interrupted by a new gesture, instead of one long input-blocking paint. */
+  body.navigating .tile.preview-full-active.preview-ready .tile-board,
+  body.navigating .tile.preview-local-active.local-preview-ready .tile-board,
+  body.navigation-settling .tile.preview-full-active.preview-ready:not(.board-revealed) .tile-board,
+  body.navigation-settling .tile.preview-local-active.local-preview-ready:not(.board-revealed) .tile-board {
+    visibility: hidden;
+  }
+  body.navigating .tile.preview-full-active.preview-ready .tile-preview,
+  body.navigation-settling .tile.preview-full-active.preview-ready .tile-preview {
+    visibility: visible;
+  }
+  body.navigating .tile.preview-local-active.local-preview-ready .tile-local-preview,
+  body.navigation-settling .tile.preview-local-active.local-preview-ready .tile-local-preview {
+    visibility: visible;
+  }
+  .net-shape {
+    fill: transparent;
+    stroke: transparent;
+    pointer-events: all;
+    cursor: crosshair;
+  }
+  /* The selected class on the netmap is bookkeeping; the visible highlight
+     lives in the lightweight .tile-net-highlight overlay, which contains only
+     the selected net's shapes and therefore stays visible (and cheap to
+     transform) while panning and zooming. */
+  .tile-net-highlight {
+    z-index: 21;
+  }
+  .tile-net-highlight,
+  .tile-net-highlight * {
+    pointer-events: none !important;
+  }
+  .tile-net-highlight > svg {
+    position: absolute;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+  }
+  .tile-net-highlight [data-net-id] {
+    fill: var(--highlight) !important;
+    stroke: var(--highlight) !important;
+  }
+  .silk-layer.silk-hidden { display: none; }
+  .tile-label {
+    position: absolute;
+    z-index: 30;
+    padding: 2px 6px;
+    color: #fff;
+    background: rgba(0, 0, 0, .75);
+    border-radius: 2px;
+    font-size: 11px;
+    line-height: 1.3;
+    pointer-events: none;
+    transform-origin: 0 0;
+    white-space: nowrap;
+  }
+  .tile-label.flipped { background: rgba(120, 60, 0, .85); }
 </style>
 </head>
 <body>
 <div id="sidebar">
-<h1>pcbnets viewer</h1>
-<p id="loading">Loading…</p>
-<div id="controls" style="display:none">
-<label class="section">View</label>
-<div class="toggle-row">
-<button id="toggle-fit">Fit screen</button>
-<button id="toggle-flip">View from back</button>
-<button id="toggle-silk" style="display:none">Show silk</button>
-<button id="toggle-sidebar">Hide panel</button>
-</div>
-<label class="section">Tile windows</label>
-<div class="toggle-row">
-<button id="panel-zoom-out">− smaller</button>
-<button id="panel-zoom-fit">Fit windows</button>
-<button id="panel-zoom-in">+ larger</button>
-</div>
-<p id="panel-scale-readout" class="readout"></p>
-<p class="hint">Wheel: zoom board contents. Shift+wheel or +/-: resize the layer windows. If the grid is larger than the viewport, use the native scrollbars. Middle/right drag, or Alt+drag: move the window grid. H hides/shows this panel.</p>
-<label class="section">Find net</label>
-<input id="net-search" min="1" placeholder="net id" type="number"/>
-<label class="section">Layers</label>
-<p id="tile-list"></p>
-<div id="net-info"></div>
-</div>
+  <h1>pcbnets viewer</h1>
+  <p id="loading">Loading…</p>
+  <div id="controls" style="display:none">
+    <label class="section">View</label>
+    <div class="toggle-row">
+      <button id="toggle-fit">Fit screen</button>
+      <button id="toggle-flip">View from back</button>
+      <button id="toggle-silk" style="display:none">Show silk</button>
+      <button id="toggle-sidebar">Hide panel</button>
+    </div>
+
+    <label class="section">Layer windows</label>
+    <div class="toggle-row">
+      <button id="panel-zoom-out">− smaller</button>
+      <button id="panel-zoom-fit">Fit windows</button>
+      <button id="panel-zoom-in">+ larger</button>
+    </div>
+    <p id="panel-scale-readout" class="readout"></p>
+    <p class="hint">Wheel: zoom board contents. Shift+wheel or +/-: resize the layer windows. Middle/right drag, or Alt+drag: move the window grid. H hides/shows this panel.</p>
+
+    <label class="section">Find net</label>
+    <input id="net-search" min="1" placeholder="net id" type="number"/>
+
+    <label class="section">Layers</label>
+    <p id="tile-list"></p>
+    <div id="net-info"><em style="color:var(--muted)">Click a net</em></div>
+    <div id="error"></div>
+  </div>
 </div>
 <div id="viewport">
-<button id="sidebar-tab" title="Show controls" aria-label="Show controls">☰</button>
-<div class="stack">
-<canvas id="display"></canvas>
-<canvas id="silk"></canvas>
-<canvas id="highlight"></canvas>
-<div id="labels"></div>
+  <button id="sidebar-tab" title="Show controls" aria-label="Show controls">☰</button>
+  <div id="world">
+    <div id="grid-stage"><div id="grid-inner"></div></div>
+  </div>
 </div>
-<div id="scroll-spacer" aria-hidden="true"></div>
-</div>
-<canvas id="idmap" style="display:none"></canvas>
+
 <script>
-const display   = document.getElementById('display');
-const highlight = document.getElementById('highlight');
-const silkCanvas = document.getElementById('silk');
-const idmap     = document.getElementById('idmap');
-const labelsDiv = document.getElementById('labels');
-const viewport  = document.getElementById('viewport');
-const stack     = document.querySelector('.stack');
-const scrollSpacer = document.getElementById('scroll-spacer');
+'use strict';
+
+const viewport = document.getElementById('viewport');
+const world = document.getElementById('world');
+const gridStage = document.getElementById('grid-stage');
+const gridInner = document.getElementById('grid-inner');
 const sidebarTab = document.getElementById('sidebar-tab');
 const panelScaleReadout = document.getElementById('panel-scale-readout');
+const errorEl = document.getElementById('error');
 
-let idData = null;
-let netToPixels = null;
 let meta = null;
+let boardW = 0;
+let boardH = 0;
+let gridW = 0;
+let gridH = 0;
+let placements = new Map();
+let layerSources = new Map();
+let netSource = null;
+let netViewBox = null;
+let netElements = new Map();
+let layerNetIds = new Map();
+let highlightSvgs = new Map();
+let selectedNetElements = [];
+let transformElements = [];
+let tileLabelElements = [];
+let tileElements = [];
+let previewBuildGeneration = 0;
+let previewBitmapCache = new Map();
+let localPreviewBuildGeneration = 0;
+let localPreviewBuildTimer = 0;
+let localPreviewBitmapCache = new Map();
+let localPreviewState = null;
+let navigationSettleGeneration = 0;
 let currentNet = null;
-let topSilkImg = null;
-let bottomSilkImg = null;
-let frontMaskImg = null;
-let backMaskImg = null;
-let drillImg = null;
+let lastPick = null;
+
+let contentTransformFrame = 0;
+let scrollAreaFrame = 0;
+let navigationTimer = 0;
+let pointerNavigating = false;
+let panNavigationStarted = false;
+
+let panelScale = 1;
+let panelX = 16;
+let panelY = 16;
+let scrollOriginX = 0;
+let scrollOriginY = 0;
+let lastViewportW = 0;
+let lastViewportH = 0;
+const PANEL_SCALE_MIN = 0.04;
+const PANEL_SCALE_MAX = 8;
+const SCROLL_PAD = 32;
+const PREVIEW_BASE_SCALE = 0.50;
+const PREVIEW_MAX_PIXELS = 8_000_000;
+const LOCAL_PREVIEW_COVERAGE = 2.75;
+const LOCAL_PREVIEW_RESOLUTION_HEADROOM = 2.45;
+const LOCAL_PREVIEW_DPR_MAX = 3;
+const LOCAL_PREVIEW_MAX_DIMENSION = 8192;
+const LOCAL_PREVIEW_MAX_PIXELS = 16_000_000;
+
+// Full-board fallback previews (used when zoomed out or before the local
+// crop is ready) scale with the display's pixel density so they don't look
+// soft on HiDPI screens, within a per-layer pixel budget.
+function fullPreviewScale() {
+  const dpr = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
+  const budget = Math.sqrt(PREVIEW_MAX_PIXELS / Math.max(1, boardW * boardH));
+  return Math.max(0.25, Math.min(1, PREVIEW_BASE_SCALE * dpr, budget));
+}
+const PREVIEW_CSS_VARIABLES = [
+  '--substrate',
+  '--outer-copper',
+  '--inner-copper',
+  '--soldermask',
+  '--silk',
+  '--drill',
+];
+
+let contentZoom = 1;
+let contentPanX = 0;
+let contentPanY = 0;
 let flipped = false;
 let silkOn = true;
 
-// Panel transform: fits/positions the fixed grid of layer windows.
-let panelScale = 1.0;
-let panelX = 16;
-let panelY = 16;
-let lastViewportW = 0;
-let lastViewportH = 0;
-let scrollOriginX = 0;
-let scrollOriginY = 0;
-const PANEL_SCALE_MIN = 0.04;
-const PANEL_SCALE_MAX = 8.0;
-const SCROLL_PAD = 32;
-
-// Shared board viewport drawn inside every panel.
-// contentZoom=1 shows the whole board in each tile.  Larger values crop into
-// the same board coordinate window on all layers.
-let contentZoom = 1.0;
-let contentPanX = 0;
-let contentPanY = 0;
-
 let isPanning = false;
+let isPanelPanning = false;
+let panMoved = false;
 let panStartX = 0;
 let panStartY = 0;
 let panOrigX = 0;
 let panOrigY = 0;
-let isPanelPanning = false;
 let panelPanOrigX = 0;
 let panelPanOrigY = 0;
-let suppressNextClick = false;
-let panMoved = false;
-let currentHighlightPixels = null;
-let netBreakdownCache = new Map();
-let highlightDragDx = 0;
-let highlightDragDy = 0;
-let lastPick = null;
+let pendingPickNet = null;
+let pendingPickLayer = null;
 
-// The source atlas remains full-resolution, but the visible canvases are only
-// viewport-sized. This keeps pan/zoom work proportional to the browser window
-// rather than to huge PNG dimensions.
-let gridW = 0;
-let gridH = 0;
-let renderDpr = 1;
-let redrawPending = false;
-const MAX_DEVICE_PIXEL_RATIO = 2;
+function fail(message) {
+  errorEl.textContent = message;
+  throw new Error(message);
+}
 
-// Server/preprocessor-generated mip levels. By default the viewer looks for:
-//   ./mips/<level>/<name>.png
-// where name is grid, idmap, F_Mask, B_Mask, F_Silkscreen, B_Silkscreen, etc.
-// meta.json may override with:
-//   "mip_levels": [1,2,4,8,16],
-//   "mip_path": "mips/{level}/{name}.png"
-let mipLevels = [1, 2, 4, 8, 16];
-let mipPathTemplate = 'mips/{level}/{name}.png';
+async function fetchText(path, what) {
+  const response = await fetch(path);
+  if (!response.ok) fail(`${what} missing: ${path}`);
+  return response.text();
+}
 
-// Huge high-resolution atlas PNGs are slow to download, decode, and sample
-// from. Use single-image mips for zoomed-out views and tiled mips for the
-// large levels. This version uses a fixed tile *grid* per mip level, not
-// fixed-size 1024px tiles. That matches generators that split level 1 into
-// e.g. 16x16 tiles and level 2 into 8x8 tiles, with edge tiles allowed to be
-// one pixel wider/taller because of rounding. meta.json may override with:
-//   "tiled_levels": [1,2,4,8],
-//   "tile_grids": {"1": [16,16], "2": [8,8], "4": [4,4], "8": [2,2]},
-//   "tile_path": "mips/{level}/tiles/{name}_{tx}_{ty}.png",
-//   "image_dims": {"F_Mask": [10166, 5747]} // optional; otherwise boardDims()
-let tiledLevels = [1, 2, 4, 8];
-let tileGrids = new Map([[1, [16, 16]], [2, [8, 8]], [4, [4, 4]], [8, [2, 2]]]);
-let tilePathTemplate = 'mips/{level}/tiles/{name}_{tx}_{ty}.png';
+async function fetchOptionalText(path) {
+  const response = await fetch(path);
+  if (response.status === 404) return null;
+  if (!response.ok) fail(`Unable to load optional SVG layer: ${path}`);
+  return response.text();
+}
 
-const imageMipCache = new Map();       // key: name:level -> HTMLImageElement | Promise | null
-const idmapMipCache = new Map();       // level -> {level, width, height, data} | {promise}
-const tileImageCache = new Map();      // key: name:level:tx:ty -> HTMLImageElement | Promise | null
-const processedTileCache = new Map();  // key: mode:name:level:tx:ty:colour:alpha -> canvas
-const idmapTileCache = new Map();      // key: level:tx:ty -> {level, tx, ty, width, height, data} | {promise}
-const vectorImageCache = new Map();     // name -> HTMLImageElement | Promise | null
-const INITIAL_MIP_LEVEL = 16;
-const PROGRESSIVE_MIP_ORDER = [16, 8, 4, 2, 1];
+function parseSvg(text, path) {
+  const doc = new DOMParser().parseFromString(text, 'image/svg+xml');
+  if (doc.querySelector('parsererror')) fail(`SVG cannot be parsed: ${path}`);
+  const root = doc.documentElement;
+  if (!root || root.tagName.toLowerCase() !== 'svg') fail(`SVG cannot be parsed: ${path}`);
+  return root;
+}
 
+function svgViewBox(svg, fallbackW, fallbackH) {
+  const raw = svg.getAttribute('viewBox');
+  if (raw) {
+    const values = raw.trim().split(/[\s,]+/).map(Number);
+    if (values.length === 4 && values.every(Number.isFinite) && values[2] > 0 && values[3] > 0) return values;
+  }
+  return [0, 0, fallbackW, fallbackH];
+}
 
-function loadImage(src) {
-  return new Promise((res, rej) => {
-    const i = new Image();
-    i.onload = () => res(i);
-    i.onerror = () => rej(new Error('failed to load ' + src));
-    i.src = src;
+function checkSvgSize(svg, path, width, height) {
+  const vb = svgViewBox(svg, width, height);
+  if (Math.abs(vb[2] - width) > .01 || Math.abs(vb[3] - height) > .01) {
+    fail(`SVG dimensions do not match metadata for ${path}: ${vb[2]}x${vb[3]}, expected ${width}x${height}`);
+  }
+}
+
+function namespaceIds(root, suffix) {
+  const mapping = new Map();
+  if (root.hasAttribute('id')) mapping.set(root.getAttribute('id'), `${root.getAttribute('id')}--${suffix}`);
+  for (const element of root.querySelectorAll('[id]')) {
+    const oldId = element.getAttribute('id');
+    mapping.set(oldId, `${oldId}--${suffix}`);
+  }
+  if (!mapping.size) return;
+
+  const all = [root, ...root.querySelectorAll('*')];
+  for (const element of all) {
+    const id = element.getAttribute('id');
+    if (id && mapping.has(id)) element.setAttribute('id', mapping.get(id));
+    for (const attr of [...element.attributes]) {
+      let value = attr.value;
+      for (const [oldId, newId] of mapping) {
+        value = value.replaceAll(`url(#${oldId})`, `url(#${newId})`);
+        if ((attr.name === 'href' || attr.name === 'xlink:href') && value === `#${oldId}`) value = `#${newId}`;
+      }
+      if (value !== attr.value) element.setAttribute(attr.name, value);
+    }
+  }
+}
+
+function invertGerberMask(root) {
+  const mask = root.querySelector('mask');
+  if (!mask) return;
+  for (const element of mask.querySelectorAll('*')) {
+    for (const attr of ['fill', 'stroke']) {
+      const value = (element.getAttribute(attr) || '').trim().toUpperCase();
+      if (value === '#010101') element.setAttribute(attr, '#FEFEFE');
+      else if (value === '#FEFEFE') element.setAttribute(attr, '#010101');
+    }
+  }
+}
+
+function cloneLayer(name, instance, colour, {invert=false, className=''} = {}) {
+  const source = layerSources.get(name);
+  if (!source) return null;
+  const clone = source.cloneNode(true);
+  namespaceIds(clone, instance);
+  if (invert) invertGerberMask(clone);
+  clone.setAttribute('x', '0');
+  clone.setAttribute('y', '0');
+  clone.setAttribute('width', String(boardW));
+  clone.setAttribute('height', String(boardH));
+  clone.setAttribute('preserveAspectRatio', 'none');
+  clone.style.color = colour;
+  if (className) clone.classList.add(...className.split(/\s+/).filter(Boolean));
+  return clone;
+}
+
+function appendLayer(parent, name, instance, colour, options={}) {
+  const svg = cloneLayer(name, instance, colour, options);
+  if (svg) parent.appendChild(svg);
+  return svg;
+}
+
+function sideOf(name) { return /^B[_-]/i.test(name) ? 'B' : 'F'; }
+function outerLayers() { return meta.outer_layers || ['F_Cu', 'B_Cu']; }
+function isOuter(name) { return outerLayers().includes(name); }
+function frontLayerName() {
+  const layers = meta.layers || [];
+  return layers.find(name => isOuter(name) && sideOf(name) === 'F') || layers[0];
+}
+function backLayerName() {
+  const layers = meta.layers || [];
+  return layers.find(name => isOuter(name) && sideOf(name) === 'B') || layers[layers.length - 1];
+}
+function firstExisting(names) { return names.find(name => layerSources.has(name)) || null; }
+
+function createVisualSvg(layerName, tileIndex) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', `0 0 ${boardW} ${boardH}`);
+  svg.setAttribute('preserveAspectRatio', 'none');
+  svg.setAttribute('aria-hidden', 'true');
+
+  const background = document.createElementNS(svg.namespaceURI, 'rect');
+  background.setAttribute('x', '0');
+  background.setAttribute('y', '0');
+  background.setAttribute('width', String(boardW));
+  background.setAttribute('height', String(boardH));
+  background.setAttribute('fill', isOuter(layerName) ? 'var(--substrate)' : '#050505');
+  svg.appendChild(background);
+
+  appendLayer(svg, layerName, `tile${tileIndex}-copper`, isOuter(layerName) ? 'var(--outer-copper)' : 'var(--inner-copper)');
+
+  const sameSide = sideOf(layerName);
+  const maskName = isOuter(layerName)
+    ? firstExisting((meta.mask_layers || []).filter(name => sideOf(name) === sameSide))
+    : null;
+  if (maskName) {
+    const film = appendLayer(svg, maskName, `tile${tileIndex}-film`, 'var(--soldermask)', {invert:true, className:'mask-layer'});
+    if (film) film.style.opacity = '.94';
+  }
+
+  const silkName = isOuter(layerName)
+    ? firstExisting((meta.silk_layers || []).filter(name => sideOf(name) === sameSide))
+    : null;
+  if (silkName) {
+    const silk = appendLayer(svg, silkName, `tile${tileIndex}-silk`, 'var(--silk)', {className:'silk-layer'});
+    if (silk) {
+      silk.style.opacity = '.92';
+      const defs = document.createElementNS(svg.namespaceURI, 'defs');
+      const keepMask = document.createElementNS(svg.namespaceURI, 'mask');
+      const keepId = `silk-keep-${tileIndex}`;
+      keepMask.setAttribute('id', keepId);
+      keepMask.setAttribute('maskUnits', 'userSpaceOnUse');
+      keepMask.setAttribute('x', '0');
+      keepMask.setAttribute('y', '0');
+      keepMask.setAttribute('width', String(boardW));
+      keepMask.setAttribute('height', String(boardH));
+      const keep = document.createElementNS(svg.namespaceURI, 'rect');
+      keep.setAttribute('width', String(boardW));
+      keep.setAttribute('height', String(boardH));
+      keep.setAttribute('fill', 'white');
+      keepMask.appendChild(keep);
+      if (maskName) appendLayer(keepMask, maskName, `tile${tileIndex}-silk-openings`, 'black');
+      for (const drillName of (meta.drill_layers || [])) {
+        appendLayer(keepMask, drillName, `tile${tileIndex}-silk-drill-${drillName}`, 'black');
+      }
+      defs.appendChild(keepMask);
+      svg.insertBefore(defs, silk);
+      silk.setAttribute('mask', `url(#${keepId})`);
+    }
+  }
+
+  for (const drillName of (meta.drill_layers || [])) {
+    appendLayer(svg, drillName, `tile${tileIndex}-drill-${drillName}`, 'var(--drill)', {className:'drill-layer'});
+  }
+
+  return svg;
+}
+
+function createNetSvg(layerName) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', netViewBox.join(' '));
+  svg.setAttribute('preserveAspectRatio', 'none');
+  svg.setAttribute('data-layer', layerName);
+
+  const group = [...netSource.querySelectorAll('g[data-layer]')]
+    .find(candidate => candidate.dataset.layer === layerName);
+  if (group) svg.appendChild(group.cloneNode(true));
+
+  for (const shape of svg.querySelectorAll('[data-net-id]')) {
+    shape.classList.add('net-shape');
+    shape.dataset.layer = layerName;
+    const id = Number(shape.dataset.netId);
+    if (!Number.isInteger(id) || id < 1 || (meta.n_nets && id > Number(meta.n_nets))) {
+      fail(`Net-map geometry references an invalid net ID: ${shape.dataset.netId}`);
+    }
+    if (!netElements.has(id)) netElements.set(id, []);
+    netElements.get(id).push(shape);
+    if (!layerNetIds.has(layerName)) layerNetIds.set(layerName, new Set());
+    layerNetIds.get(layerName).add(id);
+  }
+  return svg;
+}
+
+function buildPlacements() {
+  placements.clear();
+  const layers = meta.layers || [];
+  const cols = Math.max(1, Math.floor(Number(meta.cols) || 2));
+  const rows = Math.ceil(layers.length / cols);
+  gridW = cols * boardW;
+  gridH = rows * boardH;
+  layers.forEach((name, index) => {
+    const col = index % cols;
+    const row = Math.floor(index / cols);
+    placements.set(name, {x: col * boardW, y: row * boardH, w: boardW, h: boardH, col, row});
   });
 }
 
-async function loadOptional(src) {
-  try { return await loadImage(src); } catch { return null; }
+function buildTiles() {
+  gridInner.innerHTML = '';
+  netElements.clear();
+  layerNetIds.clear();
+  highlightSvgs.clear();
+  selectedNetElements = [];
+  const layers = meta.layers || [];
+  layers.forEach((name, index) => {
+    const placement = placements.get(name);
+    const tile = document.createElement('div');
+    tile.className = 'tile';
+    tile.dataset.layer = name;
+    tile.style.left = `${placement.x}px`;
+    tile.style.top = `${placement.y}px`;
+    tile.style.width = `${boardW}px`;
+    tile.style.height = `${boardH}px`;
+
+    const visual = document.createElement('div');
+    visual.className = 'tile-board';
+    visual.draggable = false;
+    visual.style.width = `${boardW}px`;
+    visual.style.height = `${boardH}px`;
+    visual.appendChild(createVisualSvg(name, index));
+
+    const preview = document.createElement('canvas');
+    preview.className = 'tile-preview';
+    preview.draggable = false;
+    preview.dataset.layer = name;
+    preview.style.width = `${boardW}px`;
+    preview.style.height = `${boardH}px`;
+
+    const localPreview = document.createElement('div');
+    localPreview.className = 'tile-local-preview';
+    localPreview.draggable = false;
+    localPreview.dataset.layer = name;
+    localPreview.style.width = `${boardW}px`;
+    localPreview.style.height = `${boardH}px`;
+    const localCanvas = document.createElement('canvas');
+    localCanvas.className = 'tile-local-preview-canvas';
+    localCanvas.draggable = false;
+    localPreview.appendChild(localCanvas);
+
+    const net = document.createElement('div');
+    net.className = 'tile-netmap';
+    net.draggable = false;
+    net.dataset.layer = name;
+    net.style.width = `${boardW}px`;
+    net.style.height = `${boardH}px`;
+    net.appendChild(createNetSvg(name));
+
+    const highlight = document.createElement('div');
+    highlight.className = 'tile-net-highlight';
+    highlight.draggable = false;
+    highlight.dataset.layer = name;
+    highlight.style.width = `${boardW}px`;
+    highlight.style.height = `${boardH}px`;
+    const highlightSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    highlightSvg.setAttribute('viewBox', netViewBox.join(' '));
+    highlightSvg.setAttribute('preserveAspectRatio', 'none');
+    highlightSvg.setAttribute('aria-hidden', 'true');
+    highlight.appendChild(highlightSvg);
+    highlightSvgs.set(name, highlightSvg);
+
+    const label = document.createElement('div');
+    label.className = 'tile-label';
+    label.dataset.layer = name;
+    label.textContent = name;
+
+    tile.appendChild(visual);
+    tile.appendChild(preview);
+    tile.appendChild(localPreview);
+    tile.appendChild(net);
+    tile.appendChild(highlight);
+    tile.appendChild(label);
+    gridInner.appendChild(tile);
+  });
+  transformElements = [...gridInner.querySelectorAll('.tile-board,.tile-preview,.tile-local-preview,.tile-netmap,.tile-net-highlight')];
+  tileLabelElements = [...gridInner.querySelectorAll('.tile-label')];
+  tileElements = [...gridInner.querySelectorAll('.tile')];
+  updateTileLabels();
+  applyContentTransformNow();
 }
 
-function vectorPath(name) {
-  return './' + name + '.svg';
-}
-
-function requestVectorImage(name) {
-  if (!name) return null;
-  const cached = vectorImageCache.get(name);
-  if (cached instanceof HTMLImageElement || cached === null) return cached;
-  if (cached) return null;
-
-  const promise = loadImage(vectorPath(name))
-    .then(img => {
-      img._pcbnetsName = name;
-      vectorImageCache.set(name, img);
-      redraw();
-      return img;
-    })
-    .catch(() => {
-      vectorImageCache.set(name, null);
-      redraw();
-      return null;
-    });
-  vectorImageCache.set(name, promise);
-  return null;
-}
-
-function vectorImageStatus(name) {
-  const cached = vectorImageCache.get(name);
-  if (cached instanceof HTMLImageElement) return 'loaded';
-  if (cached === null) return 'missing';
-  if (cached) return 'pending';
-  requestVectorImage(name);
-  return 'pending';
-}
-
-async function loadOptionalLayer(available, candidates) {
-  for (const name of candidates) {
-    if (!available.includes(name)) continue;
-    const img = await loadOptional('./' + name + '.png');
-    if (img) {
-      img._pcbnetsName = name;
-      return img;
+function idlePause() {
+  return new Promise(resolve => {
+    if ('requestIdleCallback' in window) {
+      requestIdleCallback(() => resolve(), {timeout: 200});
+    } else {
+      setTimeout(resolve, 0);
     }
+  });
+}
+
+function cssVariable(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+function previewLayerSvgText(name, colour, invert, width, height, viewBox=null) {
+  const source = layerSources.get(name);
+  if (!source) return null;
+  const clone = source.cloneNode(true);
+  if (invert) invertGerberMask(clone);
+  clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+  clone.setAttribute('x', '0');
+  clone.setAttribute('y', '0');
+  clone.setAttribute('width', String(width));
+  clone.setAttribute('height', String(height));
+  clone.setAttribute('preserveAspectRatio', 'none');
+  if (viewBox) clone.setAttribute('viewBox', viewBox.join(' '));
+  clone.style.color = colour;
+
+  // crispEdges is useful for producing binary analysis masks, but it makes
+  // both the browser view and the temporary navigation preview jagged.
+  // Strip local overrides and request normal high-quality SVG rasterisation.
+  for (const element of [clone, ...clone.querySelectorAll('*')]) {
+    element.removeAttribute('shape-rendering');
+    if (element.style) element.style.removeProperty('shape-rendering');
   }
-  return null;
+  clone.setAttribute('shape-rendering', 'geometricPrecision');
+
+  return new XMLSerializer().serializeToString(clone);
 }
 
-async function loadMeta() {
-  const r = await fetch('./meta.json');
-  if (!r.ok) throw new Error('meta.json missing');
-  return r.json();
-}
-
-function configureMipsFromMeta() {
-  if (meta && Array.isArray(meta.mip_levels) && meta.mip_levels.length) {
-    mipLevels = [...new Set(meta.mip_levels.map(Number).filter(n => Number.isFinite(n) && n >= 1))]
-      .sort((a, b) => a - b);
-    if (!mipLevels.includes(1)) mipLevels.unshift(1);
-  }
-  if (meta && typeof meta.mip_path === 'string' && meta.mip_path.length) {
-    mipPathTemplate = meta.mip_path;
-  }
-  if (meta && Array.isArray(meta.tiled_levels)) {
-    tiledLevels = [...new Set(meta.tiled_levels.map(Number).filter(n => Number.isFinite(n) && n >= 1))]
-      .sort((a, b) => a - b);
-  }
-  if (meta && meta.tile_grids && typeof meta.tile_grids === 'object') {
-    const next = new Map();
-    for (const [levelKey, grid] of Object.entries(meta.tile_grids)) {
-      const level = Number(levelKey);
-      if (!Number.isFinite(level) || level < 1) continue;
-      if (!Array.isArray(grid) || grid.length < 2) continue;
-      const gx = Math.max(1, Math.floor(Number(grid[0])));
-      const gy = Math.max(1, Math.floor(Number(grid[1])));
-      if (Number.isFinite(gx) && Number.isFinite(gy)) next.set(level, [gx, gy]);
-    }
-    if (next.size) tileGrids = next;
-  }
-  if (meta && typeof meta.tile_path === 'string' && meta.tile_path.length) {
-    tilePathTemplate = meta.tile_path;
-  }
-}
-
-function mipPath(name, level) {
-  if (level === 1) return './' + name + '.png';
-  const path = mipPathTemplate
-    .replaceAll('{level}', String(level))
-    .replaceAll('{name}', name);
-  return path.startsWith('./') || path.startsWith('/') ? path : './' + path;
-}
-
-function isTiledLevel(level) {
-  return tiledLevels.includes(level);
-}
-
-function sourceFullDims(name) {
-  // grid/idmap are the full panel atlas. Per-layer overlays such as
-  // F_Mask, B_Mask, silkscreen, and drill are single-board images. Their
-  // tiled mips therefore have different dimensions from the grid atlas.
-  if (name === 'grid' || name === 'idmap') {
-    return {w: gridW || 1, h: gridH || 1};
-  }
-
-  if (meta && meta.image_dims && meta.image_dims[name]) {
-    const d = meta.image_dims[name];
-    const w = Number(d[0] ?? d.w);
-    const h = Number(d[1] ?? d.h);
-    if (Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) {
-      return {w, h};
-    }
-  }
-
-  return boardDims();
-}
-
-function mipPixelDimsForName(name, level) {
-  const d = sourceFullDims(name);
-  return {
-    w: Math.max(1, Math.ceil(d.w / level)),
-    h: Math.max(1, Math.ceil(d.h / level)),
-  };
-}
-
-function mipPixelDims(level) {
-  return mipPixelDimsForName('grid', level);
-}
-
-function tileGridForLevel(level) {
-  return tileGrids.get(level) || [1, 1];
-}
-
-function tileBoundsForName(name, level, tx, ty) {
-  const dims = mipPixelDimsForName(name, level);
-  const [gx, gy] = tileGridForLevel(level);
-  if (tx < 0 || ty < 0 || tx >= gx || ty >= gy) return null;
-  const x0 = Math.floor(dims.w * tx / gx);
-  const x1 = Math.floor(dims.w * (tx + 1) / gx);
-  const y0 = Math.floor(dims.h * ty / gy);
-  const y1 = Math.floor(dims.h * (ty + 1) / gy);
-  return {x: x0, y: y0, w: x1 - x0, h: y1 - y0};
-}
-
-function tileBounds(level, tx, ty) {
-  return tileBoundsForName('grid', level, tx, ty);
-}
-
-function tileIndexForMipCoordForName(name, level, mx, my) {
-  const dims = mipPixelDimsForName(name, level);
-  const [gx, gy] = tileGridForLevel(level);
-  const tx = clamp(Math.floor(mx * gx / Math.max(1, dims.w)), 0, gx - 1);
-  const ty = clamp(Math.floor(my * gy / Math.max(1, dims.h)), 0, gy - 1);
-  return {tx, ty};
-}
-
-function tileIndexForMipCoord(level, mx, my) {
-  return tileIndexForMipCoordForName('grid', level, mx, my);
-}
-
-function tilePath(name, level, tx, ty) {
-  const path = tilePathTemplate
-    .replaceAll('{level}', String(level))
-    .replaceAll('{name}', name)
-    .replaceAll('{tx}', String(tx))
-    .replaceAll('{ty}', String(ty));
-  return path.startsWith('./') || path.startsWith('/') ? path : './' + path;
-}
-
-function fullAtlasDimsFromMeta() {
-  if (meta) {
-    const w = meta.full_width || meta.grid_width || meta.atlas_width || meta.width;
-    const h = meta.full_height || meta.grid_height || meta.atlas_height || meta.height;
-    if (Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) {
-      return {w, h};
-    }
-    if (meta.placements) {
-      let maxX = 0;
-      let maxY = 0;
-      for (const p of Object.values(meta.placements)) {
-        if (!p) continue;
-        maxX = Math.max(maxX, (p.x || 0) + (p.w || 0));
-        maxY = Math.max(maxY, (p.y || 0) + (p.h || 0));
-      }
-      if (maxX > 0 && maxY > 0) return {w: maxX, h: maxY};
-    }
-  }
-  return {w: gridW || idmap.width || 1, h: gridH || idmap.height || 1};
-}
-
-function coarsestMipLevel() {
-  return mipLevels.reduce((a, b) => Math.max(a, b), 1);
-}
-
-function initialMipLevel() {
-  const preferred = meta && Number(meta.initial_mip_level);
-  if (Number.isFinite(preferred) && mipLevels.includes(preferred)) return preferred;
-  if (mipLevels.includes(INITIAL_MIP_LEVEL)) return INITIAL_MIP_LEVEL;
-  return coarsestMipLevel();
-}
-
-function layerRef(name) {
-  return {_pcbnetsName: name, _pcbnetsPlaceholder: true};
-}
-
-function loadedImageMip(name, level) {
-  const cached = imageMipCache.get(name + ':' + level);
-  return cached instanceof HTMLImageElement ? cached : null;
-}
-
-function chooseLoadedImageMip(name, desiredLevel, baseImg) {
-  const baseIsImage = baseImg instanceof HTMLImageElement;
-  if (desiredLevel === 1 && baseIsImage) return {img: baseImg, level: 1};
-
-  const exact = loadedImageMip(name, desiredLevel);
-  if (exact) return {img: exact, level: desiredLevel};
-
-  // Prefer an already-loaded coarser image while the ideal one is loading.
-  // This is what lets the viewer show quickly from mips/16 and sharpen later.
-  for (let i = mipLevels.length - 1; i >= 0; i--) {
-    const level = mipLevels[i];
-    if (level >= desiredLevel) {
-      const img = level === 1 && baseIsImage ? baseImg : loadedImageMip(name, level);
-      if (img) return {img, level};
-    }
-  }
-
-  // If no coarser level is loaded, use the sharpest already-loaded one.
-  for (const level of mipLevels) {
-    const img = level === 1 && baseIsImage ? baseImg : loadedImageMip(name, level);
-    if (img) return {img, level};
-  }
-
-  return {img: null, level: desiredLevel};
-}
-
-function optionalLayerRef(available, candidates) {
-  for (const name of candidates) {
-    if (!available.includes(name)) continue;
-    return layerRef(name);
-  }
-  return null;
-}
-
-function chooseMipLevel(effectiveScale) {
-  // effectiveScale is screen pixels per full-resolution source pixel.
-  // Pick the largest precomputed downsample that does not look obviously blurry.
-  if (!Number.isFinite(effectiveScale) || effectiveScale <= 0) return mipLevels[mipLevels.length - 1] || 1;
-  const target = 1 / effectiveScale;
-  let best = 1;
-  for (const level of mipLevels) {
-    if (level <= target * 1.25) best = level;
-  }
-  return best;
-}
-
-function currentMipLevel() {
-  return chooseMipLevel(panelScale * contentZoom);
-}
-
-function requestImageMip(name, level) {
-  if (!name) return null;
-  if (isTiledLevel(level)) return null;
-  const key = name + ':' + level;
-  const cached = imageMipCache.get(key);
-  if (cached instanceof HTMLImageElement || cached === null) return cached;
-  if (cached) return null;
-
-  const promise = loadImage(mipPath(name, level))
-    .then(img => {
-      img._pcbnetsName = name;
-      img._pcbnetsMipLevel = level;
-      imageMipCache.set(key, img);
-      if (name === 'grid' && level === 1) {
-        gridSrcCache = img;
-        gridW = img.width;
-        gridH = img.height;
-      }
-      redraw();
-      return img;
-    })
-    .catch(() => {
-      imageMipCache.set(key, null);
-      return null;
-    });
-  imageMipCache.set(key, promise);
-  return null;
-}
-
-async function loadImageMipNow(name, level) {
-  const existing = loadedImageMip(name, level);
-  if (existing) return existing;
-  const img = await loadImage(mipPath(name, level));
-  img._pcbnetsName = name;
-  img._pcbnetsMipLevel = level;
-  imageMipCache.set(name + ':' + level, img);
-  if (name === 'grid' && level === 1) {
-    gridSrcCache = img;
-    gridW = img.width;
-    gridH = img.height;
-  }
-  return img;
-}
-
-function resolveImageMip(baseImg, name, desiredLevel) {
-  if (!name && baseImg && baseImg._pcbnetsName) name = baseImg._pcbnetsName;
-  if (!name) return {img: baseImg instanceof HTMLImageElement ? baseImg : null, level: 1};
-  if (!isTiledLevel(desiredLevel)) requestImageMip(name, desiredLevel);
-  return chooseLoadedImageMip(name, desiredLevel, baseImg);
-}
-
-function installIdmapMip(level, img) {
-  const c = document.createElement('canvas');
-  c.width = img.width;
-  c.height = img.height;
-  const ctx = c.getContext('2d');
-  ctx.drawImage(img, 0, 0);
-  const data = ctx.getImageData(0, 0, c.width, c.height).data;
-  const result = {level, width: c.width, height: c.height, data};
-  idmapMipCache.set(level, result);
-
-  if (level === 1) {
-    idmap.width = c.width;
-    idmap.height = c.height;
-    idData = {data};
-    buildNetIndex();
-    if (currentNet) {
-      currentHighlightPixels = netToPixels && netToPixels.get(currentNet) || null;
-      updateNetInfo(currentNet);
-    }
-  }
-
-  drawHighlight();
-  return result;
-}
-
-function requestIdmapMip(level) {
-  if (isTiledLevel(level)) return null;
-  const cached = idmapMipCache.get(level);
-  if (cached && cached.data) return cached;
-  if (cached && cached.promise) return null;
-
-  const promise = loadImage(mipPath('idmap', level))
-    .then(img => installIdmapMip(level, img))
-    .catch(() => {
-      idmapMipCache.delete(level);
-      return null;
-    });
-  idmapMipCache.set(level, {promise});
-  return null;
-}
-
-async function loadIdmapMipNow(level) {
-  const cached = idmapMipCache.get(level);
-  if (cached && cached.data) return cached;
-  const img = await loadImage(mipPath('idmap', level));
-  return installIdmapMip(level, img);
-}
-
-function getIdmapForLevel(desiredLevel) {
-  if (!isTiledLevel(desiredLevel)) requestIdmapMip(desiredLevel);
-  const exact = idmapMipCache.get(desiredLevel);
-  if (exact && exact.data) return exact;
-
-  // Prefer an already-loaded coarser idmap while the ideal one is loading.
-  // That makes picking available immediately from mips/16/idmap.png.
-  for (let i = mipLevels.length - 1; i >= 0; i--) {
-    const level = mipLevels[i];
-    const cand = idmapMipCache.get(level);
-    if (level >= desiredLevel && cand && cand.data) return cand;
-  }
-
-  // Otherwise use the sharpest loaded idmap, if any.
-  for (const level of mipLevels) {
-    const cand = idmapMipCache.get(level);
-    if (cand && cand.data) return cand;
-  }
-
-  return null;
-}
-
-function preloadProgressiveMips() {
-  const order = PROGRESSIVE_MIP_ORDER.filter(l => mipLevels.includes(l));
-
-  let delay = 0;
-  for (const level of order) {
-    setTimeout(() => {
-      if (!isTiledLevel(level)) {
-        requestIdmapMip(level);
-      }
-    }, delay);
-    delay += 50;
-  }
-}
-
-async function init() {
+async function decodeSvgPreview(text) {
+  const blob = new Blob([text], {type: 'image/svg+xml'});
+  const url = URL.createObjectURL(blob);
   try {
-    meta = await loadMeta();
-  } catch (e) {
-    meta = null;
+    const image = new Image();
+    image.decoding = 'async';
+    await new Promise((resolve, reject) => {
+      image.onload = resolve;
+      image.onerror = () => reject(new Error('Unable to rasterise SVG navigation preview'));
+      image.src = url;
+    });
+    // Force the rasterisation to complete off the main thread now, rather
+    // than synchronously inside the first drawImage() call.
+    if (image.decode) await image.decode().catch(() => {});
+    return image;
+  } finally {
+    URL.revokeObjectURL(url);
   }
+}
 
-  configureMipsFromMeta();
-
-  const dims = fullAtlasDimsFromMeta();
-  gridW = dims.w;
-  gridH = dims.h;
-
-  const firstLevel = initialMipLevel();
-
-  // Fast first pick/highlight support: load the coarsest useful idmap first.
-  // Visual artwork is SVG-first; avoid loading the visual grid PNG when modern
-  // metadata gives us placement dimensions.
-  const firstLoads = [];
-  if (!meta || !meta.placements) firstLoads.push(loadImageMipNow('grid', firstLevel));
-  if (mipLevels.includes(firstLevel)) firstLoads.push(loadIdmapMipNow(firstLevel));
-
-  const loaded = await Promise.allSettled(firstLoads);
-  const firstGrid = (!meta || !meta.placements) && loaded[0] && loaded[0].status === 'fulfilled' ? loaded[0].value : null;
-  if (firstGrid) {
-    imageMipCache.set('grid:' + firstLevel, firstGrid);
-  } else if (!meta || !meta.placements) {
-    // Last-resort fallback for old exports with no mips directory.
-    const gridImg = await loadImageMipNow('grid', 1);
-    gridSrcCache = gridImg;
-    gridW = gridImg.width;
-    gridH = gridImg.height;
+function previewBitmap(name, colour, invert, width, height, {viewBox=null, cache=previewBitmapCache} = {}) {
+  if (!layerSources.has(name)) return Promise.resolve(null);
+  const viewKey = viewBox ? viewBox.map(value => Number(value).toFixed(5)).join(',') : 'full';
+  const key = `${name}\u0000${colour}\u0000${invert ? 1 : 0}\u0000${width}x${height}\u0000${viewKey}`;
+  if (!cache.has(key)) {
+    const text = previewLayerSvgText(name, colour, invert, width, height, viewBox);
+    cache.set(key, decodeSvgPreview(text).catch(error => {
+      cache.delete(key);
+      throw error;
+    }));
   }
+  return cache.get(key);
+}
 
-  resizeRenderCanvases();
+// A macrotask yield: unlike awaiting a resolved promise (microtask), this
+// lets queued pointer/wheel events be dispatched, so their handlers can bump
+// the build generations and abort the remaining work.
+function yieldToInput() {
+  return new Promise(resolve => setTimeout(resolve, 0));
+}
 
-  // Optional visual overlays are referenced by name and loaded lazily at the
-  // current mip level. This avoids blocking the first display on full-res mask
-  // or silkscreen PNGs.
-  const silkLayers = (meta && meta.silk_layers) || [];
-  topSilkImg = optionalLayerRef(silkLayers, ['F_Silkscreen']);
-  bottomSilkImg = optionalLayerRef(silkLayers, ['B_Silkscreen']);
-
-  const maskLayers = (meta && meta.mask_layers) || [];
-  frontMaskImg = optionalLayerRef(maskLayers, ['F_Mask']);
-  backMaskImg = optionalLayerRef(maskLayers, ['B_Mask']);
-
-  const drillLayers = [];
-  if (meta) {
-    drillLayers.push(...((meta.drill_layers) || []));
-    drillLayers.push(...((meta.hole_layers) || []));
-    drillLayers.push(...((meta.layers) || []));
+async function drawPreviewLayer(ctx, name, colour, {invert=false, viewBox=null, cache=previewBitmapCache, shouldAbort=null} = {}) {
+  const image = await previewBitmap(
+    name,
+    colour,
+    invert,
+    ctx.canvas.width,
+    ctx.canvas.height,
+    {viewBox, cache},
+  );
+  if (!image) return;
+  if (shouldAbort) {
+    await yieldToInput();
+    if (shouldAbort()) return;
   }
-  const pthRef = optionalLayerRef(drillLayers, ['PTH', 'pth']);
-  const npthRef = optionalLayerRef(drillLayers, ['NPTH', 'npth']);
-  if (pthRef || npthRef) {
-    drillImg = [pthRef, npthRef].filter(Boolean);
-  } else {
-    drillImg = optionalLayerRef(drillLayers,
-                               ['drill', 'drills', 'Drill', 'Drills']) || layerRef('drill');
+  ctx.drawImage(image, 0, 0, ctx.canvas.width, ctx.canvas.height);
+}
+
+async function paintTilePreview(canvas, layerName, width, height, {viewBox=null, cache=previewBitmapCache, shouldAbort=null} = {}) {
+  if (canvas.width !== width) canvas.width = width;
+  if (canvas.height !== height) canvas.height = height;
+
+  const ctx = canvas.getContext('2d', {alpha: false});
+  if (!ctx) throw new Error('Unable to create preview canvas context');
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.fillStyle = isOuter(layerName) ? cssVariable('--substrate') : '#050505';
+  ctx.fillRect(0, 0, width, height);
+
+  await drawPreviewLayer(
+    ctx,
+    layerName,
+    isOuter(layerName) ? cssVariable('--outer-copper') : cssVariable('--inner-copper'),
+    {viewBox, cache, shouldAbort},
+  );
+  if (shouldAbort && shouldAbort()) return;
+
+  const sameSide = sideOf(layerName);
+  const maskName = isOuter(layerName)
+    ? firstExisting((meta.mask_layers || []).filter(name => sideOf(name) === sameSide))
+    : null;
+  if (maskName) {
+    ctx.save();
+    ctx.globalAlpha = .94;
+    await drawPreviewLayer(ctx, maskName, cssVariable('--soldermask'), {invert: true, viewBox, cache, shouldAbort});
+    ctx.restore();
   }
+  if (shouldAbort && shouldAbort()) return;
 
-  if (topSilkImg || bottomSilkImg) {
-    document.getElementById('toggle-silk').style.display = 'inline-block';
-  }
+  const silkName = silkOn && isOuter(layerName)
+    ? firstExisting((meta.silk_layers || []).filter(name => sideOf(name) === sameSide))
+    : null;
+  if (silkName) {
+    const silkCanvas = document.createElement('canvas');
+    silkCanvas.width = width;
+    silkCanvas.height = height;
+    const silkCtx = silkCanvas.getContext('2d');
+    if (!silkCtx) throw new Error('Unable to create silk preview canvas context');
+    silkCtx.imageSmoothingEnabled = true;
+    silkCtx.imageSmoothingQuality = 'high';
+    await drawPreviewLayer(silkCtx, silkName, cssVariable('--silk'), {viewBox, cache, shouldAbort});
 
-  populateSidebar();
-
-  document.getElementById('loading').style.display = 'none';
-  document.getElementById('controls').style.display = 'block';
-  try {
-    if (localStorage.getItem('pcbnets.sidebarCollapsed') === '1') {
-      document.body.classList.add('sidebar-collapsed');
+    silkCtx.globalCompositeOperation = 'destination-out';
+    if (maskName) await drawPreviewLayer(silkCtx, maskName, '#000', {viewBox, cache, shouldAbort});
+    for (const drillName of (meta.drill_layers || [])) {
+      await drawPreviewLayer(silkCtx, drillName, '#000', {viewBox, cache, shouldAbort});
     }
-  } catch {}
-  applyToggleStates();
-  fitToScreen();
+    silkCtx.globalCompositeOperation = 'source-over';
+    if (shouldAbort && shouldAbort()) return;
 
-  preloadProgressiveMips();
+    ctx.save();
+    ctx.globalAlpha = .92;
+    ctx.drawImage(silkCanvas, 0, 0);
+    ctx.restore();
+  }
+
+  for (const drillName of (meta.drill_layers || [])) {
+    await drawPreviewLayer(ctx, drillName, cssVariable('--drill'), {viewBox, cache, shouldAbort});
+  }
 }
 
-function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
-
-function escapeHtml(value) {
-  return String(value)
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#39;');
+async function buildTilePreview(tile, generation) {
+  const canvas = tile.querySelector('.tile-preview');
+  if (!canvas) return;
+  const scale = fullPreviewScale();
+  const width = Math.max(1, Math.round(boardW * scale));
+  const height = Math.max(1, Math.round(boardH * scale));
+  await paintTilePreview(canvas, tile.dataset.layer, width, height,
+    {shouldAbort: () => generation !== previewBuildGeneration});
+  if (generation === previewBuildGeneration) tile.classList.add('preview-ready');
 }
 
-function resizeRenderCanvases() {
-  const cssW = Math.max(1, viewport.clientWidth);
-  const cssH = Math.max(1, viewport.clientHeight);
-  renderDpr = Math.max(1, Math.min(MAX_DEVICE_PIXEL_RATIO,
-                                   window.devicePixelRatio || 1));
-  const w = Math.round(cssW * renderDpr);
-  const h = Math.round(cssH * renderDpr);
-  for (const c of [display, silkCanvas, highlight]) {
-    if (c.width !== w || c.height !== h) {
-      c.width = w;
-      c.height = h;
+async function buildNavigationPreviews(generation) {
+  for (const tile of gridInner.querySelectorAll('.tile')) {
+    if (generation !== previewBuildGeneration) return;
+    await idlePause();
+    if (generation !== previewBuildGeneration) return;
+    try {
+      await buildTilePreview(tile, generation);
+    } catch (error) {
+      console.warn(`Unable to build navigation preview for ${tile.dataset.layer}:`, error);
     }
-    c.style.width = cssW + 'px';
-    c.style.height = cssH + 'px';
   }
 }
 
-function beginCanvasFrame(canvas, fillStyle = null) {
-  resizeRenderCanvases();
-  const ctx = canvas.getContext('2d');
-  ctx.setTransform(renderDpr, 0, 0, renderDpr, 0, 0);
-  if (fillStyle) {
-    ctx.fillStyle = fillStyle;
-    ctx.fillRect(0, 0, viewport.clientWidth, viewport.clientHeight);
-  } else {
-    ctx.clearRect(0, 0, viewport.clientWidth, viewport.clientHeight);
-  }
-  return ctx;
+function schedulePreviewRebuild() {
+  const generation = ++previewBuildGeneration;
+  for (const tile of gridInner.querySelectorAll('.tile')) tile.classList.remove('preview-ready');
+  void buildNavigationPreviews(generation);
 }
 
-function tileScreenRect(p) {
+
+function currentBoardCrop() {
+  clampContentPan();
   return {
-    x: panelX - scrollOriginX - viewport.scrollLeft + p.x * panelScale,
-    y: panelY - scrollOriginY - viewport.scrollTop + p.y * panelScale,
-    w: p.w * panelScale,
-    h: p.h * panelScale,
+    x: contentPanX,
+    y: contentPanY,
+    w: boardW / contentZoom,
+    h: boardH / contentZoom,
   };
 }
 
-function rectVisible(r) {
-  return r.x < viewport.clientWidth && r.y < viewport.clientHeight &&
-         r.x + r.w > 0 && r.y + r.h > 0;
-}
+function computeLocalPreviewSpec() {
+  const visible = currentBoardCrop();
+  const w = Math.min(boardW, visible.w * LOCAL_PREVIEW_COVERAGE);
+  const h = Math.min(boardH, visible.h * LOCAL_PREVIEW_COVERAGE);
+  const centreX = visible.x + visible.w / 2;
+  const centreY = visible.y + visible.h / 2;
+  const x = clamp(centreX - w / 2, 0, Math.max(0, boardW - w));
+  const y = clamp(centreY - h / 2, 0, Math.max(0, boardH - h));
 
-function drawImageToTile(ctx, img, crop, p, mirror, sourceLevel = 1) {
-  const r = tileScreenRect(p);
-  if (!img || !rectVisible(r)) return;
-  const sc = {
-    x: crop.x / sourceLevel,
-    y: crop.y / sourceLevel,
-    w: crop.w / sourceLevel,
-    h: crop.h / sourceLevel,
+  const dpr = Math.min(LOCAL_PREVIEW_DPR_MAX, Math.max(1, window.devicePixelRatio || 1));
+  const requestedScale = panelScale * contentZoom * dpr * LOCAL_PREVIEW_RESOLUTION_HEADROOM;
+  let pixelWidth = Math.max(1, Math.round(w * requestedScale));
+  let pixelHeight = Math.max(1, Math.round(h * requestedScale));
+  let reduction = Math.min(
+    1,
+    LOCAL_PREVIEW_MAX_DIMENSION / pixelWidth,
+    LOCAL_PREVIEW_MAX_DIMENSION / pixelHeight,
+    Math.sqrt(LOCAL_PREVIEW_MAX_PIXELS / Math.max(1, pixelWidth * pixelHeight)),
+  );
+  if (!Number.isFinite(reduction) || reduction <= 0) reduction = 1;
+  pixelWidth = Math.max(1, Math.floor(pixelWidth * reduction));
+  pixelHeight = Math.max(1, Math.floor(pixelHeight * reduction));
+
+  return {
+    x, y, w, h,
+    pixelWidth,
+    pixelHeight,
+    pixelScale: Math.min(pixelWidth / w, pixelHeight / h),
   };
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(r.x, r.y, r.w, r.h);
-  ctx.clip();
-  if (mirror) {
-    ctx.translate(r.x + r.w, r.y);
-    ctx.scale(-1, 1);
-    ctx.drawImage(img, sc.x, sc.y, sc.w, sc.h, 0, 0, r.w, r.h);
-  } else {
-    ctx.drawImage(img, sc.x, sc.y, sc.w, sc.h, r.x, r.y, r.w, r.h);
-  }
-  ctx.restore();
 }
 
-function requestTileImage(name, level, tx, ty) {
-  if (!tileBoundsForName(name, level, tx, ty)) return null;
-  const key = `${name}:${level}:${tx}:${ty}`;
-  const cached = tileImageCache.get(key);
-  if (cached instanceof HTMLImageElement || cached === null) return cached;
-  if (cached) return null;
+function localPreviewCoversCurrentView() {
+  const state = localPreviewState;
+  if (!state) return false;
+  const visible = currentBoardCrop();
+  const epsilon = 1e-4;
+  if (visible.x < state.x - epsilon || visible.y < state.y - epsilon ||
+      visible.x + visible.w > state.x + state.w + epsilon ||
+      visible.y + visible.h > state.y + state.h + epsilon) return false;
 
-  const promise = loadImage(tilePath(name, level, tx, ty))
-    .then(img => {
-      img._pcbnetsName = name;
-      img._pcbnetsMipLevel = level;
-      img._pcbnetsTileX = tx;
-      img._pcbnetsTileY = ty;
-      tileImageCache.set(key, img);
-      redraw();
-      return img;
-    })
-    .catch(() => {
-      tileImageCache.set(key, null);
-      return null;
-    });
-  tileImageCache.set(key, promise);
-  return null;
+  const dpr = Math.min(LOCAL_PREVIEW_DPR_MAX, Math.max(1, window.devicePixelRatio || 1));
+  const requiredPixelScale = panelScale * contentZoom * dpr;
+  return requiredPixelScale <= state.pixelScale * 1.08;
 }
 
-function processTile(img, name, level, tx, ty, mode, colour, alpha) {
-  if (!img || mode === 'raw') return img;
-  const key = `${mode}:${name}:${level}:${tx}:${ty}:${colour}:${alpha}`;
-  if (processedTileCache.has(key)) return processedTileCache.get(key);
-
-  const off = document.createElement('canvas');
-  off.width = img.width;
-  off.height = img.height;
-  const octx = off.getContext('2d');
-  octx.drawImage(img, 0, 0);
-
-  const [r, g, b] = parseHexColour(colour);
-  const id = octx.getImageData(0, 0, off.width, off.height);
-  for (let i = 0; i < id.data.length; i += 4) {
-    const v = Math.max(id.data[i], id.data[i + 1], id.data[i + 2]);
-    const a = mode === 'maskfilm' ? (255 - v) : v;
-    id.data[i]     = r;
-    id.data[i + 1] = g;
-    id.data[i + 2] = b;
-    id.data[i + 3] = Math.round(a * alpha);
+function clearNavigationPreviewChoice() {
+  for (const tile of tileElements) {
+    tile.classList.remove('preview-local-active', 'preview-full-active');
   }
-  octx.putImageData(id, 0, 0);
-  processedTileCache.set(key, off);
-  return off;
 }
 
-function drawTiledProcessed(ctx, name, level, p, localCrop, mirror, mode, colour, alpha, sourceOffsetX = 0, sourceOffsetY = 0, replaceExisting = false) {
-  const r = tileScreenRect(p);
-  if (!rectVisible(r)) return;
-
-  const sx0 = (sourceOffsetX + localCrop.x) / level;
-  const sy0 = (sourceOffsetY + localCrop.y) / level;
-  const sx1 = (sourceOffsetX + localCrop.x + localCrop.w) / level;
-  const sy1 = (sourceOffsetY + localCrop.y + localCrop.h) / level;
-  const [gx, gy] = tileGridForLevel(level);
-
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(r.x, r.y, r.w, r.h);
-  ctx.clip();
-  if (mirror) {
-    ctx.translate(r.x + r.w, r.y);
-    ctx.scale(-1, 1);
+function updateNavigationPreviewChoice() {
+  const useLocal = localPreviewCoversCurrentView();
+  for (const tile of tileElements) {
+    tile.classList.remove('preview-local-active', 'preview-full-active');
+    if (useLocal && tile.classList.contains('local-preview-ready')) {
+      tile.classList.add('preview-local-active');
+    } else if (tile.classList.contains('preview-ready')) {
+      tile.classList.add('preview-full-active');
+    }
   }
+}
 
-  // Tile grids are small at the levels we tile (for example 16x16 at level 1,
-  // 8x8 at level 2, 4x4 at level 4, and 2x2 at level 8), so iterating the grid is
-  // simpler and safer than trying to infer fixed-size tile numbers. This also
-  // clamps requests to existing tile coordinates, preventing grid_14_8.png-style
-  // 404s.
-  for (let ty = 0; ty < gy; ty++) {
-    for (let tx = 0; tx < gx; tx++) {
-      const b = tileBoundsForName(name, level, tx, ty);
-      if (!b) continue;
-      const ix0 = Math.max(sx0, b.x);
-      const iy0 = Math.max(sy0, b.y);
-      const ix1 = Math.min(sx1, b.x + b.w);
-      const iy1 = Math.min(sy1, b.y + b.h);
-      if (ix1 <= ix0 || iy1 <= iy0) continue;
+function cancelLocalPreviewBuild() {
+  localPreviewBuildGeneration += 1;
+  if (localPreviewBuildTimer) {
+    clearTimeout(localPreviewBuildTimer);
+    localPreviewBuildTimer = 0;
+  }
+}
 
-      const raw = requestTileImage(name, level, tx, ty);
-      if (!(raw instanceof HTMLImageElement)) continue;
-      const img = processTile(raw, name, level, tx, ty, mode, colour, alpha);
-
-      const localX0 = ix0 * level - sourceOffsetX;
-      const localY0 = iy0 * level - sourceOffsetY;
-      const localX1 = ix1 * level - sourceOffsetX;
-      const localY1 = iy1 * level - sourceOffsetY;
-      const nx0 = (localX0 - localCrop.x) / localCrop.w;
-      const ny0 = (localY0 - localCrop.y) / localCrop.h;
-      const nx1 = (localX1 - localCrop.x) / localCrop.w;
-      const ny1 = (localY1 - localCrop.y) / localCrop.h;
-
-      const dx = mirror ? nx0 * r.w : r.x + nx0 * r.w;
-      const dy = mirror ? ny0 * r.h : r.y + ny0 * r.h;
-      const dw = (nx1 - nx0) * r.w;
-      const dh = (ny1 - ny0) * r.h;
-
-      // If this tiled layer is replacing a coarse alpha fallback, clear only
-      // this tile's destination region in the transparent layer canvas before
-      // drawing the sharper tile. Doing that in an offscreen layer avoids
-      // compositing semi-transparent copper/mask/silk twice over the board.
-      if (replaceExisting) {
-        ctx.clearRect(dx, dy, dw, dh);
-      }
-
-      // If the tile dimensions differ from the ideal mathematical split by a
-      // pixel, scale source coordinates into the actual image size.
-      const imgScaleX = img.width / Math.max(1, b.w);
-      const imgScaleY = img.height / Math.max(1, b.h);
-      ctx.drawImage(img,
-                    (ix0 - b.x) * imgScaleX,
-                    (iy0 - b.y) * imgScaleY,
-                    (ix1 - ix0) * imgScaleX,
-                    (iy1 - iy0) * imgScaleY,
-                    dx, dy, dw, dh);
+async function buildLocalNavigationPreviews(spec, generation) {
+  const rendered = [];
+  localPreviewBitmapCache = new Map();
+  for (const tile of tileElements) {
+    if (generation !== localPreviewBuildGeneration) return;
+    await idlePause();
+    if (generation !== localPreviewBuildGeneration) return;
+    const canvas = document.createElement('canvas');
+    try {
+      await paintTilePreview(
+        canvas,
+        tile.dataset.layer,
+        spec.pixelWidth,
+        spec.pixelHeight,
+        {
+          viewBox: [spec.x, spec.y, spec.w, spec.h],
+          cache: localPreviewBitmapCache,
+          shouldAbort: () => generation !== localPreviewBuildGeneration,
+        },
+      );
+      if (generation !== localPreviewBuildGeneration) return;
+      rendered.push([tile, canvas]);
+    } catch (error) {
+      console.warn(`Unable to build local navigation preview for ${tile.dataset.layer}:`, error);
+      return;
     }
   }
 
-  ctx.restore();
-}
+  if (generation !== localPreviewBuildGeneration ||
+      document.body.classList.contains('navigating') ||
+      document.body.classList.contains('navigation-settling')) return;
 
-
-function drawTiledProcessedWithFallback(ctx, name, level, p, localCrop, mirror, mode, colour, alpha, sourceOffsetX = 0, sourceOffsetY = 0, fallbackImg = null, fallbackSourceLevel = 1) {
-  const r = tileScreenRect(p);
-  if (!rectVisible(r)) return;
-
-  // Without a fallback source, keep the previous exact-only tiled behaviour.
-  if (!fallbackImg) {
-    drawTiledProcessed(ctx, name, level, p, localCrop, mirror,
-                       mode, colour, alpha, sourceOffsetX, sourceOffsetY);
-    return;
+  for (const [tile, sourceCanvas] of rendered) {
+    if (generation !== localPreviewBuildGeneration) return;
+    const target = tile.querySelector('.tile-local-preview-canvas');
+    if (!target) continue;
+    target.width = sourceCanvas.width;
+    target.height = sourceCanvas.height;
+    target.style.left = `${spec.x}px`;
+    target.style.top = `${spec.y}px`;
+    target.style.width = `${spec.w}px`;
+    target.style.height = `${spec.h}px`;
+    const ctx = target.getContext('2d', {alpha: false});
+    if (!ctx) continue;
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.clearRect(0, 0, target.width, target.height);
+    ctx.drawImage(sourceCanvas, 0, 0);
+    tile.classList.add('local-preview-ready');
   }
-
-  // Compose this semi-transparent visual layer into an offscreen tile-sized
-  // transparent canvas. The coarse fallback is drawn first; loaded high-res
-  // tiles then clear and replace their own destination rectangles. The finished
-  // layer is finally alpha-composited onto the real board exactly once.
-  const layer = document.createElement('canvas');
-  layer.width = Math.max(1, Math.ceil(r.w * renderDpr));
-  layer.height = Math.max(1, Math.ceil(r.h * renderDpr));
-  const lctx = layer.getContext('2d');
-  lctx.setTransform(renderDpr, 0, 0, renderDpr, -r.x * renderDpr, -r.y * renderDpr);
-
-  drawImageToTile(lctx, fallbackImg, localCrop, p, mirror, fallbackSourceLevel);
-  drawTiledProcessed(lctx, name, level, p, localCrop, mirror,
-                     mode, colour, alpha, sourceOffsetX, sourceOffsetY,
-                     true);
-
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(r.x, r.y, r.w, r.h);
-  ctx.clip();
-  ctx.drawImage(layer, r.x, r.y, layer.width / renderDpr, layer.height / renderDpr);
-  ctx.restore();
+  localPreviewState = spec;
 }
 
-function requestIdmapTile(level, tx, ty) {
-  if (!tileBoundsForName('idmap', level, tx, ty)) return null;
-  const key = `${level}:${tx}:${ty}`;
-  const cached = idmapTileCache.get(key);
-  if (cached && cached.data) return cached;
-  if (cached && cached.promise) return null;
-
-  const promise = loadImage(tilePath('idmap', level, tx, ty))
-    .then(img => {
-      const c = document.createElement('canvas');
-      c.width = img.width;
-      c.height = img.height;
-      const cctx = c.getContext('2d');
-      cctx.drawImage(img, 0, 0);
-      const result = {
-        level, tx, ty, width: c.width, height: c.height,
-        data: cctx.getImageData(0, 0, c.width, c.height).data
-      };
-      idmapTileCache.set(key, result);
-      drawHighlight();
-      return result;
-    })
-    .catch(() => {
-      idmapTileCache.set(key, null);
-      return null;
-    });
-  idmapTileCache.set(key, {promise});
-  return null;
+function scheduleLocalPreviewRebuild(delay=90) {
+  cancelLocalPreviewBuild();
+  const generation = localPreviewBuildGeneration;
+  localPreviewBuildTimer = window.setTimeout(() => {
+    localPreviewBuildTimer = 0;
+    if (generation !== localPreviewBuildGeneration ||
+        document.body.classList.contains('navigating') ||
+        document.body.classList.contains('navigation-settling')) return;
+    const spec = computeLocalPreviewSpec();
+    void buildLocalNavigationPreviews(spec, generation);
+  }, delay);
 }
 
-
-function applyViewTransform() {
-  // The canvases are viewport-sized and are redrawn in visible viewport
-  // coordinates. If #viewport is scrolled, the scroll container would normally
-  // move the canvas layer away; this translation pins the drawing layer back to
-  // the visible scrollport while the virtual scroll area underneath supplies
-  // native scrollbars.
-  stack.style.transform = `translate(${viewport.scrollLeft}px, ${viewport.scrollTop}px)`;
-}
-
-function boardDims() {
-  if (!meta || !meta.placements) return {w: gridW || idmap.width, h: gridH || idmap.height};
-  const names = meta.layers || Object.keys(meta.placements || {});
-  for (const name of names) {
-    const p = meta.placements[name];
-    if (p) return {w: p.w, h: p.h};
+function invalidateLocalPreview() {
+  cancelLocalPreviewBuild();
+  localPreviewState = null;
+  for (const tile of tileElements) {
+    tile.classList.remove('local-preview-ready', 'preview-local-active');
   }
-  const first = Object.values(meta.placements)[0];
-  return first ? {w: first.w, h: first.h} : {w: gridW || idmap.width, h: gridH || idmap.height};
 }
+
+function clamp(value, low, high) { return Math.max(low, Math.min(high, value)); }
 
 function clampContentPan() {
-  const d = boardDims();
-  const cropW = d.w / contentZoom;
-  const cropH = d.h / contentZoom;
-  contentPanX = clamp(contentPanX, 0, Math.max(0, d.w - cropW));
-  contentPanY = clamp(contentPanY, 0, Math.max(0, d.h - cropH));
+  const cropW = boardW / contentZoom;
+  const cropH = boardH / contentZoom;
+  contentPanX = clamp(contentPanX, 0, Math.max(0, boardW - cropW));
+  contentPanY = clamp(contentPanY, 0, Math.max(0, boardH - cropH));
 }
 
-function rememberViewportSize() {
-  lastViewportW = Math.max(1, viewport.clientWidth);
-  lastViewportH = Math.max(1, viewport.clientHeight);
+function contentMatrix() {
+  clampContentPan();
+  if (!flipped) {
+    return `matrix(${contentZoom},0,0,${contentZoom},${-contentPanX * contentZoom},${-contentPanY * contentZoom})`;
+  }
+  const cropW = boardW / contentZoom;
+  return `matrix(${-contentZoom},0,0,${contentZoom},${(contentPanX + cropW) * contentZoom},${-contentPanY * contentZoom})`;
+}
+
+function applyContentTransformNow() {
+  const matrix = contentMatrix();
+  for (const element of transformElements) element.style.transform = matrix;
+  if (document.body.classList.contains('navigating') ||
+      document.body.classList.contains('navigation-settling')) {
+    updateNavigationPreviewChoice();
+  }
+}
+
+function scheduleContentTransform() {
+  if (contentTransformFrame) return;
+  contentTransformFrame = requestAnimationFrame(() => {
+    contentTransformFrame = 0;
+    applyContentTransformNow();
+  });
+}
+
+function updateTileLabels() {
+  const inverse = 1 / Math.max(.001, panelScale);
+  for (const label of tileLabelElements) {
+    label.classList.toggle('flipped', flipped);
+    label.textContent = label.dataset.layer + (flipped ? ' ⟲ (back view)' : '');
+    label.style.left = `${6 * inverse}px`;
+    label.style.top = `${6 * inverse}px`;
+    label.style.transform = `scale(${inverse})`;
+  }
 }
 
 function fittedPanelScale() {
-  if (!gridW || !gridH) return 1.0;
-  const pad = 16;
-  const vw = Math.max(1, viewport.clientWidth - 2 * pad);
-  const vh = Math.max(1, viewport.clientHeight - 2 * pad);
-  const s = Math.min(1.0, vw / gridW, vh / gridH);
-  return Number.isFinite(s) && s > 0 ? s : 1.0;
+  if (!gridW || !gridH) return 1;
+  const padding = 16;
+  const vw = Math.max(1, viewport.clientWidth - 2 * padding);
+  const vh = Math.max(1, viewport.clientHeight - 2 * padding);
+  const value = Math.min(1, vw / gridW, vh / gridH);
+  return Number.isFinite(value) && value > 0 ? value : 1;
 }
 
 function updatePanelScaleReadout() {
-  if (!panelScaleReadout) return;
   const fit = fittedPanelScale();
-  const rel = fit > 0 ? panelScale / fit : 1;
-  panelScaleReadout.textContent = `Window size: ${(rel * 100).toFixed(0)}% of fit (${(panelScale * 100).toFixed(1)}% source scale)`;
+  const relative = fit > 0 ? panelScale / fit : 1;
+  panelScaleReadout.textContent = `Window size: ${(relative * 100).toFixed(0)}% of fit (${(panelScale * 100).toFixed(1)}% source scale)`;
 }
 
-function updateScrollArea(preserveView = true) {
-  if (!scrollSpacer || !gridW || !gridH) return;
-
+function updateScrollArea(preserveView=true) {
+  if (!gridW || !gridH) return;
   const oldOriginX = scrollOriginX;
   const oldOriginY = scrollOriginY;
   const oldScrollLeft = viewport.scrollLeft;
@@ -1073,34 +1101,32 @@ function updateScrollArea(preserveView = true) {
   const minY = Math.min(0, panelY) - SCROLL_PAD;
   const maxX = Math.max(viewport.clientWidth, panelX + gridW * panelScale) + SCROLL_PAD;
   const maxY = Math.max(viewport.clientHeight, panelY + gridH * panelScale) + SCROLL_PAD;
-
   scrollOriginX = minX;
   scrollOriginY = minY;
 
-  const spacerW = Math.max(viewport.clientWidth, Math.ceil(maxX - minX));
-  const spacerH = Math.max(viewport.clientHeight, Math.ceil(maxY - minY));
-  scrollSpacer.style.width = spacerW + 'px';
-  scrollSpacer.style.height = spacerH + 'px';
+  world.style.width = `${Math.max(viewport.clientWidth, Math.ceil(maxX - minX))}px`;
+  world.style.height = `${Math.max(viewport.clientHeight, Math.ceil(maxY - minY))}px`;
+  gridStage.style.left = `${panelX - scrollOriginX}px`;
+  gridStage.style.top = `${panelY - scrollOriginY}px`;
+  gridStage.style.width = `${gridW * panelScale}px`;
+  gridStage.style.height = `${gridH * panelScale}px`;
+  gridInner.style.width = `${gridW}px`;
+  gridInner.style.height = `${gridH}px`;
+  gridInner.style.transform = `scale(${panelScale})`;
 
   if (preserveView) {
     viewport.scrollLeft = Math.max(0, oldScrollLeft + oldOriginX - scrollOriginX);
     viewport.scrollTop = Math.max(0, oldScrollTop + oldOriginY - scrollOriginY);
   }
-
-  applyViewTransform();
+  updateTileLabels();
 }
 
-function cancelActiveDrag() {
-  if (!isPanning && !isPanelPanning) return;
-  isPanning = false;
-  isPanelPanning = false;
-  panMoved = false;
-  viewport.classList.remove('dragging');
-  finishHighlightDragTransform();
-}
-
-function isUiEventTarget(target) {
-  return target && target.closest && target.closest('button,input,select,textarea,a,label');
+function scheduleScrollArea() {
+  if (scrollAreaFrame) return;
+  scrollAreaFrame = requestAnimationFrame(() => {
+    scrollAreaFrame = 0;
+    updateScrollArea(true);
+  });
 }
 
 function centerPanelGrid() {
@@ -1108,72 +1134,194 @@ function centerPanelGrid() {
   panelY = Math.round((viewport.clientHeight - gridH * panelScale) / 2);
 }
 
-function setPanelScaleAt(clientX, clientY, newScale) {
-  if (!gridW || !gridH) return;
-  const rect = viewport.getBoundingClientRect();
-  const ax = clientX - rect.left;
-  const ay = clientY - rect.top;
-  const worldX = ax + viewport.scrollLeft + scrollOriginX;
-  const worldY = ay + viewport.scrollTop + scrollOriginY;
-  const boardX = (worldX - panelX) / Math.max(0.001, panelScale);
-  const boardY = (worldY - panelY) / Math.max(0.001, panelScale);
-
-  panelScale = clamp(newScale, PANEL_SCALE_MIN, PANEL_SCALE_MAX);
-  panelX = worldX - boardX * panelScale;
-  panelY = worldY - boardY * panelScale;
-  updateScrollArea(true);
-  updatePanelScaleReadout();
-  redraw();
-}
-
-function setPanelScaleAroundCentre(newScale) {
-  const rect = viewport.getBoundingClientRect();
-  setPanelScaleAt(rect.left + viewport.clientWidth / 2,
-                  rect.top + viewport.clientHeight / 2,
-                  newScale);
+function rememberViewportSize() {
+  lastViewportW = Math.max(1, viewport.clientWidth);
+  lastViewportH = Math.max(1, viewport.clientHeight);
 }
 
 function fitPanelWindows() {
-  if (!gridW || !gridH) return;
-  resizeRenderCanvases();
   panelScale = fittedPanelScale();
   centerPanelGrid();
   rememberViewportSize();
   updateScrollArea(false);
   viewport.scrollLeft = Math.max(0, -scrollOriginX);
   viewport.scrollTop = Math.max(0, -scrollOriginY);
-  applyViewTransform();
   updatePanelScaleReadout();
-  redraw();
+  scheduleLocalPreviewRebuild();
 }
 
 function fitToScreen() {
-  if (!gridW || !gridH) return;
   fitPanelWindows();
-  contentZoom = 1.0;
+  contentZoom = 1;
   contentPanX = 0;
   contentPanY = 0;
-  redraw();
+  scheduleContentTransform();
+  scheduleLocalPreviewRebuild();
 }
 
-function handleViewportGeometryChange(oldW = lastViewportW, oldH = lastViewportH) {
-  resizeRenderCanvases();
-  const newW = Math.max(1, viewport.clientWidth);
-  const newH = Math.max(1, viewport.clientHeight);
-  if (oldW > 0 && oldH > 0) {
-    panelX += (newW - oldW) / 2;
-    panelY += (newH - oldH) / 2;
-  } else if (gridW && gridH) {
-    centerPanelGrid();
-  }
-  rememberViewportSize();
+function setPanelScaleAt(clientX, clientY, newScale) {
+  const rect = viewport.getBoundingClientRect();
+  const anchorX = clientX - rect.left + viewport.scrollLeft + scrollOriginX;
+  const anchorY = clientY - rect.top + viewport.scrollTop + scrollOriginY;
+  const gridPointX = (anchorX - panelX) / Math.max(.001, panelScale);
+  const gridPointY = (anchorY - panelY) / Math.max(.001, panelScale);
+  panelScale = clamp(newScale, PANEL_SCALE_MIN, PANEL_SCALE_MAX);
+  panelX = anchorX - gridPointX * panelScale;
+  panelY = anchorY - gridPointY * panelScale;
   updateScrollArea(true);
   updatePanelScaleReadout();
-  redraw();
+  if (document.body.classList.contains('navigating') ||
+      document.body.classList.contains('navigation-settling')) updateNavigationPreviewChoice();
+  else scheduleLocalPreviewRebuild();
+}
+
+function setPanelScaleAroundCentre(newScale) {
+  const rect = viewport.getBoundingClientRect();
+  setPanelScaleAt(rect.left + viewport.clientWidth / 2, rect.top + viewport.clientHeight / 2, newScale);
+}
+
+function tileAtClient(clientX, clientY) {
+  const rect = viewport.getBoundingClientRect();
+  const worldX = clientX - rect.left + viewport.scrollLeft + scrollOriginX;
+  const worldY = clientY - rect.top + viewport.scrollTop + scrollOriginY;
+  const gx = (worldX - panelX) / Math.max(.001, panelScale);
+  const gy = (worldY - panelY) / Math.max(.001, panelScale);
+  for (const [name, placement] of placements) {
+    if (gx >= placement.x && gx < placement.x + placement.w && gy >= placement.y && gy < placement.y + placement.h) {
+      return {name, placement, nx: (gx - placement.x) / placement.w, ny: (gy - placement.y) / placement.h};
+    }
+  }
+  return null;
+}
+
+function boardPointAtClient(clientX, clientY) {
+  const tile = tileAtClient(clientX, clientY);
+  if (!tile) return null;
+  const cropW = boardW / contentZoom;
+  const cropH = boardH / contentZoom;
+  const x = contentPanX + (flipped ? 1 - tile.nx : tile.nx) * cropW;
+  const y = contentPanY + tile.ny * cropH;
+  return {...tile, x, y};
+}
+
+function setZoomAt(clientX, clientY, newZoom) {
+  const point = boardPointAtClient(clientX, clientY);
+  const oldCropW = boardW / contentZoom;
+  const oldCropH = boardH / contentZoom;
+  const nx = point ? point.nx : .5;
+  const ny = point ? point.ny : .5;
+  const boardX = point ? point.x : contentPanX + oldCropW / 2;
+  const boardY = point ? point.y : contentPanY + oldCropH / 2;
+
+  contentZoom = clamp(newZoom, 1, 64);
+  const newCropW = boardW / contentZoom;
+  const newCropH = boardH / contentZoom;
+  contentPanX = boardX - (flipped ? 1 - nx : nx) * newCropW;
+  contentPanY = boardY - ny * newCropH;
+  clampContentPan();
+  scheduleContentTransform();
+}
+
+function analysisPickText(point) {
+  if (!point) return null;
+  const aw = Number(meta.analysis_width) || boardW;
+  const ah = Number(meta.analysis_height) || boardH;
+  const x = Math.floor(point.x * aw / boardW);
+  const y = Math.floor(point.y * ah / boardH);
+  return {layer: point.name, x, y, spec: `${point.name}:${x},${y}`};
+}
+
+function cssEscape(value) {
+  return window.CSS && CSS.escape ? CSS.escape(String(value)) : String(value).replaceAll('"', '\\"');
+}
+
+function clearSelectedNetElements() {
+  for (const element of selectedNetElements) element.classList.remove('selected');
+  selectedNetElements = [];
+}
+
+// Clone a netmap shape together with shallow copies of its ancestor groups,
+// preserving any transform/clip attributes on the chain without dragging the
+// rest of the (potentially huge) netmap along.
+function cloneShapeWithAncestors(shape, stopAt) {
+  let clone = shape.cloneNode(true);
+  clone.removeAttribute('id');
+  let node = shape.parentNode;
+  while (node && node !== stopAt && node.nodeType === 1 && node.tagName.toLowerCase() !== 'svg') {
+    const wrapper = node.cloneNode(false);
+    wrapper.removeAttribute('id');
+    wrapper.appendChild(clone);
+    clone = wrapper;
+    node = node.parentNode;
+  }
+  return clone;
+}
+
+// Mirror the current selection into the per-tile highlight overlays. These
+// hold only the selected net's geometry, so they can stay visible and be
+// transformed live during pan/zoom, unlike the full netmap.
+function updateNetHighlights() {
+  for (const svg of highlightSvgs.values()) {
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+  }
+  if (!currentNet || !netElements.has(currentNet)) return;
+  for (const shape of netElements.get(currentNet)) {
+    const target = highlightSvgs.get(shape.dataset.layer);
+    if (!target) continue;
+    target.appendChild(cloneShapeWithAncestors(shape, shape.ownerSVGElement));
+  }
+}
+
+function selectNet(netId) {
+  clearSelectedNetElements();
+  currentNet = null;
+  if (!Number.isInteger(netId) || netId <= 0 || !netElements.has(netId)) {
+    updateNetHighlights();
+    updateNetInfo(null, Number.isInteger(netId) && netId > 0 ? `Net ${netId} is not present in the viewer map.` : null);
+    return;
+  }
+  selectedNetElements = netElements.get(netId);
+  for (const element of selectedNetElements) element.classList.add('selected');
+  currentNet = netId;
+  updateNetHighlights();
+  document.getElementById('net-search').value = String(netId);
+  updateNetInfo(netId);
+}
+
+function clearNet() {
+  clearSelectedNetElements();
+  currentNet = null;
+  updateNetHighlights();
+  updateNetInfo(null);
+}
+
+function updateNetInfo(netId, message=null) {
+  const info = document.getElementById('net-info');
+  const clicked = lastPick
+    ? `<div style="color:var(--muted);font-size:11px">Clicked: <code>${lastPick.spec}</code></div>`
+    : '';
+  if (!netId) {
+    info.innerHTML = clicked + (message
+      ? `<div style="color:#ff9d9d">${message}</div>`
+      : '<em style="color:var(--muted)">Click a net</em>');
+    return;
+  }
+  const layers = [];
+  for (const [layer, ids] of layerNetIds) if (ids.has(netId)) layers.push(layer);
+  info.innerHTML = `<div><strong>Net ${netId}</strong></div>` + clicked +
+    `<div class="layer-list">${layers.length ? layers.map(layer => `<div>${layer}</div>`).join('') : 'No layer geometry'}</div>`;
+}
+
+function applyToggleStates() {
+  document.getElementById('toggle-flip').classList.toggle('active', flipped);
+  document.getElementById('toggle-silk').classList.toggle('active', silkOn);
+  document.getElementById('toggle-silk').textContent = silkOn ? 'Hide silk' : 'Show silk';
+  const collapsed = document.body.classList.contains('sidebar-collapsed');
+  document.getElementById('toggle-sidebar').textContent = collapsed ? 'Show panel' : 'Hide panel';
+  updatePanelScaleReadout();
 }
 
 function setSidebarCollapsed(collapsed) {
-  cancelActiveDrag();
   const oldW = Math.max(1, viewport.clientWidth);
   const oldH = Math.max(1, viewport.clientHeight);
   document.body.classList.toggle('sidebar-collapsed', collapsed);
@@ -1182,1101 +1330,354 @@ function setSidebarCollapsed(collapsed) {
   requestAnimationFrame(() => handleViewportGeometryChange(oldW, oldH));
 }
 
-function clientToDisplay(clientX, clientY) {
-  const rect = viewport.getBoundingClientRect();
-  const worldX = clientX - rect.left + viewport.scrollLeft + scrollOriginX;
-  const worldY = clientY - rect.top  + viewport.scrollTop + scrollOriginY;
-  return {
-    x: (worldX - panelX) / panelScale,
-    y: (worldY - panelY) / panelScale,
-  };
-}
-
-function tileAtDisplay(x, y) {
-  if (!meta || !meta.placements) return null;
-  for (const [name, p] of Object.entries(meta.placements)) {
-    if (x >= p.x && x < p.x + p.w && y >= p.y && y < p.y + p.h) {
-      return {name, p};
-    }
-  }
-  return null;
-}
-
-function currentCropForTile(p) {
-  const d = boardDims();
-  const cropW = d.w / contentZoom;
-  const cropH = d.h / contentZoom;
-  clampContentPan();
-  const x0 = contentPanX / d.w;
-  const y0 = contentPanY / d.h;
-  const w0 = cropW / d.w;
-  const h0 = cropH / d.h;
-  return {
-    x: p.x + x0 * p.w,
-    y: p.y + y0 * p.h,
-    w: w0 * p.w,
-    h: h0 * p.h,
-  };
-}
-
-function currentCropForImage(img) {
-  const d = boardDims();
-  const cropW = d.w / contentZoom;
-  const cropH = d.h / contentZoom;
-  clampContentPan();
-  return {
-    x: (contentPanX / d.w) * img.width,
-    y: (contentPanY / d.h) * img.height,
-    w: (cropW / d.w) * img.width,
-    h: (cropH / d.h) * img.height,
-  };
-}
-
-function setZoomAt(clientX, clientY, newZoom) {
-  const d = boardDims();
-  const oldCropW = d.w / contentZoom;
-  const oldCropH = d.h / contentZoom;
-  const pos = clientToDisplay(clientX, clientY);
-  const tile = tileAtDisplay(pos.x, pos.y);
-  let nx = 0.5, ny = 0.5;
-  if (tile) {
-    nx = clamp((pos.x - tile.p.x) / tile.p.w, 0, 1);
-    ny = clamp((pos.y - tile.p.y) / tile.p.h, 0, 1);
-  }
-
-  // Back view mirrors X visually, so the board coordinate under the cursor is
-  // measured from the opposite side of the current crop.
-  const boardX = contentPanX + (flipped ? (1 - nx) : nx) * oldCropW;
-  const boardY = contentPanY + ny * oldCropH;
-
-  contentZoom = clamp(newZoom, 1.0, 64.0);
-  const newCropW = d.w / contentZoom;
-  const newCropH = d.h / contentZoom;
-  contentPanX = boardX - (flipped ? (1 - nx) : nx) * newCropW;
-  contentPanY = boardY - ny * newCropH;
-  clampContentPan();
-  redraw();
-}
-
-function buildNetIndex() {
-  const data = idData.data;
-  const counts = new Map();
-  for (let i = 0; i < data.length; i += 4) {
-    const id = data[i] | (data[i + 1] << 8) | (data[i + 2] << 16);
-    if (id === 0) continue;
-    counts.set(id, (counts.get(id) || 0) + 1);
-  }
-  const buckets = new Map();
-  for (const [id, n] of counts) buckets.set(id, new Uint32Array(n));
-  const cursor = new Map();
-  for (let i = 0; i < data.length; i += 4) {
-    const id = data[i] | (data[i + 1] << 8) | (data[i + 2] << 16);
-    if (id === 0) continue;
-    const c = cursor.get(id) || 0;
-    buckets.get(id)[c] = i;
-    cursor.set(id, c + 1);
-  }
-  netToPixels = buckets;
-}
-
-// --- layer side helpers ---
-function frontLayerName() {
-  if (meta && meta.placements && meta.placements.F_Cu) return 'F_Cu';
-  const layers = (meta && meta.layers) || (meta && Object.keys(meta.placements || {})) || [];
-  return layers[0] || 'F_Cu';
-}
-
-function backLayerName() {
-  if (meta && meta.placements && meta.placements.B_Cu) return 'B_Cu';
-  const layers = (meta && meta.layers) || (meta && Object.keys(meta.placements || {})) || [];
-  return layers[layers.length - 1] || 'B_Cu';
-}
-
-function isFrontTile(name) {
-  return name === frontLayerName();
-}
-
-function isBottomTile(name) {
-  return name === backLayerName();
-}
-
-function isOuterTile(name) {
-  return isFrontTile(name) || isBottomTile(name);
-}
-
-function isInnerTile(name) {
-  return !isOuterTile(name);
-}
-
-// --- redraw everything, applying flip + silk state ---
-function redraw() {
-  if (redrawPending) return;
-  redrawPending = true;
-  requestAnimationFrame(() => {
-    redrawPending = false;
-    redrawNow();
-  });
-}
-
-function redrawNow() {
-  drawDisplay();
-  drawSilk();
-  drawTileLabels();
-  drawHighlight();
-}
-
-function drawDisplay() {
-  // Recompose only the visible browser viewport. The full-resolution PNGs stay
-  // as sources, so zoomed-in views remain sharp without repainting a huge atlas.
-  const ctx = beginCanvasFrame(display, '#050505');
-
-  // Fallback if meta is unavailable: draw the whole grid into the fitted rect.
-  if (!meta || !meta.placements) {
-    const p = {x: 0, y: 0, w: gridW, h: gridH};
-    const resolved = resolveImageMip(gridSrcCache, 'grid', currentMipLevel());
-    if (resolved.img) {
-      drawImageToTile(ctx, resolved.img,
-                      {x: 0, y: 0, w: gridW, h: gridH},
-                      p, false, resolved.level);
-    }
-    return;
-  }
-
-  for (const [name, p] of Object.entries(meta.placements)) {
-    const mirror = flipped;
-
-    if (isOuterTile(name)) {
-      const maskImg = isFrontTile(name) ? frontMaskImg
-                    : isBottomTile(name) ? backMaskImg
-                    : null;
-
-      if (maskImg) {
-        fillTile(ctx, p, mirror, '#050505');
-        drawTintedLayer(ctx, name, p, '#c79a32', 0.92, mirror); // copper: gold
-        drawSolderMaskFilm(ctx, maskImg, p, mirror, '#123d25', 0.94);
-      } else {
-        fillTile(ctx, p, mirror, '#123d25');
-        drawTintedLayer(ctx, name, p, '#c79a32', 0.88, mirror); // copper: gold
-      }
-    } else {
-      fillTile(ctx, p, mirror, '#050505');
-      drawTintedLayer(ctx, name, p, '#a9b0b8', 0.95, mirror); // inner copper: silver
-    }
-  }
-}
-
-function drawSilk() {
-  const ctx = beginCanvasFrame(silkCanvas);
-  if (!silkOn || !meta || !meta.placements) return;
-
-  // Silk is tied to the corresponding physical board side. In back view,
-  // mirror both overlays using the same transform as the copper tiles.
-  const mirror = flipped;
-  if (topSilkImg) {
-    const p = meta.placements[frontLayerName()];
-    if (p) {
-      drawAlphaTintedImage(ctx, topSilkImg, p, mirror, '#ffffff', 0.92);
-      eraseSilkKeepouts(ctx, p, mirror, frontMaskImg, drillImg);
-    }
-  }
-  if (bottomSilkImg) {
-    const p = meta.placements[backLayerName()];
-    if (p) {
-      drawAlphaTintedImage(ctx, bottomSilkImg, p, mirror, '#ffffff', 0.92);
-      eraseSilkKeepouts(ctx, p, mirror, backMaskImg, drillImg);
-    }
-  }
-}
-
-function eraseSilkKeepouts(ctx, p, mirror, maskOpeningImg, holeImg) {
-  // Remove silkscreen where the solder-mask opening exposes copper, and where
-  // the drill map marks physical holes. The keepout images use high/white
-  // pixels for the regions to remove, so drawing them with destination-out
-  // punches transparent holes in the silk overlay while preserving antialiasing.
-  if (maskOpeningImg) eraseAlphaFromCanvas(ctx, maskOpeningImg, p, mirror, 1.0);
-  if (holeImg) eraseAlphaFromCanvas(ctx, holeImg, p, mirror, 1.0);
-}
-
-function eraseAlphaFromCanvas(ctx, img, p, mirror, alpha) {
-  ctx.save();
-  ctx.globalCompositeOperation = 'destination-out';
-  drawAlphaTintedImage(ctx, img, p, mirror, '#ffffff', alpha);
-  ctx.restore();
-}
-
-function parseHexColour(hex) {
-  const m = /^#?([0-9a-f]{6})$/i.exec(hex);
-  if (!m) return [255, 255, 255];
-  const n = parseInt(m[1], 16);
-  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
-}
-
-function fillTile(ctx, p, mirror, colour) {
-  const r = tileScreenRect(p);
-  if (!rectVisible(r)) return;
-  ctx.save();
-  ctx.fillStyle = colour;
-  ctx.fillRect(r.x, r.y, r.w, r.h);
-  ctx.restore();
-}
-
-const tintedGridCache = new Map();
-function tintedGridTile(name, p, colour, alpha, sourceImg, sourceLevel) {
-  const key = `${name}:${colour}:${alpha}:mip${sourceLevel}`;
-  if (tintedGridCache.has(key)) return tintedGridCache.get(key);
-
-  const off = document.createElement('canvas');
-  off.width = Math.max(1, Math.round(p.w / sourceLevel));
-  off.height = Math.max(1, Math.round(p.h / sourceLevel));
-  const octx = off.getContext('2d');
-  octx.drawImage(sourceImg,
-                 p.x / sourceLevel, p.y / sourceLevel,
-                 p.w / sourceLevel, p.h / sourceLevel,
-                 0, 0, off.width, off.height);
-
-  const [r, g, b] = parseHexColour(colour);
-  const id = octx.getImageData(0, 0, off.width, off.height);
-  for (let i = 0; i < id.data.length; i += 4) {
-    const v = Math.max(id.data[i], id.data[i + 1], id.data[i + 2]);
-    id.data[i]     = r;
-    id.data[i + 1] = g;
-    id.data[i + 2] = b;
-    id.data[i + 3] = Math.round(v * alpha);
-  }
-  octx.putImageData(id, 0, 0);
-  tintedGridCache.set(key, off);
-  return off;
-}
-
-function drawTintedGridCrop(ctx, name, p, colour, alpha, mirror) {
-  const desiredLevel = currentMipLevel();
-  const crop = currentCropForTile({...p, x: 0, y: 0});
-
-  const resolved = resolveImageMip(gridSrcCache, 'grid', desiredLevel);
-
-  if (isTiledLevel(desiredLevel)) {
-    const fallback = resolved.img
-      ? tintedGridTile(name, p, colour, alpha, resolved.img, resolved.level)
-      : null;
-    drawTiledProcessedWithFallback(ctx, 'grid', desiredLevel, p, crop, mirror,
-                                   'tint', colour, alpha, p.x, p.y,
-                                   fallback, resolved.level || 1);
-    return;
-  }
-
-  if (resolved.img) {
-    const tile = tintedGridTile(name, p, colour, alpha, resolved.img, resolved.level);
-    drawImageToTile(ctx, tile, crop, p, mirror, resolved.level);
-  }
-}
-
-
-
-function drawVectorAlpha(ctx, img, p, mirror, colour, alpha, mode = 'alpha') {
-  const r = tileScreenRect(p);
-  if (!img || !rectVisible(r)) return;
-
-  const crop = currentCropForTile({...p, x: 0, y: 0});
-  // Draw the whole SVG scaled into board coordinates and use the destination
-  // offset for cropping. This preserves the SVG viewBox/origin exactly as the
-  // browser interprets it instead of sampling a source rectangle from the
-  // image's rounded natural pixel size, which can shift artwork relative to
-  // the PNG idmap.
-  const dx = -crop.x * r.w / Math.max(1, crop.w);
-  const dy = -crop.y * r.h / Math.max(1, crop.h);
-  const dw = p.w * r.w / Math.max(1, crop.w);
-  const dh = p.h * r.h / Math.max(1, crop.h);
-
-  const off = document.createElement('canvas');
-  off.width = Math.max(1, Math.ceil(r.w * renderDpr));
-  off.height = Math.max(1, Math.ceil(r.h * renderDpr));
-  const octx = off.getContext('2d');
-  octx.setTransform(renderDpr, 0, 0, renderDpr, 0, 0);
-
-  if (mode === 'maskfilm') {
-    octx.fillStyle = colour;
-    octx.globalAlpha = alpha;
-    octx.fillRect(0, 0, r.w, r.h);
-    octx.globalAlpha = 1;
-    octx.globalCompositeOperation = 'destination-out';
-  }
-
-  if (mirror) {
-    octx.translate(r.w, 0);
-    octx.scale(-1, 1);
-  }
-  octx.drawImage(img, dx, dy, dw, dh);
-
-  if (mode !== 'maskfilm') {
-    octx.globalCompositeOperation = 'source-in';
-    octx.fillStyle = colour;
-    octx.globalAlpha = alpha;
-    octx.fillRect(0, 0, r.w, r.h);
-  }
-
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(r.x, r.y, r.w, r.h);
-  ctx.clip();
-  ctx.drawImage(off, r.x, r.y, off.width / renderDpr, off.height / renderDpr);
-  ctx.restore();
-}
-
-function drawVectorLayer(ctx, layerRef, p, mirror, colour, alpha, mode = 'alpha') {
-  const name = layerRef && layerRef._pcbnetsName ? layerRef._pcbnetsName : layerRef;
-  if (!name) return false;
-  const status = vectorImageStatus(name);
-  const img = vectorImageCache.get(name);
-  if (img instanceof HTMLImageElement) {
-    drawVectorAlpha(ctx, img, p, mirror, colour, alpha, mode);
-    return true;
-  }
-  // A pending SVG should suppress PNG fallback; fallback only after 404/error.
-  return status === 'pending';
-}
-
-function drawTintedLayer(ctx, name, p, colour, alpha, mirror) {
-  if (drawVectorLayer(ctx, name, p, mirror, colour, alpha, 'alpha')) return;
-  drawTintedGridCrop(ctx, name, p, colour, alpha, mirror);
-}
-
-function imageCacheKey(img, fallbackName, sourceLevel) {
-  // Do not key only by img.src: generated/lazy layer references and some
-  // browser states can leave src empty or non-unique. Include the logical
-  // pcbnets layer name as well, otherwise F_Silkscreen and B_Silkscreen can
-  // accidentally reuse the same processed alpha canvas.
-  const name = (img && img._pcbnetsName) || fallbackName || 'img';
-  const src = (img && (img.currentSrc || img.src)) || '';
-  const tx = (img && Number.isFinite(img._pcbnetsTileX)) ? img._pcbnetsTileX : '';
-  const ty = (img && Number.isFinite(img._pcbnetsTileY)) ? img._pcbnetsTileY : '';
-  const w = (img && img.width) || 0;
-  const h = (img && img.height) || 0;
-  return `${name}:src=${src}:mip=${sourceLevel}:tile=${tx},${ty}:img=${w}x${h}`;
-}
-
-const alphaTintedImageCache = new Map();
-function alphaTintedImage(img, colour, alpha, outW, outH, sourceLevel) {
-  const key = `${imageCacheKey(img, 'img', sourceLevel)}:${colour}:${alpha}:out=${outW}x${outH}`;
-  if (alphaTintedImageCache.has(key)) return alphaTintedImageCache.get(key);
-
-  const off = document.createElement('canvas');
-  off.width = Math.max(1, Math.round(outW / sourceLevel));
-  off.height = Math.max(1, Math.round(outH / sourceLevel));
-  const octx = off.getContext('2d');
-  octx.drawImage(img, 0, 0, img.width, img.height, 0, 0, off.width, off.height);
-
-  const [r, g, b] = parseHexColour(colour);
-  const id = octx.getImageData(0, 0, off.width, off.height);
-  for (let i = 0; i < id.data.length; i += 4) {
-    const v = Math.max(id.data[i], id.data[i + 1], id.data[i + 2]);
-    id.data[i]     = r;
-    id.data[i + 1] = g;
-    id.data[i + 2] = b;
-    id.data[i + 3] = Math.round(v * alpha);
-  }
-  octx.putImageData(id, 0, 0);
-  alphaTintedImageCache.set(key, off);
-  return off;
-}
-
-function drawAlphaTintedImage(ctx, img, p, mirror, colour, alpha) {
-  if (Array.isArray(img)) {
-    for (const one of img) drawAlphaTintedImage(ctx, one, p, mirror, colour, alpha);
-    return;
-  }
-  if (drawVectorLayer(ctx, img, p, mirror, colour, alpha, 'alpha')) return;
-  const name = img && img._pcbnetsName;
-  const desiredLevel = currentMipLevel();
-  const crop = currentCropForTile({...p, x: 0, y: 0});
-
-  const resolved = resolveImageMip(img, name, desiredLevel);
-
-  if (name && isTiledLevel(desiredLevel)) {
-    const fallback = resolved.img
-      ? alphaTintedImage(resolved.img, colour, alpha, p.w, p.h, resolved.level)
-      : null;
-    drawTiledProcessedWithFallback(ctx, name, desiredLevel, p, crop, mirror,
-                                   'alpha', colour, alpha, 0, 0,
-                                   fallback, resolved.level || 1);
-    return;
-  }
-
-  if (resolved.img) {
-    const off = alphaTintedImage(resolved.img, colour, alpha, p.w, p.h, resolved.level);
-    drawImageToTile(ctx, off, crop, p, mirror, resolved.level);
-  }
-}
-
-const solderMaskFilmCache = new Map();
-function solderMaskFilm(openingImg, p, colour, alpha, sourceLevel) {
-  const key = `${imageCacheKey(openingImg, 'mask', sourceLevel)}:${colour}:${alpha}:out=${p.w}x${p.h}`;
-  if (solderMaskFilmCache.has(key)) return solderMaskFilmCache.get(key);
-
-  // openingImg is a solder-mask OPENING image. Convert it to a green film:
-  //   white/high pixels -> transparent opening, expose copper underneath
-  //   black/low pixels  -> green mask film
-  const off = document.createElement('canvas');
-  off.width = Math.max(1, Math.round(p.w / sourceLevel));
-  off.height = Math.max(1, Math.round(p.h / sourceLevel));
-  const octx = off.getContext('2d');
-  octx.drawImage(openingImg, 0, 0, openingImg.width, openingImg.height,
-                 0, 0, off.width, off.height);
-
-  const [r, g, b] = parseHexColour(colour);
-  const id = octx.getImageData(0, 0, off.width, off.height);
-  for (let i = 0; i < id.data.length; i += 4) {
-    const opening = Math.max(id.data[i], id.data[i + 1], id.data[i + 2]);
-    const mask = 255 - opening;
-    id.data[i]     = r;
-    id.data[i + 1] = g;
-    id.data[i + 2] = b;
-    id.data[i + 3] = Math.round(mask * alpha);
-  }
-  octx.putImageData(id, 0, 0);
-  solderMaskFilmCache.set(key, off);
-  return off;
-}
-
-function drawSolderMaskFilm(ctx, openingImg, p, mirror, colour, alpha) {
-  if (drawVectorLayer(ctx, openingImg, p, mirror, colour, alpha, 'maskfilm')) return;
-  const name = openingImg && openingImg._pcbnetsName;
-  const desiredLevel = currentMipLevel();
-  const crop = currentCropForTile({...p, x: 0, y: 0});
-
-  const resolved = resolveImageMip(openingImg, name, desiredLevel);
-
-  if (name && isTiledLevel(desiredLevel)) {
-    const fallback = resolved.img
-      ? solderMaskFilm(resolved.img, p, colour, alpha, resolved.level)
-      : null;
-    drawTiledProcessedWithFallback(ctx, name, desiredLevel, p, crop, mirror,
-                                   'maskfilm', colour, alpha, 0, 0,
-                                   fallback, resolved.level || 1);
-    return;
-  }
-
-  if (resolved.img) {
-    const film = solderMaskFilm(resolved.img, p, colour, alpha, resolved.level);
-    drawImageToTile(ctx, film, crop, p, mirror, resolved.level);
-  }
-}
-
-let gridSrcCache = null;
-async function cacheGridSrc() {
-  // No eager full-resolution load. init() starts from the coarsest server mip
-  // and preloads sharper levels progressively.
-}
-
-// --- net highlighting (crop-aware) ---
-function highlightNet(netId) {
-  if (!netId || (netToPixels && !netToPixels.has(netId))) {
-    currentNet = null;
-    currentHighlightPixels = null;
-    highlight.classList.remove('drag-follow');
-    highlight.style.transform = '';
-    drawHighlight();
-    updateNetInfo(null);
-    return;
-  }
-
-  currentNet = netId;
-
-  // Full-resolution per-net pixel lists are only available after idmap.png has
-  // loaded and been indexed. Until then, low-zoom highlighting is still handled
-  // directly from the loaded idmap mip.
-  currentHighlightPixels = netToPixels ? netToPixels.get(netId) : null;
-  drawHighlight();
-  updateNetInfo(netId);
-}
-
-function stampHighlightPixel(data, w, h, x, y, dot) {
-  const x0 = Math.floor(x);
-  const y0 = Math.floor(y);
-  for (let yy = y0; yy < y0 + dot; yy++) {
-    if (yy < 0 || yy >= h) continue;
-    for (let xx = x0; xx < x0 + dot; xx++) {
-      if (xx < 0 || xx >= w) continue;
-      const o = (yy * w + xx) * 4;
-      // Bright magenta contrasts well against green mask, gold copper, white silk,
-      // and the silver-on-black inner-layer view.
-      data[o]     = 255;
-      data[o + 1] = 32;
-      data[o + 2] = 220;
-      data[o + 3] = 220;
-    }
-  }
-}
-
-function drawHighlight() {
-  resizeRenderCanvases();
-  const ctx = highlight.getContext('2d');
-
-  // putImageData is in backing-store pixels, so use identity transform here
-  // rather than the CSS-pixel transform used by the normal layer drawing.
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-
-  // During a drag, do not rescan the selected net. The already-drawn highlight
-  // canvas is CSS-translated by the pointer delta so it follows the board, then
-  // rerasterised once on pointerup. This keeps pan frames cheap even for planes.
-  if (isPanning && currentNet) return;
-
-  ctx.clearRect(0, 0, highlight.width, highlight.height);
-
-  if (!currentNet || !meta || !meta.placements) return;
-
-  const desiredLevel = currentMipLevel();
-
-  if (isTiledLevel(desiredLevel)) {
-    drawHighlightFromIdmapTiles(ctx, desiredLevel);
-    return;
-  }
-
-  const mipMap = getIdmapForLevel(desiredLevel);
-
-  // When a low-resolution server idmap is available, use it directly for the
-  // visible highlight. This keeps large planes cheap when zoomed out and makes
-  // highlighting match the same LOD used for picking.
-  if (mipMap && mipMap.level > 1) {
-    drawHighlightFromIdmapMip(ctx, mipMap);
-    return;
-  }
-
-  // Full-resolution/high-zoom fallback: draw from the sparse per-net pixel list.
-  if (!currentHighlightPixels) return;
-
-  const out = ctx.createImageData(highlight.width, highlight.height);
-  const outData = out.data;
-  const srcW = idmap.width;
-  const dpr = renderDpr;
-  const mirror = flipped;
-
-  for (const p of Object.values(meta.placements)) {
-    const r = tileScreenRect(p);
-    if (!rectVisible(r)) continue;
-
-    const crop = currentCropForTile(p);
-    const xMin = crop.x;
-    const yMin = crop.y;
-    const xMax = crop.x + crop.w;
-    const yMax = crop.y + crop.h;
-
-    const pxPerSrc = Math.max(r.w / Math.max(1, crop.w),
-                              r.h / Math.max(1, crop.h)) * dpr;
-    const dot = Math.max(1, Math.min(4, Math.ceil(pxPerSrc)));
-
-    for (let pi = 0; pi < currentHighlightPixels.length; pi++) {
-      const pix = currentHighlightPixels[pi] >>> 2;
-      const sx = pix % srcW;
-      const sy = (pix / srcW) | 0;
-      if (sx < xMin || sx >= xMax || sy < yMin || sy >= yMax) continue;
-
-      let nx = (sx + 0.5 - xMin) / crop.w;
-      const ny = (sy + 0.5 - yMin) / crop.h;
-      if (mirror) nx = 1 - nx;
-
-      const dx = (r.x + nx * r.w) * dpr;
-      const dy = (r.y + ny * r.h) * dpr;
-      stampHighlightPixel(outData, highlight.width, highlight.height, dx, dy, dot);
-    }
-  }
-
-  ctx.putImageData(out, 0, 0);
-}
-
-function drawHighlightFromIdmapTiles(ctx, level) {
-  const out = ctx.createImageData(highlight.width, highlight.height);
-  const outData = out.data;
-  const dpr = renderDpr;
-  const mirror = flipped;
-  const [gx, gy] = tileGridForLevel(level);
-
-  for (const p of Object.values(meta.placements)) {
-    const r = tileScreenRect(p);
-    if (!rectVisible(r)) continue;
-
-    const crop = currentCropForTile(p);
-    const mx0 = Math.max(0, Math.floor(crop.x / level));
-    const my0 = Math.max(0, Math.floor(crop.y / level));
-    const mx1 = Math.ceil((crop.x + crop.w) / level);
-    const my1 = Math.ceil((crop.y + crop.h) / level);
-
-    const pxPerMip = Math.max(r.w / Math.max(1, mx1 - mx0),
-                              r.h / Math.max(1, my1 - my0)) * dpr;
-    const dot = Math.max(1, Math.min(5, Math.ceil(pxPerMip)));
-
-    for (let ty = 0; ty < gy; ty++) {
-      for (let tx = 0; tx < gx; tx++) {
-        const b = tileBoundsForName('idmap', level, tx, ty);
-        if (!b) continue;
-        const ix0 = Math.max(mx0, b.x);
-        const iy0 = Math.max(my0, b.y);
-        const ix1 = Math.min(mx1, b.x + b.w);
-        const iy1 = Math.min(my1, b.y + b.h);
-        if (ix1 <= ix0 || iy1 <= iy0) continue;
-
-        const tile = requestIdmapTile(level, tx, ty);
-        if (!tile || !tile.data) continue;
-
-        const scaleX = tile.width / Math.max(1, b.w);
-        const scaleY = tile.height / Math.max(1, b.h);
-        const lx0 = Math.max(0, Math.floor((ix0 - b.x) * scaleX));
-        const ly0 = Math.max(0, Math.floor((iy0 - b.y) * scaleY));
-        const lx1 = Math.min(tile.width, Math.ceil((ix1 - b.x) * scaleX));
-        const ly1 = Math.min(tile.height, Math.ceil((iy1 - b.y) * scaleY));
-
-        for (let my = ly0; my < ly1; my++) {
-          for (let mx = lx0; mx < lx1; mx++) {
-            const i = (my * tile.width + mx) * 4;
-            const id = tile.data[i] | (tile.data[i + 1] << 8) | (tile.data[i + 2] << 16);
-            if (id !== currentNet) continue;
-
-            const gxMip = b.x + (mx + 0.5) / scaleX;
-            const gyMip = b.y + (my + 0.5) / scaleY;
-            let nx = (gxMip * level - crop.x) / crop.w;
-            const ny = (gyMip * level - crop.y) / crop.h;
-            if (mirror) nx = 1 - nx;
-
-            const dx = (r.x + nx * r.w) * dpr;
-            const dy = (r.y + ny * r.h) * dpr;
-            stampHighlightPixel(outData, highlight.width, highlight.height, dx, dy, dot);
-          }
-        }
-      }
-    }
-  }
-
-  ctx.putImageData(out, 0, 0);
-}
-
-function drawHighlightFromIdmapMip(ctx, mipMap) {
-  const out = ctx.createImageData(highlight.width, highlight.height);
-  const outData = out.data;
-  const dpr = renderDpr;
-  const mirror = flipped;
-  const srcW = mipMap.width;
-  const srcH = mipMap.height;
-  const level = mipMap.level;
-  const data = mipMap.data;
-
-  for (const p of Object.values(meta.placements)) {
-    const r = tileScreenRect(p);
-    if (!rectVisible(r)) continue;
-
-    const crop = currentCropForTile(p);
-    const mx0 = Math.max(0, Math.floor(crop.x / level));
-    const my0 = Math.max(0, Math.floor(crop.y / level));
-    const mx1 = Math.min(srcW, Math.ceil((crop.x + crop.w) / level));
-    const my1 = Math.min(srcH, Math.ceil((crop.y + crop.h) / level));
-
-    const pxPerMip = Math.max(r.w / Math.max(1, mx1 - mx0),
-                              r.h / Math.max(1, my1 - my0)) * dpr;
-    const dot = Math.max(1, Math.min(5, Math.ceil(pxPerMip)));
-
-    for (let my = my0; my < my1; my++) {
-      for (let mx = mx0; mx < mx1; mx++) {
-        const i = (my * srcW + mx) * 4;
-        const id = data[i] | (data[i + 1] << 8) | (data[i + 2] << 16);
-        if (id !== currentNet) continue;
-
-        let nx = ((mx + 0.5) * level - crop.x) / crop.w;
-        const ny = ((my + 0.5) * level - crop.y) / crop.h;
-        if (mirror) nx = 1 - nx;
-
-        const dx = (r.x + nx * r.w) * dpr;
-        const dy = (r.y + ny * r.h) * dpr;
-        stampHighlightPixel(outData, highlight.width, highlight.height, dx, dy, dot);
-      }
-    }
-  }
-
-  ctx.putImageData(out, 0, 0);
-}
-
-function pixelToTile(x, y) {
-  if (!meta || !meta.placements) return null;
-  for (const [name, p] of Object.entries(meta.placements)) {
-    if (x >= p.x && x < p.x + p.w && y >= p.y && y < p.y + p.h) {
-      return { name, p };
-    }
-  }
-  return null;
-}
-
-function netLayerBreakdown(netId) {
-  if (netBreakdownCache.has(netId)) return netBreakdownCache.get(netId);
-  if (!netToPixels || !netToPixels.has(netId)) return [];
-
-  const pixels = netToPixels.get(netId);
-  const w = idmap.width;
-  const counts = {};
-  for (let p = 0; p < pixels.length; p++) {
-    const i = pixels[p];
-    const pix = i >>> 2;
-    const px = pix % w;
-    const py = (pix / w) | 0;
-    const tile = pixelToTile(px, py);
-    if (!tile) continue;
-    counts[tile.name] = (counts[tile.name] || 0) + 1;
-  }
-  const result = Object.entries(counts).sort((a, b) => b[1] - a[1]);
-  netBreakdownCache.set(netId, result);
-  return result;
-}
-
-function updateNetInfo(netId) {
-  const info = document.getElementById('net-info');
-  const pickHtml = lastPick
-    ? `<div style="color:var(--muted); font-size:11px">Clicked: <code>${escapeHtml(lastPick.spec)}</code></div>`
-    : '';
-  if (!netId) {
-    info.innerHTML = pickHtml + '<em style="color:var(--muted)">Click a net</em>';
-    return;
-  }
-
-  const haveFullIndex = netToPixels && netToPixels.has(netId);
-  const total = haveFullIndex ? netToPixels.get(netId).length : null;
-  info.innerHTML = `<div><strong>Net ${netId}</strong></div>` +
-                   pickHtml +
-                   `<div style="color:var(--muted); font-size:11px">${total === null ? 'details loading…' : total + ' px total'}</div>` +
-                   `<div class="layer-list">${haveFullIndex ? 'layer breakdown…' : 'full idmap loading…'}</div>`;
-
-  if (!haveFullIndex) return;
-
-  // The layer breakdown can be expensive for huge pours, so do it after the
-  // highlight has had a chance to paint. It is cached after the first time.
-  const fillBreakdown = () => {
-    if (currentNet !== netId) return;
-    const breakdown = netLayerBreakdown(netId);
-    let html = `<div><strong>Net ${netId}</strong></div>`;
-    html += pickHtml;
-    html += `<div style="color:var(--muted); font-size:11px">${total} px total</div>`;
-    if (breakdown.length) {
-      html += '<div class="layer-list">';
-      for (const [name, n] of breakdown) {
-        html += `<div>${name}: ${n} px</div>`;
-      }
-      html += '</div>';
-    }
-    info.innerHTML = html;
-  };
-
-  if ('requestIdleCallback' in window) {
-    requestIdleCallback(fillBreakdown, {timeout: 500});
+function handleViewportGeometryChange(oldW=lastViewportW, oldH=lastViewportH) {
+  const newW = Math.max(1, viewport.clientWidth);
+  const newH = Math.max(1, viewport.clientHeight);
+  if (oldW > 0 && oldH > 0) {
+    panelX += (newW - oldW) / 2;
+    panelY += (newH - oldH) / 2;
   } else {
-    setTimeout(fillBreakdown, 0);
+    centerPanelGrid();
   }
-}
-
-function drawTileLabels() {
-  if (!meta || !meta.placements) return;
-  labelsDiv.innerHTML = '';
-  for (const [name, p] of Object.entries(meta.placements)) {
-    const r = tileScreenRect(p);
-    if (!rectVisible(r)) continue;
-    const tag = document.createElement('div');
-    tag.className = 'tag' + (flipped ? ' flipped' : '');
-    let txt = name;
-    if (flipped) txt += ' ⟲ (back view)';
-    tag.textContent = txt;
-    tag.style.left = (r.x + 4) + 'px';
-    tag.style.top  = (r.y + 4) + 'px';
-    labelsDiv.appendChild(tag);
-  }
-}
-
-function populateSidebar() {
-  if (!meta) return;
-  const tl = document.getElementById('tile-list');
-  const layers = meta.layers || [];
-  tl.innerHTML = layers.map(n => {
-    const corr = (meta.corrections || {})[n];
-    let note = '';
-    if (corr) {
-      if (corr.invert) note = ' (inverted)';
-      else if (corr.offset && (corr.offset[0] || corr.offset[1])) {
-        note = ` (offset ${corr.offset})`;
-      }
-    }
-    return `<div>· ${n}${note}</div>`;
-  }).join('');
-}
-
-function applyToggleStates() {
-  document.getElementById('toggle-flip').classList.toggle('active', flipped);
-  document.getElementById('toggle-silk').classList.toggle('active', silkOn);
-  const hideButton = document.getElementById('toggle-sidebar');
-  if (hideButton) hideButton.textContent = document.body.classList.contains('sidebar-collapsed') ? 'Show panel' : 'Hide panel';
+  rememberViewportSize();
+  updateScrollArea(true);
   updatePanelScaleReadout();
 }
 
-// --- trace picking, transform-aware ---
-function pickNetAtClient(clientX, clientY) {
-  const level = currentMipLevel();
-
-  const pos = clientToDisplay(clientX, clientY);
-  const tile = tileAtDisplay(pos.x, pos.y);
-  if (!tile) return;
-
-  const p = tile.p;
-  const nx = clamp((pos.x - p.x) / p.w, 0, 1);
-  const ny = clamp((pos.y - p.y) / p.h, 0, 1);
-  const crop = currentCropForTile(p);
-
-  const lx = Math.floor(flipped
-    ? crop.x + (1 - nx) * crop.w
-    : crop.x + nx * crop.w);
-  const ly = Math.floor(crop.y + ny * crop.h);
-  const renderScale = meta && Number(meta.render_scale);
-  const coordScale = Number.isFinite(renderScale) && renderScale > 0 ? renderScale : 1;
-  const localX = Math.floor((lx - p.x) / coordScale);
-  const localY = Math.floor((ly - p.y) / coordScale);
-  lastPick = {
-    layer: tile.name,
-    x: localX,
-    y: localY,
-    spec: `${tile.name}:${localX},${localY}`,
-  };
-
-  if (isTiledLevel(level)) {
-    const mx = Math.floor(lx / level);
-    const my = Math.floor(ly / level);
-    const {tx, ty} = tileIndexForMipCoordForName('idmap', level, mx, my);
-    const bounds = tileBoundsForName('idmap', level, tx, ty);
-    if (!bounds) return;
-    const pickTile = requestIdmapTile(level, tx, ty);
-    if (!pickTile || !pickTile.data) {
-      const key = `${level}:${tx}:${ty}`;
-      const pending = idmapTileCache.get(key);
-      if (pending && pending.promise) pending.promise.then(() => pickNetAtClient(clientX, clientY));
-      return;
+function populateSidebar() {
+  const list = document.getElementById('tile-list');
+  list.innerHTML = (meta.layers || []).map(name => {
+    const correction = (meta.corrections || {})[name];
+    let note = '';
+    if (correction) {
+      if (correction.invert) note = ' (inverted)';
+      else if (correction.offset && (correction.offset[0] || correction.offset[1])) note = ` (offset ${correction.offset})`;
     }
-    const scaleX = pickTile.width / Math.max(1, bounds.w);
-    const scaleY = pickTile.height / Math.max(1, bounds.h);
-    const px = Math.floor((mx - bounds.x) * scaleX);
-    const py = Math.floor((my - bounds.y) * scaleY);
-    if (px < 0 || py < 0 || px >= pickTile.width || py >= pickTile.height) return;
-    const idx = (py * pickTile.width + px) * 4;
-    const r = pickTile.data[idx];
-    const g = pickTile.data[idx + 1];
-    const b = pickTile.data[idx + 2];
-    highlightNet(r | (g << 8) | (b << 16));
-    return;
-  }
-
-  const pickMap = getIdmapForLevel(level);
-  if (!pickMap) return;
-  const mx = Math.floor(lx / pickMap.level);
-  const my = Math.floor(ly / pickMap.level);
-  if (mx < 0 || my < 0 || mx >= pickMap.width || my >= pickMap.height) return;
-
-  const idx = (my * pickMap.width + mx) * 4;
-  const r = pickMap.data[idx];
-  const g = pickMap.data[idx + 1];
-  const b = pickMap.data[idx + 2];
-  highlightNet(r | (g << 8) | (b << 16));
+    return `<div>· ${name}${note}</div>`;
+  }).join('');
 }
 
-// Keep a normal click fallback for browsers that still deliver clicks to
-// the canvas. The pointer-up handler below is the primary path because
-// pointer capture used for panning can otherwise steal canvas clicks.
-display.addEventListener('click', e => {
-  if (suppressNextClick) {
-    suppressNextClick = false;
-    return;
-  }
-  pickNetAtClient(e.clientX, e.clientY);
-});
-
-document.getElementById('toggle-fit').addEventListener('click', () => {
-  fitToScreen();
-});
-
-viewport.addEventListener('scroll', () => {
-  applyViewTransform();
-  redraw();
-});
-
-viewport.addEventListener('wheel', e => {
-  e.preventDefault();
-  const factor = e.deltaY < 0 ? 1.18 : 1 / 1.18;
-  if (e.shiftKey) {
-    setPanelScaleAt(e.clientX, e.clientY, panelScale * factor);
-  } else {
-    setZoomAt(e.clientX, e.clientY, contentZoom * factor);
-  }
-}, { passive: false });
-
-viewport.addEventListener('dblclick', e => {
-  e.preventDefault();
-  setZoomAt(e.clientX, e.clientY, contentZoom < 1.5 ? 2.0 : 1.0);
-});
-
-
-function updateHighlightDragTransform(dx, dy) {
-  if (!currentNet) return;
-  highlightDragDx = dx;
-  highlightDragDy = dy;
-  highlight.classList.add('drag-follow');
-  highlight.style.transform = `translate(${dx}px, ${dy}px)`;
+function toggleSilk() {
+  silkOn = !silkOn;
+  for (const element of document.querySelectorAll('.silk-layer')) element.classList.toggle('silk-hidden', !silkOn);
+  invalidateLocalPreview();
+  schedulePreviewRebuild();
+  scheduleLocalPreviewRebuild();
+  applyToggleStates();
 }
 
-function finishHighlightDragTransform() {
-  if (!currentNet) return;
-  highlightDragDx = 0;
-  highlightDragDy = 0;
-  highlight.classList.remove('drag-follow');
-  highlight.style.transform = '';
-  drawHighlight();
+function toggleFlip() {
+  flipped = !flipped;
+  scheduleContentTransform();
+  updateTileLabels();
+  applyToggleStates();
 }
 
-viewport.addEventListener('pointerdown', e => {
-  if (isUiEventTarget(e.target)) return;
-  if (![0, 1, 2].includes(e.button)) return;
+function isUiTarget(target) {
+  return target && target.closest && target.closest('button,input,select,textarea,a,label');
+}
+
+function showNavigationMode() {
+  cancelLocalPreviewBuild();
+  if (navigationTimer) {
+    clearTimeout(navigationTimer);
+    navigationTimer = 0;
+  }
+  navigationSettleGeneration += 1;
+  for (const tile of tileElements) tile.classList.remove('board-revealed');
+  document.body.classList.remove('navigation-settling');
+  document.body.classList.add('navigating');
+  updateNavigationPreviewChoice();
+}
+
+function settleNavigationMode() {
+  if (pointerNavigating || navigationTimer) return;
+  const generation = ++navigationSettleGeneration;
+  applyContentTransformNow();
+  document.body.classList.remove('navigating');
+  document.body.classList.add('navigation-settling');
+  void revealBoardsProgressively(generation);
+}
+
+function nextFrame() {
+  return new Promise(resolve => requestAnimationFrame(resolve));
+}
+
+// Order tiles so the ones intersecting the viewport get their live SVG back
+// first; offscreen windows can wait.
+function tilesInRevealOrder() {
+  const originX = panelX - scrollOriginX - viewport.scrollLeft;
+  const originY = panelY - scrollOriginY - viewport.scrollTop;
+  const vw = viewport.clientWidth;
+  const vh = viewport.clientHeight;
+  const onscreen = [];
+  const offscreen = [];
+  for (const tile of tileElements) {
+    const placement = placements.get(tile.dataset.layer);
+    if (!placement) { offscreen.push(tile); continue; }
+    const x = originX + placement.x * panelScale;
+    const y = originY + placement.y * panelScale;
+    const w = placement.w * panelScale;
+    const h = placement.h * panelScale;
+    (x < vw && y < vh && x + w > 0 && y + h > 0 ? onscreen : offscreen).push(tile);
+  }
+  return [...onscreen, ...offscreen];
+}
+
+function settleAborted(generation) {
+  return generation !== navigationSettleGeneration || pointerNavigating || navigationTimer;
+}
+
+async function revealBoardsProgressively(generation) {
+  // Unhide one tile's live SVG per frame pair so each expensive raster is a
+  // short, separately-interruptible block. A new pan or wheel gesture bumps
+  // navigationSettleGeneration (via showNavigationMode) and we bail out,
+  // leaving the cheap canvas previews in charge.
+  for (const tile of tilesInRevealOrder()) {
+    tile.classList.add('board-revealed');
+    await nextFrame();
+    await nextFrame();
+    if (settleAborted(generation)) return;
+  }
+  document.body.classList.remove('navigation-settling');
+  for (const tile of tileElements) tile.classList.remove('board-revealed');
+  clearNavigationPreviewChoice();
+  scheduleLocalPreviewRebuild();
+}
+
+function beginPointerNavigation() {
+  pointerNavigating = true;
+  showNavigationMode();
+}
+
+function endPointerNavigation() {
+  pointerNavigating = false;
+  settleNavigationMode();
+}
+
+function pulseNavigation(delay=200) {
+  showNavigationMode();
+  navigationTimer = window.setTimeout(() => {
+    navigationTimer = 0;
+    settleNavigationMode();
+  }, delay);
+}
+
+function beginPan(event) {
+  if (isUiTarget(event.target) || ![0,1,2].includes(event.button)) return;
+  // Prevent native SVG/image dragging and text selection from stealing the gesture.
+  event.preventDefault();
   isPanning = true;
-  isPanelPanning = e.button === 1 || e.button === 2 || e.altKey;
-  suppressNextClick = false;
+  isPanelPanning = event.button === 1 || event.button === 2 || event.altKey;
   panMoved = false;
-  panStartX = e.clientX;
-  panStartY = e.clientY;
+  panNavigationStarted = false;
+  panStartX = event.clientX;
+  panStartY = event.clientY;
   panOrigX = contentPanX;
   panOrigY = contentPanY;
   panelPanOrigX = panelX;
   panelPanOrigY = panelY;
+  const shape = event.target.closest && event.target.closest('[data-net-id]');
+  pendingPickNet = shape ? Number(shape.dataset.netId) : null;
+  pendingPickLayer = shape ? shape.dataset.layer : null;
   viewport.classList.add('dragging');
-  if (currentNet) updateHighlightDragTransform(0, 0);
-  viewport.setPointerCapture(e.pointerId);
-});
+  viewport.setPointerCapture(event.pointerId);
+}
 
-viewport.addEventListener('contextmenu', e => e.preventDefault());
-
-viewport.addEventListener('pointermove', e => {
+function movePan(event) {
   if (!isPanning) return;
-  const dx = e.clientX - panStartX;
-  const dy = e.clientY - panStartY;
+  const dx = event.clientX - panStartX;
+  const dy = event.clientY - panStartY;
   if (Math.abs(dx) + Math.abs(dy) > 4) {
     panMoved = true;
-    suppressNextClick = true;
+    if (!panNavigationStarted) {
+      panNavigationStarted = true;
+      beginPointerNavigation();
+    }
   }
 
   if (isPanelPanning) {
     panelX = panelPanOrigX + dx;
     panelY = panelPanOrigY + dy;
-    updateScrollArea(true);
-    updateHighlightDragTransform(dx, dy);
-    redraw();
+    scheduleScrollArea();
     return;
   }
 
-  const d = boardDims();
-  const cropW = d.w / contentZoom;
-  const cropH = d.h / contentZoom;
-  const tileW = d.w;
-  const tileH = d.h;
-  const dxPanel = dx / Math.max(0.001, panelScale);
-  const dyPanel = dy / Math.max(0.001, panelScale);
-  contentPanX = panOrigX + (flipped ? 1 : -1) * dxPanel * cropW / Math.max(1, tileW);
-  contentPanY = panOrigY - dyPanel * cropH / Math.max(1, tileH);
+  contentPanX = panOrigX + (flipped ? 1 : -1) * dx / Math.max(.001, panelScale * contentZoom);
+  contentPanY = panOrigY - dy / Math.max(.001, panelScale * contentZoom);
   clampContentPan();
-  updateHighlightDragTransform(dx, dy);
-  redraw();
-});
+  scheduleContentTransform();
+}
 
-function endPan(e) {
+function endPan(event) {
   if (!isPanning) return;
-  const wasMoved = panMoved;
+  const moved = panMoved;
   isPanning = false;
   isPanelPanning = false;
   panMoved = false;
   viewport.classList.remove('dragging');
-  try { viewport.releasePointerCapture(e.pointerId); } catch {}
-  finishHighlightDragTransform();
+  if (panNavigationStarted) endPointerNavigation();
+  panNavigationStarted = false;
+  try { viewport.releasePointerCapture(event.pointerId); } catch {}
 
-  // Left-click with no meaningful movement selects a net. Dragging pans.
-  if (e.type === 'pointerup' && e.button === 0 && !wasMoved) {
-    pickNetAtClient(e.clientX, e.clientY);
-    suppressNextClick = true;
+  if (event.type === 'pointerup' && event.button === 0 && !moved) {
+    const point = boardPointAtClient(event.clientX, event.clientY);
+    lastPick = analysisPickText(point);
+    if (pendingPickNet) selectNet(pendingPickNet);
+    else clearNet();
   }
+  pendingPickNet = null;
+  pendingPickLayer = null;
 }
+
+async function init() {
+  meta = JSON.parse(await fetchText('meta.json', 'metadata'));
+  boardW = Number(meta.width || meta.tile_w);
+  boardH = Number(meta.height || meta.tile_h);
+  if (!boardW || !boardH) fail('metadata is missing board dimensions (width/height)');
+  if (!Array.isArray(meta.layers) || !meta.layers.length) fail('metadata lists no copper layers');
+
+  const names = new Set([
+    ...meta.layers,
+    ...(meta.mask_layers || []),
+    ...(meta.silk_layers || []),
+    ...(meta.drill_layers || []),
+  ]);
+  const requiredLayers = new Set(meta.layers || []);
+  const netFile = meta.netmap || 'netmap.svg';
+  const netTextPromise = fetchText(netFile, 'netmap.svg');
+  const layerResults = await Promise.all([...names].map(async name => {
+    const file = (meta.layer_svgs && meta.layer_svgs[name]) || `${name}.svg`;
+    const text = requiredLayers.has(name)
+      ? await fetchText(file, `SVG layer ${name}`)
+      : await fetchOptionalText(file);
+    if (text === null) return null;
+    const root = parseSvg(text, file);
+    checkSvgSize(root, file, boardW, boardH);
+    return [name, root];
+  }));
+  for (const result of layerResults) if (result) layerSources.set(result[0], result[1]);
+
+  netSource = parseSvg(await netTextPromise, netFile);
+  netViewBox = svgViewBox(netSource,
+    Number(meta.netmap_width) || boardW * (Number(meta.netmap_scale) || 1),
+    Number(meta.netmap_height) || boardH * (Number(meta.netmap_scale) || 1));
+
+  buildPlacements();
+  buildTiles();
+  populateSidebar();
+
+  if (document.querySelector('.silk-layer')) document.getElementById('toggle-silk').style.display = 'inline-block';
+  document.getElementById('loading').style.display = 'none';
+  document.getElementById('controls').style.display = 'block';
+  try {
+    if (localStorage.getItem('pcbnets.sidebarCollapsed') === '1') document.body.classList.add('sidebar-collapsed');
+  } catch {}
+  applyToggleStates();
+  fitToScreen();
+  schedulePreviewRebuild();
+  scheduleLocalPreviewRebuild(300);
+}
+
+// Wheel events can arrive much faster than the display refresh (especially
+// from trackpads). Accumulate deltas and apply a single, delta-proportional
+// zoom step per animation frame: one layout read and one transform update
+// per frame instead of per event, and smooth pixel-level trackpad zooming
+// while a classic mouse notch (deltaY ~100) still gives the familiar ~1.17x.
+let wheelFrame = 0;
+let wheelZoomDelta = 0;
+let wheelPanelDelta = 0;
+let wheelClientX = 0;
+let wheelClientY = 0;
+
+function applyWheelFrame() {
+  wheelFrame = 0;
+  pulseNavigation();
+  if (wheelPanelDelta) {
+    const factor = Math.exp(-wheelPanelDelta * 0.0016);
+    wheelPanelDelta = 0;
+    setPanelScaleAt(wheelClientX, wheelClientY, panelScale * factor);
+  }
+  if (wheelZoomDelta) {
+    const factor = Math.exp(-wheelZoomDelta * 0.0016);
+    wheelZoomDelta = 0;
+    setZoomAt(wheelClientX, wheelClientY, contentZoom * factor);
+  }
+  // We are already inside an animation frame; letting scheduleContentTransform
+  // defer to the *next* frame would add a frame of latency to every wheel tick.
+  applyContentTransformNow();
+}
+
+viewport.addEventListener('wheel', event => {
+  event.preventDefault();
+  // Normalise line/page scrolling (Firefox) to approximate pixel deltas.
+  const unit = event.deltaMode === 1 ? 33 : event.deltaMode === 2 ? 330 : 1;
+  const delta = event.deltaY * unit;
+  wheelClientX = event.clientX;
+  wheelClientY = event.clientY;
+  if (event.shiftKey) wheelPanelDelta += delta;
+  else wheelZoomDelta += delta;
+  if (!wheelFrame) wheelFrame = requestAnimationFrame(applyWheelFrame);
+}, {passive:false});
+viewport.addEventListener('dblclick', event => {
+  event.preventDefault();
+  pulseNavigation();
+  setZoomAt(event.clientX, event.clientY, contentZoom < 1.5 ? 2 : 1);
+});
+viewport.addEventListener('pointerdown', beginPan);
+viewport.addEventListener('pointermove', movePan);
+// Inline SVG descendants can otherwise trigger the browser's native drag ghost.
+viewport.addEventListener('dragstart', event => event.preventDefault(), true);
+viewport.addEventListener('selectstart', event => {
+  if (!isUiTarget(event.target)) event.preventDefault();
+}, true);
 viewport.addEventListener('pointerup', endPan);
 viewport.addEventListener('pointercancel', endPan);
+viewport.addEventListener('contextmenu', event => event.preventDefault());
 
 window.addEventListener('resize', () => {
-  if (!gridW || !gridH) return;
-  handleViewportGeometryChange();
+  if (gridW && gridH) handleViewportGeometryChange();
 });
-
-document.getElementById('panel-zoom-out').addEventListener('click', () => {
-  setPanelScaleAroundCentre(panelScale / 1.18);
-});
-
-document.getElementById('panel-zoom-in').addEventListener('click', () => {
-  setPanelScaleAroundCentre(panelScale * 1.18);
-});
-
-document.getElementById('panel-zoom-fit').addEventListener('click', () => {
-  fitPanelWindows();
-});
-
-document.getElementById('toggle-sidebar').addEventListener('click', () => {
-  setSidebarCollapsed(!document.body.classList.contains('sidebar-collapsed'));
-  applyToggleStates();
-});
-
-sidebarTab.addEventListener('pointerdown', e => {
-  e.stopPropagation();
-});
-
-sidebarTab.addEventListener('click', e => {
-  e.stopPropagation();
-  setSidebarCollapsed(false);
-  applyToggleStates();
-});
-
-window.addEventListener('keydown', e => {
+window.addEventListener('keydown', event => {
   const active = document.activeElement;
   if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) return;
-
-  if (e.key === 'h' || e.key === 'H') {
-    e.preventDefault();
+  if (event.key === 'h' || event.key === 'H') {
+    event.preventDefault();
     setSidebarCollapsed(!document.body.classList.contains('sidebar-collapsed'));
-    applyToggleStates();
-  } else if (e.key === '+' || e.key === '=') {
-    e.preventDefault();
+  } else if (event.key === '+' || event.key === '=') {
+    event.preventDefault();
     setPanelScaleAroundCentre(panelScale * 1.18);
-  } else if (e.key === '-' || e.key === '_') {
-    e.preventDefault();
+  } else if (event.key === '-' || event.key === '_') {
+    event.preventDefault();
     setPanelScaleAroundCentre(panelScale / 1.18);
-  } else if (e.key === '0') {
-    e.preventDefault();
+  } else if (event.key === '0') {
+    event.preventDefault();
     fitPanelWindows();
   }
 });
 
-document.getElementById('toggle-flip').addEventListener('click', () => {
-  flipped = !flipped;
-  applyToggleStates();
-  redraw();
+document.getElementById('toggle-fit').addEventListener('click', fitToScreen);
+document.getElementById('toggle-flip').addEventListener('click', toggleFlip);
+document.getElementById('toggle-silk').addEventListener('click', toggleSilk);
+document.getElementById('toggle-sidebar').addEventListener('click', () => setSidebarCollapsed(true));
+document.getElementById('panel-zoom-out').addEventListener('click', () => setPanelScaleAroundCentre(panelScale / 1.18));
+document.getElementById('panel-zoom-in').addEventListener('click', () => setPanelScaleAroundCentre(panelScale * 1.18));
+document.getElementById('panel-zoom-fit').addEventListener('click', fitPanelWindows);
+document.getElementById('net-search').addEventListener('input', event => {
+  const value = parseInt(event.target.value, 10);
+  if (Number.isFinite(value)) selectNet(value);
+  else clearNet();
+});
+sidebarTab.addEventListener('pointerdown', event => event.stopPropagation());
+sidebarTab.addEventListener('click', event => {
+  event.stopPropagation();
+  setSidebarCollapsed(false);
 });
 
-document.getElementById('toggle-silk').addEventListener('click', () => {
-  silkOn = !silkOn;
-  applyToggleStates();
-  drawSilk();
+init().catch(error => {
+  document.getElementById('loading').textContent = 'Error: ' + error.message;
+  console.error(error);
 });
-
-document.getElementById('net-search').addEventListener('input', e => {
-  const v = parseInt(e.target.value, 10);
-  if (Number.isFinite(v)) highlightNet(v);
-});
-
-(async () => {
-  try {
-    await cacheGridSrc();
-    await init();
-  } catch (err) {
-    document.getElementById('loading').textContent = 'Error: ' + err.message;
-  }
-})();
 </script>
 </body>
 </html>
