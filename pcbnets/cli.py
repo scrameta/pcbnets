@@ -807,20 +807,24 @@ def _viewer_svg_size(directory: pathlib.Path,
 
 
 def _check_svg_corrections(meta: dict, layer_names: Iterable[str]) -> None:
-    """Reject corrections that have not also been applied to source SVGs."""
+    """Reject corrections that cannot be mirrored by the SVG viewer.
+
+    Polarity inversion is supported in-browser for normalised Gerber SVGs,
+    so only pixel offsets remain PNG-only corrections.
+    """
     unsupported: list[str] = []
     corrections = meta.get('corrections') or {}
     for name in layer_names:
         corr = corrections.get(name) or {}
         offset = tuple(corr.get('offset') or (0, 0))
-        if bool(corr.get('invert')) or offset != (0, 0):
+        if offset != (0, 0):
             unsupported.append(
                 f'{name}: invert={bool(corr.get("invert"))}, offset={offset}'
             )
     if unsupported:
         raise ValueError(
-            'SVG viewer output cannot yet mirror PNG-only polarity/alignment '
-            'corrections. First create aligned/correct SVG inputs or disable '
+            'SVG viewer output cannot yet mirror PNG-only alignment '
+            'corrections. First create aligned SVG inputs or disable '
             'the correction. Unsupported corrections: ' + '; '.join(unsupported)
         )
 

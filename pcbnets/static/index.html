@@ -460,12 +460,16 @@ function invertGerberMask(root) {
   }
 }
 
+function layerCorrectionInvert(name) {
+  return Boolean((meta.corrections || {})[name]?.invert);
+}
+
 function cloneLayer(name, instance, colour, {invert=false, className=''} = {}) {
   const source = layerSources.get(name);
   if (!source) return null;
   const clone = source.cloneNode(true);
   namespaceIds(clone, instance);
-  if (invert) invertGerberMask(clone);
+  if (invert || layerCorrectionInvert(name)) invertGerberMask(clone);
   clone.setAttribute('x', '0');
   clone.setAttribute('y', '0');
   clone.setAttribute('width', String(boardW));
@@ -698,7 +702,7 @@ function previewLayerSvgText(name, colour, invert, width, height, viewBox=null) 
   const source = layerSources.get(name);
   if (!source) return null;
   const clone = source.cloneNode(true);
-  if (invert) invertGerberMask(clone);
+  if (invert || layerCorrectionInvert(name)) invertGerberMask(clone);
   clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
   clone.setAttribute('x', '0');
   clone.setAttribute('y', '0');
@@ -743,7 +747,8 @@ async function decodeSvgPreview(text) {
 function previewBitmap(name, colour, invert, width, height, {viewBox=null, cache=previewBitmapCache} = {}) {
   if (!layerSources.has(name)) return Promise.resolve(null);
   const viewKey = viewBox ? viewBox.map(value => Number(value).toFixed(5)).join(',') : 'full';
-  const key = `${name}\u0000${colour}\u0000${invert ? 1 : 0}\u0000${width}x${height}\u0000${viewKey}`;
+  const correctedInvert = invert || layerCorrectionInvert(name);
+  const key = `${name}\u0000${colour}\u0000${correctedInvert ? 1 : 0}\u0000${width}x${height}\u0000${viewKey}`;
   if (!cache.has(key)) {
     const text = previewLayerSvgText(name, colour, invert, width, height, viewBox);
     cache.set(key, decodeSvgPreview(text).catch(error => {
