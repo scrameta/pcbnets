@@ -2285,7 +2285,7 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument('--threshold', type=int, default=0)
     pr.add_argument('--scale', type=float, default=1.0,
                     help='Legacy option retained for command compatibility; SVG layers are resolution-independent')
-    pr.add_argument('--netmap-scale', type=int, default=2, dest='netmap_scale',
+    pr.add_argument('--netmap-scale', type=int, default=5, dest='netmap_scale',
                     help='Pick/highlight SVG resolution relative to the layer SVG canvas (default: 2)')
     pr.add_argument('--cols', type=int, default=2)
     pr.add_argument('--no-cache', action='store_true')
@@ -2424,7 +2424,7 @@ def build_parser() -> argparse.ArgumentParser:
                        help='Electrical vertical-connector mask name (default: auto: via, PTH, drill)')
     pall.add_argument('--drill-grow', type=int, default=0, dest='drill_grow')
     pall.add_argument('--scale', type=float, default=1.0)
-    pall.add_argument('--netmap-scale', type=int, default=2, dest='netmap_scale')
+    pall.add_argument('--netmap-scale', type=int, default=5, dest='netmap_scale')
     pall.add_argument('--cols', type=int, default=2)
     pall.add_argument('--nets',
                       help='Use net-labels.npz from `pcbnets nets -o DIR` during render')
