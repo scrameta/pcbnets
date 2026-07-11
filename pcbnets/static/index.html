@@ -38,6 +38,20 @@
     border-right: 1px solid #333;
   }
   body.sidebar-collapsed #sidebar { display: none; }
+  /* Mobile light mode: the sidebar overlays the board instead of consuming
+     layout width — on a phone a 280px flex column leaves almost no viewport,
+     which also poisoned the initial fit-to-screen calculation. */
+  body.mobile-light #sidebar {
+    position: fixed;
+    z-index: 95;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: min(300px, 85vw);
+    flex: none;
+    box-sizing: border-box;
+    box-shadow: 4px 0 24px rgba(0, 0, 0, .55);
+  }
   #sidebar h1 { margin: 0 0 12px; font-size: 16px; }
   #sidebar p { margin: 4px 0; color: var(--muted); font-size: 12px; }
   #sidebar label.section {
@@ -274,7 +288,7 @@
       <button id="panel-zoom-in">+ larger</button>
     </div>
     <p id="panel-scale-readout" class="readout"></p>
-    <p class="hint">Wheel: zoom board contents. Shift+wheel or +/-: resize the layer windows. Middle/right drag, or Alt+drag: move the window grid. H hides/shows this panel.</p>
+    <p class="hint">Wheel or pinch: zoom board contents. Shift+wheel or +/-: resize the layer windows. Middle/right drag, Alt+drag, or drag the empty background: move the window grid. H hides/shows this panel.</p>
 
     <label class="section">Find net</label>
     <input id="net-search" min="1" placeholder="net id" type="number"/>
@@ -310,6 +324,11 @@ let gridW = 0;
 let gridH = 0;
 let placements = new Map();
 let layerSources = new Map();
+// Per-layer serialized SVG text templates (see buildLayerTemplates). These
+// replace per-build DOM clone+serialize, and on mobile they replace the
+// retained DOM entirely.
+let layerTemplates = new Map();
+let loadedLayers = new Set();
 let netSource = null;
 let netViewBox = null;
 let netElements = new Map();
@@ -508,7 +527,7 @@ function backLayerName() {
   const layers = meta.layers || [];
   return layers.find(name => isOuter(name) && sideOf(name) === 'B') || layers[layers.length - 1];
 }
-function firstExisting(names) { return names.find(name => layerSources.has(name)) || null; }
+function firstExisting(names) { return names.find(name => loadedLayers.has(name)) || null; }
 
 function createVisualSvg(layerName, tileIndex) {
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -709,30 +728,57 @@ function cssVariable(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
-function previewLayerSvgText(name, colour, invert, width, height, viewBox=null) {
-  const source = layerSources.get(name);
-  if (!source) return null;
-  const clone = source.cloneNode(true);
-  if (invert) invertGerberMask(clone);
-  clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
-  clone.setAttribute('x', '0');
-  clone.setAttribute('y', '0');
-  clone.setAttribute('width', String(width));
-  clone.setAttribute('height', String(height));
-  clone.setAttribute('preserveAspectRatio', 'none');
-  if (viewBox) clone.setAttribute('viewBox', viewBox.join(' '));
-  clone.style.color = colour;
+function svgAttrEscape(value) {
+  return String(value).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+}
 
-  // crispEdges is useful for producing binary analysis masks, but it makes
-  // both the browser view and the temporary navigation preview jagged.
-  // Strip local overrides and request normal high-quality SVG rasterisation.
-  for (const element of [clone, ...clone.querySelectorAll('*')]) {
-    element.removeAttribute('shape-rendering');
-    if (element.style) element.style.removeProperty('shape-rendering');
+// Serialize a normalized copy of a layer's SVG once, at load time. The root
+// tag is split just before its closing '>' so per-build attributes
+// (width/height/viewBox/colour) can be injected by cheap string splicing —
+// no per-build DOM clone, tree walk, or re-serialization, and no need to
+// keep the parsed DOM around at all on mobile.
+function buildLayerTemplates(root, name, needsInvert) {
+  const defaultViewBox = root.getAttribute('viewBox') || null;
+  const variants = needsInvert ? [false, true] : [false];
+  for (const invert of variants) {
+    const clone = root.cloneNode(true);
+    if (invert) invertGerberMask(clone);
+    clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+    const baseStyle = clone.getAttribute('style') || '';
+    for (const attr of ['x', 'y', 'width', 'height', 'viewBox', 'preserveAspectRatio', 'style']) {
+      clone.removeAttribute(attr);
+    }
+    // crispEdges is useful for producing binary analysis masks, but it makes
+    // both the browser view and the temporary navigation preview jagged.
+    // Strip local overrides and request normal high-quality rasterisation.
+    for (const element of [clone, ...clone.querySelectorAll('*')]) {
+      element.removeAttribute('shape-rendering');
+      if (element.style) element.style.removeProperty('shape-rendering');
+    }
+    clone.setAttribute('shape-rendering', 'geometricPrecision');
+    const text = new XMLSerializer().serializeToString(clone);
+    const match = text.match(/<svg\b[^>]*>/);
+    if (!match) fail(`Unable to locate the SVG root element in layer ${name}`);
+    // Split just before the tag close; mind self-closing roots ("/>").
+    const cut = match.index + match[0].length - (match[0].endsWith('/>') ? 2 : 1);
+    layerTemplates.set(`${name}\u0000${invert ? 1 : 0}`, {
+      head: text.slice(0, cut),
+      tail: text.slice(cut),
+      defaultViewBox,
+      baseStyle,
+    });
   }
-  clone.setAttribute('shape-rendering', 'geometricPrecision');
+}
 
-  return new XMLSerializer().serializeToString(clone);
+function previewLayerSvgText(name, colour, invert, width, height, viewBox=null) {
+  const template = layerTemplates.get(`${name}\u0000${invert ? 1 : 0}`);
+  if (!template) return null;
+  const box = viewBox ? viewBox.join(' ') : template.defaultViewBox;
+  const style = (template.baseStyle ? template.baseStyle + ';' : '') + 'color:' + colour;
+  let attrs = ` x="0" y="0" width="${width}" height="${height}" preserveAspectRatio="none"`;
+  if (box) attrs += ` viewBox="${svgAttrEscape(box)}"`;
+  attrs += ` style="${svgAttrEscape(style)}"`;
+  return template.head + attrs + template.tail;
 }
 
 async function decodeSvgPreview(text) {
@@ -756,7 +802,7 @@ async function decodeSvgPreview(text) {
 }
 
 function previewBitmap(name, colour, invert, width, height, {viewBox=null, cache=previewBitmapCache} = {}) {
-  if (!layerSources.has(name)) return Promise.resolve(null);
+  if (!layerTemplates.has(`${name}\u0000${invert ? 1 : 0}`)) return Promise.resolve(null);
   const viewKey = viewBox ? viewBox.map(value => Number(value).toFixed(5)).join(',') : 'full';
   const key = `${name}\u0000${colour}\u0000${invert ? 1 : 0}\u0000${width}x${height}\u0000${viewKey}`;
   if (!cache.has(key)) {
@@ -885,6 +931,9 @@ async function buildNavigationPreviews(generation) {
       console.warn(`Unable to build navigation preview for ${tile.dataset.layer}:`, error);
     }
   }
+  // The decoded SVG rasters are only useful for speeding up identical
+  // rebuilds; on memory-constrained mobile devices, free them instead.
+  if (IS_MOBILE && generation === previewBuildGeneration) previewBitmapCache = new Map();
 }
 
 function schedulePreviewRebuild() {
@@ -1031,6 +1080,7 @@ async function buildLocalNavigationPreviews(spec, generation) {
   }
   localPreviewState = spec;
   if (MOBILE_PREVIEW_ONLY) updateNavigationPreviewChoice();
+  if (IS_MOBILE) localPreviewBitmapCache = new Map();
 }
 
 function scheduleLocalPreviewRebuild(delay=90) {
@@ -1552,7 +1602,11 @@ function beginPan(event) {
   }
   if (activePointers.size > 2 || pinchActive) return;
   isPanning = true;
-  isPanelPanning = event.button === 1 || event.button === 2 || event.altKey;
+  // Middle/right/Alt-drag moves the window grid, as before — and so does a
+  // plain drag that starts on the empty background outside any layer window.
+  // On touch devices that background drag is the only way to move the grid.
+  isPanelPanning = event.button === 1 || event.button === 2 || event.altKey ||
+    !(event.target.closest && event.target.closest('.tile'));
   panMoved = false;
   panNavigationStarted = false;
   panStartX = event.clientX;
@@ -1654,6 +1708,12 @@ function endPan(event) {
 
 async function init() {
   if (IS_MOBILE) document.body.classList.add('mobile-light');
+  // On mobile, start with the controls tucked away (unless the user has
+  // explicitly shown them before) — the board is the point on a phone.
+  try {
+    const stored = localStorage.getItem('pcbnets.sidebarCollapsed');
+    if (IS_MOBILE && stored === null) localStorage.setItem('pcbnets.sidebarCollapsed', '1');
+  } catch {}
   // iOS Safari fires proprietary gesture events for two-finger pinches;
   // prevent them so the page itself never zooms — the viewer handles pinch
   // through pointer events instead.
@@ -1675,17 +1735,25 @@ async function init() {
   const requiredLayers = new Set(meta.layers || []);
   const netFile = meta.netmap || 'netmap.svg';
   const netTextPromise = fetchText(netFile, 'netmap.svg');
-  const layerResults = await Promise.all([...names].map(async name => {
+  // Load layers one at a time: parse, validate, build the serialized text
+  // templates, then (on mobile) let the parsed DOM and raw text go before
+  // fetching the next layer, so peak memory stays at roughly one layer
+  // instead of every layer at once. Desktop keeps the DOMs for the live
+  // inline board artwork.
+  const maskNames = new Set(meta.mask_layers || []);
+  for (const name of names) {
     const file = (meta.layer_svgs && meta.layer_svgs[name]) || `${name}.svg`;
     const text = requiredLayers.has(name)
       ? await fetchText(file, `SVG layer ${name}`)
       : await fetchOptionalText(file);
-    if (text === null) return null;
+    if (text === null) continue;
     const root = parseSvg(text, file);
     checkSvgSize(root, file, boardW, boardH);
-    return [name, root];
-  }));
-  for (const result of layerResults) if (result) layerSources.set(result[0], result[1]);
+    loadedLayers.add(name);
+    buildLayerTemplates(root, name, maskNames.has(name));
+    if (!MOBILE_PREVIEW_ONLY) layerSources.set(name, root);
+    await yieldToInput();
+  }
 
   netSource = parseSvg(await netTextPromise, netFile);
   netViewBox = svgViewBox(netSource,
