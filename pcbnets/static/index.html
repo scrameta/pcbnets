@@ -202,6 +202,12 @@
   body.navigation-settling .tile.preview-local-active.local-preview-ready .tile-local-preview {
     visibility: visible;
   }
+  /* Mobile light mode: there is no live SVG board, so the active preview is
+     the display at all times, not just while navigating. */
+  body.mobile-light .tile.preview-full-active.preview-ready .tile-preview,
+  body.mobile-light .tile.preview-local-active.local-preview-ready .tile-local-preview {
+    visibility: visible;
+  }
   .net-shape {
     fill: transparent;
     stroke: transparent;
@@ -339,13 +345,22 @@ let lastViewportH = 0;
 const PANEL_SCALE_MIN = 0.04;
 const PANEL_SCALE_MAX = 8;
 const SCROLL_PAD = 32;
+// Mobile Safari (and mobile browsers generally) enforce hard memory limits;
+// a few large canvases plus N inline supersampled SVG layers is enough to
+// get the page killed on an iPhone. On such devices run a "light" mode:
+// smaller preview budgets, and preview-only rendering (the live inline SVG
+// boards are never attached — see MOBILE_PREVIEW_ONLY usage).
+const IS_MOBILE = (navigator.maxTouchPoints || 0) > 1 &&
+  /iPhone|iPad|iPod|Android|Mobile|Macintosh/i.test(navigator.userAgent);
+const MOBILE_PREVIEW_ONLY = IS_MOBILE;
+
 const PREVIEW_BASE_SCALE = 0.50;
-const PREVIEW_MAX_PIXELS = 8_000_000;
+const PREVIEW_MAX_PIXELS = IS_MOBILE ? 2_000_000 : 8_000_000;
 const LOCAL_PREVIEW_COVERAGE = 2.75;
 const LOCAL_PREVIEW_RESOLUTION_HEADROOM = 2.45;
-const LOCAL_PREVIEW_DPR_MAX = 3;
-const LOCAL_PREVIEW_MAX_DIMENSION = 8192;
-const LOCAL_PREVIEW_MAX_PIXELS = 16_000_000;
+const LOCAL_PREVIEW_DPR_MAX = IS_MOBILE ? 2 : 3;
+const LOCAL_PREVIEW_MAX_DIMENSION = IS_MOBILE ? 4096 : 8192;
+const LOCAL_PREVIEW_MAX_PIXELS = IS_MOBILE ? 4_000_000 : 16_000_000;
 
 // Full-board fallback previews (used when zoomed out or before the local
 // crop is ready) scale with the display's pixel density so they don't look
@@ -619,7 +634,7 @@ function buildTiles() {
     visual.draggable = false;
     visual.style.width = `${boardW}px`;
     visual.style.height = `${boardH}px`;
-    visual.appendChild(createVisualSvg(name, index));
+    if (!MOBILE_PREVIEW_ONLY) visual.appendChild(createVisualSvg(name, index));
 
     const preview = document.createElement('canvas');
     preview.className = 'tile-preview';
@@ -836,6 +851,8 @@ async function paintTilePreview(canvas, layerName, width, height, {viewBox=null,
     ctx.globalAlpha = .92;
     ctx.drawImage(silkCanvas, 0, 0);
     ctx.restore();
+    silkCanvas.width = 0;
+    silkCanvas.height = 0;
   }
 
   for (const drillName of (meta.drill_layers || [])) {
@@ -851,7 +868,10 @@ async function buildTilePreview(tile, generation) {
   const height = Math.max(1, Math.round(boardH * scale));
   await paintTilePreview(canvas, tile.dataset.layer, width, height,
     {shouldAbort: () => generation !== previewBuildGeneration});
-  if (generation === previewBuildGeneration) tile.classList.add('preview-ready');
+  if (generation === previewBuildGeneration) {
+    tile.classList.add('preview-ready');
+    if (MOBILE_PREVIEW_ONLY) updateNavigationPreviewChoice();
+  }
 }
 
 async function buildNavigationPreviews(generation) {
@@ -1003,9 +1023,14 @@ async function buildLocalNavigationPreviews(spec, generation) {
     ctx.imageSmoothingQuality = 'high';
     ctx.clearRect(0, 0, target.width, target.height);
     ctx.drawImage(sourceCanvas, 0, 0);
+    // Explicitly release the scratch canvas: iOS Safari accounts canvas
+    // memory aggressively and GC alone reclaims it too late.
+    sourceCanvas.width = 0;
+    sourceCanvas.height = 0;
     tile.classList.add('local-preview-ready');
   }
   localPreviewState = spec;
+  if (MOBILE_PREVIEW_ONLY) updateNavigationPreviewChoice();
 }
 
 function scheduleLocalPreviewRebuild(delay=90) {
@@ -1080,7 +1105,9 @@ function fittedPanelScale() {
   const padding = 16;
   const vw = Math.max(1, viewport.clientWidth - 2 * padding);
   const vh = Math.max(1, viewport.clientHeight - 2 * padding);
-  const value = Math.min(1, vw / gridW, vh / gridH);
+  // Small boards (few source pixels) are allowed to scale up past 100% so
+  // they still fill the window; the SVG artwork stays crisp when upscaled.
+  const value = clamp(Math.min(vw / gridW, vh / gridH), PANEL_SCALE_MIN, PANEL_SCALE_MAX);
   return Number.isFinite(value) && value > 0 ? value : 1;
 }
 
@@ -1432,16 +1459,20 @@ async function revealBoardsProgressively(generation) {
   // Unhide one tile's live SVG per frame pair so each expensive raster is a
   // short, separately-interruptible block. A new pan or wheel gesture bumps
   // navigationSettleGeneration (via showNavigationMode) and we bail out,
-  // leaving the cheap canvas previews in charge.
-  for (const tile of tilesInRevealOrder()) {
-    tile.classList.add('board-revealed');
-    await nextFrame();
-    await nextFrame();
-    if (settleAborted(generation)) return;
+  // leaving the cheap canvas previews in charge. In mobile light mode there
+  // are no live boards to reveal, so the previews simply stay in charge.
+  if (!MOBILE_PREVIEW_ONLY) {
+    for (const tile of tilesInRevealOrder()) {
+      tile.classList.add('board-revealed');
+      await nextFrame();
+      await nextFrame();
+      if (settleAborted(generation)) return;
+    }
   }
   document.body.classList.remove('navigation-settling');
   for (const tile of tileElements) tile.classList.remove('board-revealed');
-  clearNavigationPreviewChoice();
+  if (MOBILE_PREVIEW_ONLY) updateNavigationPreviewChoice();
+  else clearNavigationPreviewChoice();
   scheduleLocalPreviewRebuild();
 }
 
@@ -1463,10 +1494,63 @@ function pulseNavigation(delay=200) {
   }, delay);
 }
 
+const activePointers = new Map();
+let pinchActive = false;
+let pinchLastDist = 0;
+let pinchLastX = 0;
+let pinchLastY = 0;
+
+function startPinch() {
+  const [a, b] = [...activePointers.values()];
+  pinchActive = true;
+  isPanning = false;
+  isPanelPanning = false;
+  panMoved = true;
+  pendingPickNet = null;
+  pendingPickLayer = null;
+  pinchLastDist = Math.hypot(a.x - b.x, a.y - b.y);
+  pinchLastX = (a.x + b.x) / 2;
+  pinchLastY = (a.y + b.y) / 2;
+  if (!panNavigationStarted) {
+    panNavigationStarted = true;
+    beginPointerNavigation();
+  }
+}
+
+function movePinch() {
+  const [a, b] = [...activePointers.values()];
+  const dist = Math.hypot(a.x - b.x, a.y - b.y);
+  const midX = (a.x + b.x) / 2;
+  const midY = (a.y + b.y) / 2;
+  // Pan by the midpoint movement, mirroring the single-finger drag math…
+  const dx = midX - pinchLastX;
+  const dy = midY - pinchLastY;
+  const speed = Math.max(.001, panelScale * contentZoom);
+  contentPanX += (flipped ? 1 : -1) * dx / speed;
+  contentPanY += -dy / speed;
+  // …then zoom about the midpoint by the finger-distance ratio.
+  if (pinchLastDist > 0 && dist > 0) {
+    setZoomAt(midX, midY, contentZoom * (dist / pinchLastDist));
+  } else {
+    clampContentPan();
+    scheduleContentTransform();
+  }
+  pinchLastDist = dist;
+  pinchLastX = midX;
+  pinchLastY = midY;
+}
+
 function beginPan(event) {
   if (isUiTarget(event.target) || ![0,1,2].includes(event.button)) return;
   // Prevent native SVG/image dragging and text selection from stealing the gesture.
   event.preventDefault();
+  activePointers.set(event.pointerId, {x: event.clientX, y: event.clientY});
+  viewport.setPointerCapture(event.pointerId);
+  if (activePointers.size === 2) {
+    startPinch();
+    return;
+  }
+  if (activePointers.size > 2 || pinchActive) return;
   isPanning = true;
   isPanelPanning = event.button === 1 || event.button === 2 || event.altKey;
   panMoved = false;
@@ -1481,10 +1565,18 @@ function beginPan(event) {
   pendingPickNet = shape ? Number(shape.dataset.netId) : null;
   pendingPickLayer = shape ? shape.dataset.layer : null;
   viewport.classList.add('dragging');
-  viewport.setPointerCapture(event.pointerId);
 }
 
 function movePan(event) {
+  const tracked = activePointers.get(event.pointerId);
+  if (tracked) {
+    tracked.x = event.clientX;
+    tracked.y = event.clientY;
+  }
+  if (pinchActive) {
+    if (tracked && activePointers.size >= 2) movePinch();
+    return;
+  }
   if (!isPanning) return;
   const dx = event.clientX - panStartX;
   const dy = event.clientY - panStartY;
@@ -1510,6 +1602,37 @@ function movePan(event) {
 }
 
 function endPan(event) {
+  activePointers.delete(event.pointerId);
+  try { viewport.releasePointerCapture(event.pointerId); } catch {}
+
+  if (pinchActive) {
+    if (activePointers.size >= 2) {
+      // Still pinching with the remaining fingers; rebase the gesture.
+      const [a, b] = [...activePointers.values()];
+      pinchLastDist = Math.hypot(a.x - b.x, a.y - b.y);
+      pinchLastX = (a.x + b.x) / 2;
+      pinchLastY = (a.y + b.y) / 2;
+      return;
+    }
+    pinchActive = false;
+    if (activePointers.size === 1) {
+      // One finger left: hand off to a normal pan without lifting.
+      const [rest] = [...activePointers.values()];
+      isPanning = true;
+      isPanelPanning = false;
+      panMoved = true;
+      panStartX = rest.x;
+      panStartY = rest.y;
+      panOrigX = contentPanX;
+      panOrigY = contentPanY;
+      return;
+    }
+    viewport.classList.remove('dragging');
+    panNavigationStarted = false;
+    endPointerNavigation();
+    return;
+  }
+
   if (!isPanning) return;
   const moved = panMoved;
   isPanning = false;
@@ -1518,7 +1641,6 @@ function endPan(event) {
   viewport.classList.remove('dragging');
   if (panNavigationStarted) endPointerNavigation();
   panNavigationStarted = false;
-  try { viewport.releasePointerCapture(event.pointerId); } catch {}
 
   if (event.type === 'pointerup' && event.button === 0 && !moved) {
     const point = boardPointAtClient(event.clientX, event.clientY);
@@ -1531,6 +1653,13 @@ function endPan(event) {
 }
 
 async function init() {
+  if (IS_MOBILE) document.body.classList.add('mobile-light');
+  // iOS Safari fires proprietary gesture events for two-finger pinches;
+  // prevent them so the page itself never zooms — the viewer handles pinch
+  // through pointer events instead.
+  for (const type of ['gesturestart', 'gesturechange', 'gestureend']) {
+    document.addEventListener(type, event => event.preventDefault(), {passive: false});
+  }
   meta = JSON.parse(await fetchText('meta.json', 'metadata'));
   boardW = Number(meta.width || meta.tile_w);
   boardH = Number(meta.height || meta.tile_h);
