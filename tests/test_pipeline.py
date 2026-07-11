@@ -18,6 +18,25 @@ from pcbnets import (
 )
 
 
+def test_svg_corrections_allow_invert_only():
+    from pcbnets.cli import _check_svg_corrections
+
+    _check_svg_corrections(
+        {'corrections': {'In1_Cu': {'invert': True, 'offset': [0, 0]}}},
+        ['In1_Cu'],
+    )
+
+
+def test_svg_corrections_reject_offsets():
+    from pcbnets.cli import _check_svg_corrections
+
+    with pytest.raises(ValueError, match='alignment.*In1_Cu'):
+        _check_svg_corrections(
+            {'corrections': {'In1_Cu': {'invert': True, 'offset': [2, 0]}}},
+            ['In1_Cu'],
+        )
+
+
 def make_mask(w=200, h=100, shapes=()):
     img = Image.new('L', (w, h), 0)
     d = ImageDraw.Draw(img)
