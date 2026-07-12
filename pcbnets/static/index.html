@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>pcbnets viewer</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"/>
+<title>pcbnets — WebGL viewer</title>
 <style>
   :root {
     --bg: #1a1a1a;
@@ -12,1669 +12,1586 @@
     --muted: #888;
     --highlight: rgba(255, 80, 80, 0.72);
     --substrate: #2b2416;
+    --inner-substrate: #050505;
     --outer-copper: #c79a32;
     --inner-copper: #a9b0b8;
     --soldermask: #123d25;
-    --silk: #fff;
+    --silk: #ffffff;
     --drill: #050505;
   }
   * { box-sizing: border-box; }
-  html, body {
-    margin: 0;
-    height: 100%;
-    overflow: hidden;
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex;
     background: var(--bg);
     color: var(--fg);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font: 13px/1.45 system-ui, sans-serif;
+    overflow: hidden;
+    touch-action: none;
+    overscroll-behavior: none;
   }
-  body { display: flex; }
-
   #sidebar {
     width: 280px;
-    flex: 0 0 280px;
-    padding: 16px;
-    overflow-y: auto;
+    flex: none;
+    padding: 14px 16px;
     background: var(--panel);
     border-right: 1px solid #333;
+    overflow-y: auto;
+    z-index: 40;
   }
   body.sidebar-collapsed #sidebar { display: none; }
-  /* Mobile light mode: the sidebar overlays the board instead of consuming
-     layout width — on a phone a 280px flex column leaves almost no viewport,
-     which also poisoned the initial fit-to-screen calculation. */
   body.mobile-light #sidebar {
     position: fixed;
     z-index: 95;
-    top: 0;
-    left: 0;
-    bottom: 0;
+    top: 0; left: 0; bottom: 0;
     width: min(300px, 85vw);
-    flex: none;
-    box-sizing: border-box;
     box-shadow: 4px 0 24px rgba(0, 0, 0, .55);
   }
-  #sidebar h1 { margin: 0 0 12px; font-size: 16px; }
+  #sidebar h1 { margin: 0 0 10px; font-size: 16px; }
   #sidebar p { margin: 4px 0; color: var(--muted); font-size: 12px; }
   #sidebar label.section {
     display: block;
-    margin-top: 12px;
-    color: var(--muted);
+    margin: 14px 0 4px;
     font-size: 11px;
+    letter-spacing: .08em;
     text-transform: uppercase;
+    color: var(--muted);
   }
   #sidebar input[type=number] {
     width: 100%;
-    padding: 6px;
+    padding: 5px 8px;
+    background: #1b1b1b;
     color: var(--fg);
-    background: #111;
-    border: 1px solid #333;
-    border-radius: 3px;
-    font: inherit;
+    border: 1px solid #3a3a3a;
+    border-radius: 4px;
   }
   button {
-    margin-top: 6px;
-    padding: 6px 10px;
+    padding: 5px 10px;
+    margin: 2px 4px 2px 0;
+    background: #383838;
     color: var(--fg);
-    background: #333;
-    border: 1px solid #444;
-    border-radius: 3px;
+    border: 1px solid #4a4a4a;
+    border-radius: 4px;
     cursor: pointer;
     font: inherit;
-    font-size: 12px;
   }
   button:hover { background: #444; }
-  button.active { background: #2a5a7a; border-color: #4ac; }
-  .toggle-row { display: flex; flex-wrap: wrap; gap: 6px; }
-  .hint { color: var(--muted); font-size: 11px; line-height: 1.35; }
-  .readout { margin-top: 4px; color: var(--muted); font-size: 11px; }
-  #net-info { margin-top: 16px; font-size: 13px; }
-  #net-info .layer-list { margin-top: 4px; color: var(--muted); }
-  #error { margin-top: 12px; color: #ff9d9d; white-space: pre-wrap; }
+  .readout { font-size: 12px; color: var(--muted); }
+  #net-info { min-height: 34px; font-size: 12px; }
+  #tile-list div { color: var(--muted); font-size: 12px; }
+  #status { font-size: 12px; color: var(--muted); white-space: pre-line; }
+  .hint { font-size: 11px !important; }
 
   #viewport {
     position: relative;
     flex: 1;
-    min-width: 0;
-    overflow: auto;
-    background: #050505;
+    overflow: hidden;
     cursor: crosshair;
-    touch-action: none;
-    user-select: none;
-    -webkit-user-select: none;
-    -webkit-user-drag: none;
-    scrollbar-color: #555 #181818;
   }
-  #viewport *,
-  #viewport svg,
-  #viewport canvas {
-    user-select: none;
-    -webkit-user-select: none;
-    -webkit-user-drag: none;
-  }
-  #viewport.dragging { cursor: move; }
-  #sidebar-tab {
-    position: fixed;
-    z-index: 100;
-    top: 10px;
-    left: 10px;
-    display: none;
-    padding: 6px 10px;
-    color: var(--fg);
-    background: rgba(36, 36, 36, .92);
-    border: 1px solid #444;
-    border-radius: 3px;
-    cursor: pointer;
-    font-size: 14px;
-  }
-  body.sidebar-collapsed #sidebar-tab { display: block; }
-
-  #world {
-    position: relative;
+  #glcanvas {
+    position: absolute;
+    inset: 0;
     width: 100%;
     height: 100%;
-    min-width: 100%;
-    min-height: 100%;
+    display: block;
+    pointer-events: none;
   }
-  #grid-stage {
-    position: absolute;
-    left: 0;
-    top: 0;
-  }
-  #grid-inner {
-    position: absolute;
-    left: 0;
-    top: 0;
-    transform-origin: 0 0;
-  }
+  #tiles { position: absolute; left: 0; top: 0; }
   .tile {
     position: absolute;
-    overflow: hidden;
-    background: #050505;
     box-shadow: inset 0 0 0 1px #333;
-    contain: layout paint style;
-  }
-  .tile-board,
-  .tile-preview,
-  .tile-local-preview,
-  .tile-netmap,
-  .tile-net-highlight {
-    position: absolute;
-    left: 0;
-    top: 0;
-    transform-origin: 0 0;
-    will-change: transform;
-  }
-  .tile-board { z-index: 0; pointer-events: none; }
-  .tile-preview,
-  .tile-local-preview {
-    z-index: 10;
-    visibility: hidden;
-    pointer-events: none;
-    image-rendering: auto;
-  }
-  .tile-local-preview { z-index: 11; }
-  .tile-local-preview-canvas {
-    position: absolute;
-    image-rendering: auto;
     pointer-events: none;
   }
-  /* The source SVGs may request crispEdges for mask/PNG generation.
-     Override that only for the visible vector artwork so the browser
-     anti-aliases the final display normally. */
-  .tile-board svg,
-  .tile-board svg * {
-    shape-rendering: geometricPrecision !important;
-  }
-  .tile-board > svg,
-  .tile-netmap > svg {
-    position: absolute;
-    inset: 0;
-    display: block;
-    width: 100%;
-    height: 100%;
-    overflow: visible;
-  }
-  .tile-netmap { z-index: 20; pointer-events: none; }
-  .tile-netmap svg { pointer-events: none; }
-  body.navigating .tile-netmap,
-  body.navigation-settling .tile-netmap { visibility: hidden; }
-  /* Hide the live vector artwork while navigating. During the settling phase
-     each tile's board is revealed one at a time (see
-     revealBoardsProgressively) *underneath* the opaque preview canvases, so
-     the expensive SVG re-raster happens in small per-tile chunks that can be
-     interrupted by a new gesture, instead of one long input-blocking paint. */
-  body.navigating .tile.preview-full-active.preview-ready .tile-board,
-  body.navigating .tile.preview-local-active.local-preview-ready .tile-board,
-  body.navigation-settling .tile.preview-full-active.preview-ready:not(.board-revealed) .tile-board,
-  body.navigation-settling .tile.preview-local-active.local-preview-ready:not(.board-revealed) .tile-board {
-    visibility: hidden;
-  }
-  body.navigating .tile.preview-full-active.preview-ready .tile-preview,
-  body.navigation-settling .tile.preview-full-active.preview-ready .tile-preview {
-    visibility: visible;
-  }
-  body.navigating .tile.preview-local-active.local-preview-ready .tile-local-preview,
-  body.navigation-settling .tile.preview-local-active.local-preview-ready .tile-local-preview {
-    visibility: visible;
-  }
-  /* Mobile light mode: there is no live SVG board, so the active preview is
-     the display at all times, not just while navigating. */
-  body.mobile-light .tile.preview-full-active.preview-ready .tile-preview,
-  body.mobile-light .tile.preview-local-active.local-preview-ready .tile-local-preview {
-    visibility: visible;
-  }
-  .net-shape {
-    fill: transparent;
-    stroke: transparent;
-    pointer-events: all;
-    cursor: crosshair;
-  }
-  /* The selected class on the netmap is bookkeeping; the visible highlight
-     lives in the lightweight .tile-net-highlight overlay, which contains only
-     the selected net's shapes and therefore stays visible (and cheap to
-     transform) while panning and zooming. */
-  .tile-net-highlight {
-    z-index: 21;
-  }
-  .tile-net-highlight,
-  .tile-net-highlight * {
-    pointer-events: none !important;
-  }
-  .tile-net-highlight > svg {
-    position: absolute;
-    inset: 0;
-    display: block;
-    width: 100%;
-    height: 100%;
-    overflow: visible;
-  }
-  .tile-net-highlight [data-net-id] {
-    fill: var(--highlight) !important;
-    stroke: var(--highlight) !important;
-  }
-  .silk-layer.silk-hidden { display: none; }
   .tile-label {
     position: absolute;
-    z-index: 30;
-    padding: 2px 6px;
-    color: #fff;
-    background: rgba(0, 0, 0, .75);
-    border-radius: 2px;
+    left: 4px;
+    top: 2px;
     font-size: 11px;
-    line-height: 1.3;
-    pointer-events: none;
-    transform-origin: 0 0;
-    white-space: nowrap;
+    color: rgba(224, 224, 224, .8);
+    text-shadow: 0 1px 2px rgba(0,0,0,.8);
+    user-select: none;
   }
-  .tile-label.flipped { background: rgba(120, 60, 0, .85); }
+  #sidebar-tab {
+    position: absolute;
+    left: 8px;
+    top: 8px;
+    z-index: 30;
+    display: none;
+  }
+  body.sidebar-collapsed #sidebar-tab { display: block; }
+  #fatal {
+    position: absolute;
+    inset: 20% 10%;
+    display: none;
+    color: #f0a0a0;
+    z-index: 100;
+    white-space: pre-wrap;
+  }
 </style>
 </head>
 <body>
 <div id="sidebar">
-  <h1>pcbnets viewer</h1>
-  <p id="loading">Loading…</p>
-  <div id="controls" style="display:none">
-    <label class="section">View</label>
-    <div class="toggle-row">
-      <button id="toggle-fit">Fit screen</button>
-      <button id="toggle-flip">View from back</button>
-      <button id="toggle-silk" style="display:none">Show silk</button>
-      <button id="toggle-sidebar">Hide panel</button>
-    </div>
+  <h1>pcbnets <span style="color:var(--muted);font-size:11px">webgl</span></h1>
+  <p id="status">Loading…</p>
 
-    <label class="section">Layer windows</label>
-    <div class="toggle-row">
-      <button id="panel-zoom-out">− smaller</button>
-      <button id="panel-zoom-fit">Fit windows</button>
-      <button id="panel-zoom-in">+ larger</button>
-    </div>
-    <p id="panel-scale-readout" class="readout"></p>
-    <p class="hint">Wheel or pinch: zoom board contents. Shift+wheel or +/-: resize the layer windows. Middle/right drag, Alt+drag, or drag the empty background: move the window grid. H hides/shows this panel.</p>
-
-    <label class="section">Find net</label>
-    <input id="net-search" min="1" placeholder="net id" type="number"/>
-
-    <label class="section">Layers</label>
-    <p id="tile-list"></p>
-    <div id="net-info"><em style="color:var(--muted)">Click a net</em></div>
-    <div id="error"></div>
+  <label class="section">View</label>
+  <div>
+    <button id="btn-fit">Fit screen</button>
+    <button id="btn-flip">Flip board</button>
+    <button id="btn-silk">Silk on/off</button>
   </div>
+  <div>
+    <button id="panel-zoom-out">&minus; smaller</button>
+    <button id="panel-zoom-in">+ larger</button>
+    <button id="btn-hide">Hide panel</button>
+  </div>
+  <p id="panel-scale-readout" class="readout"></p>
+  <p class="hint">Wheel or pinch: zoom board contents. Shift+wheel or +/-: resize the layer windows. Move the window grid: Alt/Space+drag or middle/right drag anywhere, drag the background, Alt+wheel, or arrow keys (at zoom 1&times;, plain drag moves the grid too). Click a trace to select its net. H hides/shows this panel.</p>
+
+  <label class="section">Find net</label>
+  <input id="net-search" min="1" placeholder="net id" type="number"/>
+  <div>
+    <button id="btn-net-go">Highlight</button>
+    <button id="btn-net-clear">Clear</button>
+  </div>
+  <p id="net-info"></p>
+
+  <label class="section">Layers</label>
+  <div id="tile-list"></div>
 </div>
+<button id="sidebar-tab" title="Show panel">&#9776;</button>
 <div id="viewport">
-  <button id="sidebar-tab" title="Show controls" aria-label="Show controls">☰</button>
-  <div id="world">
-    <div id="grid-stage"><div id="grid-inner"></div></div>
-  </div>
+  <canvas id="glcanvas"></canvas>
+  <div id="tiles"></div>
 </div>
+<div id="fatal"></div>
 
 <script>
 'use strict';
 
-const viewport = document.getElementById('viewport');
-const world = document.getElementById('world');
-const gridStage = document.getElementById('grid-stage');
-const gridInner = document.getElementById('grid-inner');
-const sidebarTab = document.getElementById('sidebar-tab');
-const panelScaleReadout = document.getElementById('panel-scale-readout');
-const errorEl = document.getElementById('error');
+/* ================================================================== */
+/* Geometry parser — DOM-free; identical code is exercised by the     */
+/* node test suite against real gerbv output.                          */
+/* ================================================================== */
 
-let meta = null;
-let boardW = 0;
-let boardH = 0;
-let gridW = 0;
-let gridH = 0;
-let placements = new Map();
-let layerSources = new Map();
-// Per-layer serialized SVG text templates (see buildLayerTemplates). These
-// replace per-build DOM clone+serialize, and on mobile they replace the
-// retained DOM entirely. Keyed by name + EFFECTIVE inversion (requested
-// invert OR the layer's polarity correction from meta.corrections).
-let layerTemplates = new Map();
-let loadedLayers = new Set();
-let netSource = null;
-let netViewBox = null;
-let netElements = new Map();
-let layerNetIds = new Map();
-let highlightSvgs = new Map();
-let selectedNetElements = [];
-let transformElements = [];
-let tileLabelElements = [];
-let tileElements = [];
-let previewBuildGeneration = 0;
-let previewBitmapCache = new Map();
-let localPreviewBuildGeneration = 0;
-let localPreviewBuildTimer = 0;
-let localPreviewBitmapCache = new Map();
-let localPreviewState = null;
-let navigationSettleGeneration = 0;
-let currentNet = null;
-let lastPick = null;
+function tokenizePath(d) {
+  const tokens = [];
+  const re = /([MLHVCSQTAZmlhvcsqtaz])|(-?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)/g;
+  let m;
+  while ((m = re.exec(d)) !== null) tokens.push(m[1] !== undefined ? m[1] : parseFloat(m[2]));
+  return tokens;
+}
 
-let contentTransformFrame = 0;
-let scrollAreaFrame = 0;
-let navigationTimer = 0;
-let pointerNavigating = false;
-let panNavigationStarted = false;
+function subdivideCubic(x0, y0, x1, y1, x2, y2, x3, y3, tol, depth, out) {
+  // Flatness: max distance of control points from the chord.
+  const dx = x3 - x0, dy = y3 - y0;
+  const d1 = Math.abs((x1 - x0) * dy - (y1 - y0) * dx);
+  const d2 = Math.abs((x2 - x0) * dy - (y2 - y0) * dx);
+  const len = Math.hypot(dx, dy) || 1e-12;
+  if (depth >= 16 || (d1 + d2) / len <= tol) {
+    out.push(x3, y3);
+    return;
+  }
+  const x01 = (x0 + x1) / 2, y01 = (y0 + y1) / 2;
+  const x12 = (x1 + x2) / 2, y12 = (y1 + y2) / 2;
+  const x23 = (x2 + x3) / 2, y23 = (y2 + y3) / 2;
+  const x012 = (x01 + x12) / 2, y012 = (y01 + y12) / 2;
+  const x123 = (x12 + x23) / 2, y123 = (y12 + y23) / 2;
+  const xm = (x012 + x123) / 2, ym = (y012 + y123) / 2;
+  subdivideCubic(x0, y0, x01, y01, x012, y012, xm, ym, tol, depth + 1, out);
+  subdivideCubic(xm, ym, x123, y123, x23, y23, x3, y3, tol, depth + 1, out);
+}
 
-let panelScale = 1;
-let panelX = 16;
-let panelY = 16;
-let scrollOriginX = 0;
-let scrollOriginY = 0;
-let lastViewportW = 0;
-let lastViewportH = 0;
-const PANEL_SCALE_MIN = 0.04;
-const PANEL_SCALE_MAX = 8;
-const SCROLL_PAD = 32;
-// Mobile Safari (and mobile browsers generally) enforce hard memory limits;
-// a few large canvases plus N inline supersampled SVG layers is enough to
-// get the page killed on an iPhone. On such devices run a "light" mode:
-// smaller preview budgets, and preview-only rendering (the live inline SVG
-// boards are never attached — see MOBILE_PREVIEW_ONLY usage).
+// Endpoint → centre parametrisation per W3C spec, then subdivide by angle.
+function flattenArc(x0, y0, rx, ry, xrot, largeArc, sweep, x1, y1, tol, out) {
+  rx = Math.abs(rx); ry = Math.abs(ry);
+  if (rx < 1e-12 || ry < 1e-12 || (x0 === x1 && y0 === y1)) { out.push(x1, y1); return; }
+  const phi = xrot * Math.PI / 180;
+  const cosp = Math.cos(phi), sinp = Math.sin(phi);
+  const dx2 = (x0 - x1) / 2, dy2 = (y0 - y1) / 2;
+  const x1p = cosp * dx2 + sinp * dy2;
+  const y1p = -sinp * dx2 + cosp * dy2;
+  const lam = (x1p * x1p) / (rx * rx) + (y1p * y1p) / (ry * ry);
+  if (lam > 1) { const s = Math.sqrt(lam); rx *= s; ry *= s; }
+  const sign = largeArc !== sweep ? 1 : -1;
+  const num = rx * rx * ry * ry - rx * rx * y1p * y1p - ry * ry * x1p * x1p;
+  const den = rx * rx * y1p * y1p + ry * ry * x1p * x1p;
+  const coef = sign * Math.sqrt(Math.max(0, num / den));
+  const cxp = coef * (rx * y1p) / ry;
+  const cyp = coef * (-ry * x1p) / rx;
+  const cx = cosp * cxp - sinp * cyp + (x0 + x1) / 2;
+  const cy = sinp * cxp + cosp * cyp + (y0 + y1) / 2;
+  const angle = (ux, uy, vx, vy) => {
+    const dot = ux * vx + uy * vy;
+    const len = Math.hypot(ux, uy) * Math.hypot(vx, vy) || 1e-12;
+    let a = Math.acos(Math.min(1, Math.max(-1, dot / len)));
+    if (ux * vy - uy * vx < 0) a = -a;
+    return a;
+  };
+  const th1 = angle(1, 0, (x1p - cxp) / rx, (y1p - cyp) / ry);
+  let dth = angle((x1p - cxp) / rx, (y1p - cyp) / ry, (-x1p - cxp) / rx, (-y1p - cyp) / ry);
+  if (!sweep && dth > 0) dth -= 2 * Math.PI;
+  if (sweep && dth < 0) dth += 2 * Math.PI;
+  // Angular step from chord tolerance: chord error ≈ r(1-cos(step/2)).
+  const r = Math.max(rx, ry);
+  const step = Math.max(0.05, 2 * Math.acos(Math.min(1, Math.max(-1, 1 - tol / Math.max(r, 1e-9)))));
+  const n = Math.max(1, Math.min(256, Math.ceil(Math.abs(dth) / step)));
+  for (let i = 1; i <= n; i++) {
+    const th = th1 + dth * (i / n);
+    const ex = rx * Math.cos(th), ey = ry * Math.sin(th);
+    out.push(cosp * ex - sinp * ey + cx, sinp * ex + cosp * ey + cy);
+  }
+  // Snap the final point exactly to the endpoint.
+  out[out.length - 2] = x1;
+  out[out.length - 1] = y1;
+}
+
+// Parse `d` into subpaths: [{pts: [x,y,...], closed: bool}, ...]
+// Curves/arcs are flattened with the given chord tolerance (board units).
+function pathToPolylines(d, tol) {
+  const t = tokenizePath(d);
+  const subs = [];
+  let pts = null;
+  let cx = 0, cy = 0;       // current point
+  let sx = 0, sy = 0;       // subpath start
+  let px = 0, py = 0;       // previous control point (for S/T)
+  let prevCmd = '';
+  let i = 0;
+  const num = () => t[i++];
+  const startSub = (x, y) => {
+    if (pts && pts.length >= 4) subs.push({pts, closed: false});
+    pts = [x, y];
+    sx = x; sy = y;
+  };
+  while (i < t.length) {
+    let cmd = t[i];
+    if (typeof cmd === 'string') { i++; } else { cmd = prevCmd === 'M' ? 'L' : prevCmd === 'm' ? 'l' : prevCmd; }
+    const rel = cmd >= 'a';
+    switch (cmd.toUpperCase()) {
+      case 'M': { let x = num(), y = num(); if (rel) { x += cx; y += cy; } startSub(x, y); cx = x; cy = y; break; }
+      case 'L': { let x = num(), y = num(); if (rel) { x += cx; y += cy; } pts.push(x, y); cx = x; cy = y; break; }
+      case 'H': { let x = num(); if (rel) x += cx; pts.push(x, cy); cx = x; break; }
+      case 'V': { let y = num(); if (rel) y += cy; pts.push(cx, y); cy = y; break; }
+      case 'C': {
+        let x1 = num(), y1 = num(), x2 = num(), y2 = num(), x = num(), y = num();
+        if (rel) { x1 += cx; y1 += cy; x2 += cx; y2 += cy; x += cx; y += cy; }
+        subdivideCubic(cx, cy, x1, y1, x2, y2, x, y, tol, 0, pts);
+        px = x2; py = y2; cx = x; cy = y; break;
+      }
+      case 'S': {
+        let x2 = num(), y2 = num(), x = num(), y = num();
+        if (rel) { x2 += cx; y2 += cy; x += cx; y += cy; }
+        const refl = /[CScs]/.test(prevCmd);
+        const x1 = refl ? 2 * cx - px : cx, y1 = refl ? 2 * cy - py : cy;
+        subdivideCubic(cx, cy, x1, y1, x2, y2, x, y, tol, 0, pts);
+        px = x2; py = y2; cx = x; cy = y; break;
+      }
+      case 'Q': {
+        let qx = num(), qy = num(), x = num(), y = num();
+        if (rel) { qx += cx; qy += cy; x += cx; y += cy; }
+        // Elevate quadratic to cubic.
+        const c1x = cx + 2 / 3 * (qx - cx), c1y = cy + 2 / 3 * (qy - cy);
+        const c2x = x + 2 / 3 * (qx - x), c2y = y + 2 / 3 * (qy - y);
+        subdivideCubic(cx, cy, c1x, c1y, c2x, c2y, x, y, tol, 0, pts);
+        px = qx; py = qy; cx = x; cy = y; break;
+      }
+      case 'T': {
+        let x = num(), y = num();
+        if (rel) { x += cx; y += cy; }
+        const refl = /[QTqt]/.test(prevCmd);
+        const qx = refl ? 2 * cx - px : cx, qy = refl ? 2 * cy - py : cy;
+        const c1x = cx + 2 / 3 * (qx - cx), c1y = cy + 2 / 3 * (qy - cy);
+        const c2x = x + 2 / 3 * (qx - x), c2y = y + 2 / 3 * (qy - y);
+        subdivideCubic(cx, cy, c1x, c1y, c2x, c2y, x, y, tol, 0, pts);
+        px = qx; py = qy; cx = x; cy = y; break;
+      }
+      case 'A': {
+        let rx = num(), ry = num(), rot = num(), laf = num(), swf = num(), x = num(), y = num();
+        if (rel) { x += cx; y += cy; }
+        flattenArc(cx, cy, rx, ry, rot, !!laf, !!swf, x, y, tol, pts);
+        cx = x; cy = y; break;
+      }
+      case 'Z': {
+        if (pts && pts.length >= 4) { subs.push({pts, closed: true}); }
+        pts = null;
+        cx = sx; cy = sy;
+        // A new subpath may start implicitly at the old start point.
+        pts = [sx, sy];
+        break;
+      }
+      default: i++; // unknown token; skip defensively
+    }
+    prevCmd = cmd;
+  }
+  if (pts && pts.length >= 4) subs.push({pts, closed: false});
+  return subs;
+}
+
+/* ------------------------------------------------------------------ */
+/* gerbv layer SVG → primitive runs                                    */
+/* ------------------------------------------------------------------ */
+
+function attrOf(tag, name) {
+  const m = tag.match(new RegExp(`${name}="([^"]*)"`));
+  return m ? m[1] : null;
+}
+
+function colourPolarity(value) {
+  if (!value || value === 'none') return 0;
+  const v = value.toLowerCase();
+  if (v === '#fefefe' || v === '#fff' || v === '#ffffff' || v === 'white') return 1;
+  if (v === '#010101' || v === '#000' || v === '#000000' || v === 'black') return -1;
+  return 0;
+}
+
+// Parse a gerbv layer SVG. Returns:
+// { width, height, runs, stats }
+// runs: [{polarity, segs: Float32Array(5*n), fans: Float32Array(6*m),
+//         bounds: [minx,miny,maxx,maxy]}], in document order, polarity-merged.
+function parseGerbvLayer(text, options = {}) {
+  const rootMatch = text.match(/<svg\b[^>]*>/);
+  if (!rootMatch) throw new Error('no <svg> root');
+  const root = rootMatch[0];
+  let width, height;
+  const vb = attrOf(root, 'viewBox');
+  if (vb) {
+    const parts = vb.trim().split(/[\s,]+/).map(Number);
+    width = parts[2]; height = parts[3];
+  } else {
+    width = parseFloat(attrOf(root, 'width'));
+    height = parseFloat(attrOf(root, 'height'));
+  }
+  if (!(width > 0 && height > 0)) throw new Error('no usable dimensions');
+
+  const tol = options.tol || Math.max(width, height) / 20000;
+
+  // Artwork lives inside the (single) mask; fall back to whole doc if absent.
+  const maskStart = text.indexOf('<mask');
+  let content;
+  if (maskStart >= 0) {
+    const open = text.indexOf('>', maskStart) + 1;
+    const close = text.indexOf('</mask>', open);
+    content = text.slice(open, close);
+  } else {
+    content = text.slice(rootMatch.index + root.length);
+  }
+
+  const stats = {elements: 0, segments: 0, fanTris: 0, skippedBackground: 0, unknownColour: 0, dots: 0};
+  const runs = [];
+  let run = null;
+  const openRun = polarity => {
+    if (!run || run.polarity !== polarity) {
+      run = {polarity, segs: [], fans: [], fanGroups: [],
+             bounds: [Infinity, Infinity, -Infinity, -Infinity]};
+      runs.push(run);
+    }
+    return run;
+  };
+  const grow = (b, x, y) => {
+    if (x < b[0]) b[0] = x; if (y < b[1]) b[1] = y;
+    if (x > b[2]) b[2] = x; if (y > b[3]) b[3] = y;
+  };
+
+  const tagRe = /<(path|circle|rect|line|polyline|polygon|ellipse)\b[^>]*>/g;
+  let m;
+  let firstElement = true;
+  while ((m = tagRe.exec(content)) !== null) {
+    const tag = m[0];
+    const kind = m[1];
+    stats.elements++;
+    const fillPol = colourPolarity(attrOf(tag, 'fill'));
+    const strokePol = colourPolarity(attrOf(tag, 'stroke'));
+    if (!fillPol && !strokePol) { stats.unknownColour++; firstElement = false; continue; }
+
+    // Collect geometry as subpaths.
+    let subs = null;
+    if (kind === 'path') {
+      const d = attrOf(tag, 'd');
+      if (!d) continue;
+      subs = pathToPolylines(d, tol);
+    } else if (kind === 'circle' || kind === 'ellipse') {
+      const cx = parseFloat(attrOf(tag, 'cx') || '0');
+      const cy = parseFloat(attrOf(tag, 'cy') || '0');
+      const rx = parseFloat(kind === 'circle' ? attrOf(tag, 'r') : attrOf(tag, 'rx'));
+      const ry = parseFloat(kind === 'circle' ? attrOf(tag, 'r') : attrOf(tag, 'ry'));
+      const n = Math.max(16, Math.min(128, Math.ceil(2 * Math.PI / Math.max(0.05, 2 * Math.acos(Math.max(-1, 1 - tol / Math.max(rx, ry, 1e-9)))))));
+      const pts = [];
+      for (let i = 0; i < n; i++) {
+        const a = 2 * Math.PI * i / n;
+        pts.push(cx + rx * Math.cos(a), cy + ry * Math.sin(a));
+      }
+      subs = [{pts, closed: true}];
+    } else if (kind === 'rect') {
+      const x = parseFloat(attrOf(tag, 'x') || '0');
+      const y = parseFloat(attrOf(tag, 'y') || '0');
+      const w = parseFloat(attrOf(tag, 'width'));
+      const h = parseFloat(attrOf(tag, 'height'));
+      subs = [{pts: [x, y, x + w, y, x + w, y + h, x, y + h], closed: true}];
+    } else if (kind === 'line') {
+      const x1 = parseFloat(attrOf(tag, 'x1') || '0'), y1 = parseFloat(attrOf(tag, 'y1') || '0');
+      const x2 = parseFloat(attrOf(tag, 'x2') || '0'), y2 = parseFloat(attrOf(tag, 'y2') || '0');
+      subs = [{pts: [x1, y1, x2, y2], closed: false}];
+    } else if (kind === 'polyline' || kind === 'polygon') {
+      const pts = (attrOf(tag, 'points') || '').trim().split(/[\s,]+/).map(Number);
+      subs = [{pts, closed: kind === 'polygon'}];
+    }
+    if (!subs || !subs.length) { firstElement = false; continue; }
+
+    // gerbv's mask base: the FIRST element, a dark fill covering the board.
+    if (firstElement && fillPol === -1) {
+      let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
+      for (const s of subs) for (let i = 0; i < s.pts.length; i += 2) {
+        minx = Math.min(minx, s.pts[i]); maxx = Math.max(maxx, s.pts[i]);
+        miny = Math.min(miny, s.pts[i + 1]); maxy = Math.max(maxy, s.pts[i + 1]);
+      }
+      if (minx <= 0 && miny <= 0 && maxx >= width && maxy >= height) {
+        stats.skippedBackground++;
+        firstElement = false;
+        continue;
+      }
+    }
+    firstElement = false;
+
+    if (strokePol) {
+      const hw = parseFloat(attrOf(tag, 'stroke-width') || '1') / 2;
+      const r = openRun(strokePol);
+      for (const s of subs) {
+        const p = s.pts;
+        const n = p.length / 2;
+        if (n === 1) {
+          r.segs.push(p[0], p[1], p[0], p[1], hw);
+          grow(r.bounds, p[0] - hw, p[1] - hw); grow(r.bounds, p[0] + hw, p[1] + hw);
+          stats.dots++;
+          continue;
+        }
+        const last = s.closed ? n : n - 1;
+        for (let i = 0; i < last; i++) {
+          const j = (i + 1) % n;
+          const x1 = p[2 * i], y1 = p[2 * i + 1], x2 = p[2 * j], y2 = p[2 * j + 1];
+          r.segs.push(x1, y1, x2, y2, hw);
+          grow(r.bounds, Math.min(x1, x2) - hw, Math.min(y1, y2) - hw);
+          grow(r.bounds, Math.max(x1, x2) + hw, Math.max(y1, y2) + hw);
+          stats.segments++;
+        }
+      }
+    }
+
+    if (fillPol) {
+      const r = openRun(fillPol);
+      // Circle subpaths (pad flashes, drills — gerbv's two-cubic circles)
+      // become SDF dot capsules: exact discs, 1 instance instead of ~20-100
+      // stencil triangles. Parity guard: only when the circle's bbox doesn't
+      // intersect any sibling subpath's bbox, so even-odd holes and
+      // overlapping shapes keep the stencil path and stay exactly correct.
+      const boxes = subs.map(s => {
+        const p = s.pts;
+        let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
+        for (let i = 0; i < p.length; i += 2) {
+          if (p[i] < minx) minx = p[i]; if (p[i] > maxx) maxx = p[i];
+          if (p[i + 1] < miny) miny = p[i + 1]; if (p[i + 1] > maxy) maxy = p[i + 1];
+        }
+        return [minx, miny, maxx, maxy];
+      });
+      const isolated = index => {
+        const a = boxes[index];
+        for (let k = 0; k < boxes.length; k++) {
+          if (k === index) continue;
+          const b = boxes[k];
+          if (subs[k].pts.length < 6) continue; // degenerate artifacts
+          if (a[0] <= b[2] && a[2] >= b[0] && a[1] <= b[3] && a[3] >= b[1]) return false;
+        }
+        return true;
+      };
+      const asCircle = s => {
+        const p = s.pts;
+        const n = p.length / 2;
+        if (!s.closed && n < 8) return null;
+        if (n < 8) return null;
+        let cx = 0, cy = 0;
+        for (let i = 0; i < p.length; i += 2) { cx += p[i]; cy += p[i + 1]; }
+        cx /= n; cy /= n;
+        let rSum = 0;
+        for (let i = 0; i < p.length; i += 2) rSum += Math.hypot(p[i] - cx, p[i + 1] - cy);
+        const radius = rSum / n;
+        if (!(radius > 0)) return null;
+        let dev = 0;
+        for (let i = 0; i < p.length; i += 2) {
+          dev = Math.max(dev, Math.abs(Math.hypot(p[i] - cx, p[i + 1] - cy) - radius));
+        }
+        // 4% covers gerbv's 4/3 two-cubic circle approximation (~2.7% radial
+        // error) while rejecting rects (41%) and obrounds.
+        return dev <= Math.max(tol * 3, 0.04 * radius) ? {cx, cy, radius} : null;
+      };
+
+      const fanSubs = [];
+      for (let si = 0; si < subs.length; si++) {
+        const s = subs[si];
+        if (s.pts.length < 6) continue; // 'Zm0 0' artifacts and stray moves
+        const circle = asCircle(s);
+        if (circle && isolated(si)) {
+          r.segs.push(circle.cx, circle.cy, circle.cx, circle.cy, circle.radius);
+          grow(r.bounds, circle.cx - circle.radius, circle.cy - circle.radius);
+          grow(r.bounds, circle.cx + circle.radius, circle.cy + circle.radius);
+          stats.dots++;
+        } else {
+          fanSubs.push(s);
+        }
+      }
+
+      // Even-odd fill via stencil-invert fan: anchor at the first remaining
+      // vertex; every edge (with implicit closing) contributes one triangle
+      // (anchor, vi, vj). Order-independent, hole-correct.
+      if (fanSubs.length) {
+        const ax = fanSubs[0].pts[0], ay = fanSubs[0].pts[1];
+        for (const s of fanSubs) {
+          const p = s.pts;
+          const n = p.length / 2;
+          const startTri = r.fans.length / 6;
+          const bb = boxes[subs.indexOf(s)];
+          for (let i = 0; i < n; i++) {
+            const j = (i + 1) % n; // fills always auto-close
+            const x1 = p[2 * i], y1 = p[2 * i + 1], x2 = p[2 * j], y2 = p[2 * j + 1];
+            if (x1 === x2 && y1 === y2) continue;
+            r.fans.push(ax, ay, x1, y1, x2, y2);
+            grow(r.bounds, x1, y1); grow(r.bounds, x2, y2);
+            stats.fanTris++;
+          }
+          const count = r.fans.length / 6 - startTri;
+          if (count > 0) {
+            // Sample point (bbox centre) lets the viewer attribute this
+            // subpath to an electrical net via the label grid.
+            r.fanGroups.push({start: startTri, count,
+                              sx: (bb[0] + bb[2]) / 2, sy: (bb[1] + bb[3]) / 2,
+                              bounds: bb});
+          }
+        }
+        grow(r.bounds, ax, ay);
+      }
+    }
+  }
+
+  for (const r of runs) {
+    r.segs = new Float32Array(r.segs);
+    r.fans = new Float32Array(r.fans);
+  }
+  return {width, height, runs, stats};
+}
+
+// Apply an inversion correction: full-board add first, then all polarities
+// flipped (equivalent to swapping white/black in the gerbv mask).
+function invertRuns(parsed) {
+  const {width, height} = parsed;
+  const base = {
+    polarity: 1,
+    segs: new Float32Array(0),
+    fans: new Float32Array([0, 0, width, 0, width, height, 0, 0, width, height, 0, height]),
+    fanGroups: [{start: 0, count: 2, sx: width / 2, sy: height / 2,
+                 bounds: [0, 0, width, height]}],
+    bounds: [0, 0, width, height],
+  };
+  const flipped = parsed.runs.map(r => ({...r, polarity: -r.polarity}));
+  return {...parsed, runs: [base, ...flipped]};
+}
+
+// Assign an electrical net id to every additive primitive by sampling the
+// per-layer label grid. cellsPerUnit converts board units to grid cells.
+// Capsules sample their midpoint (endpoints as fallback); fan groups sample
+// their bbox centre — except very large fills (plane bases), which take a
+// majority vote of five spread samples so a clearance or small island under
+// the centre can't misattribute the whole plane.
+function attributeRunNets(runs, grid, gw, gh, cellsPerUnit) {
+  const lookup = (bx, by) => {
+    const gx = Math.floor(bx * cellsPerUnit), gy = Math.floor(by * cellsPerUnit);
+    return nearestLabel(grid, gw, gh, gx, gy, 3);
+  };
+  return runs.map(run => {
+    if (run.polarity !== 1) return null;
+    const segCount = run.segs.length / 5;
+    const segNets = new Uint16Array(segCount);
+    for (let i = 0; i < segCount; i++) {
+      const o = i * 5;
+      let id = lookup((run.segs[o] + run.segs[o + 2]) / 2, (run.segs[o + 1] + run.segs[o + 3]) / 2);
+      if (!id) id = lookup(run.segs[o], run.segs[o + 1]);
+      if (!id) id = lookup(run.segs[o + 2], run.segs[o + 3]);
+      segNets[i] = id;
+    }
+    const fanNets = new Uint16Array(run.fanGroups.length);
+    const gridArea = (gw / cellsPerUnit) * (gh / cellsPerUnit);
+    run.fanGroups.forEach((group, gi) => {
+      const b = group.bounds;
+      const area = Math.max(0, b[2] - b[0]) * Math.max(0, b[3] - b[1]);
+      if (area > gridArea * 0.2) {
+        const xs = [group.sx, (b[0] * 3 + b[2]) / 4, (b[0] + b[2] * 3) / 4, group.sx, group.sx];
+        const ys = [group.sy, group.sy, group.sy, (b[1] * 3 + b[3]) / 4, (b[1] + b[3] * 3) / 4];
+        const votes = new Map();
+        for (let i = 0; i < 5; i++) {
+          const id = lookup(xs[i], ys[i]);
+          if (id) votes.set(id, (votes.get(id) || 0) + 1);
+        }
+        let best = 0, bestVotes = 0;
+        for (const [id, v] of votes) if (v > bestVotes) { best = id; bestVotes = v; }
+        fanNets[gi] = best;
+      } else {
+        fanNets[gi] = lookup(group.sx, group.sy);
+      }
+    });
+    return {segNets, fanNets};
+  });
+}
+
+// Build the highlight geometry for one layer + net: the net's additive
+// primitives, in original order, interleaved with ALL erase primitives —
+// clearances legitimately subtract from every net's copper, which makes
+// inverted plane layers highlight correctly (plane minus its holes).
+function buildNetGeometry(runs, attribution, netId) {
+  const out = [];
+  let any = false;
+  for (let ri = 0; ri < runs.length; ri++) {
+    const run = runs[ri];
+    if (run.polarity === -1) {
+      if (run.segs.length || run.fans.length) {
+        out.push({polarity: -1, segs: run.segs, fans: run.fans, bounds: run.bounds});
+      }
+      continue;
+    }
+    const attrib = attribution[ri];
+    if (!attrib) continue;
+    const segsOut = [];
+    const bounds = [Infinity, Infinity, -Infinity, -Infinity];
+    const grow = (x, y) => {
+      if (x < bounds[0]) bounds[0] = x; if (y < bounds[1]) bounds[1] = y;
+      if (x > bounds[2]) bounds[2] = x; if (y > bounds[3]) bounds[3] = y;
+    };
+    for (let i = 0; i < attrib.segNets.length; i++) {
+      if (attrib.segNets[i] !== netId) continue;
+      const o = i * 5;
+      const hw = run.segs[o + 4];
+      segsOut.push(run.segs[o], run.segs[o + 1], run.segs[o + 2], run.segs[o + 3], hw);
+      grow(Math.min(run.segs[o], run.segs[o + 2]) - hw, Math.min(run.segs[o + 1], run.segs[o + 3]) - hw);
+      grow(Math.max(run.segs[o], run.segs[o + 2]) + hw, Math.max(run.segs[o + 1], run.segs[o + 3]) + hw);
+    }
+    const fanChunks = [];
+    let fanFloats = 0;
+    run.fanGroups.forEach((group, gi) => {
+      if (attrib.fanNets[gi] !== netId) return;
+      fanChunks.push(run.fans.subarray(group.start * 6, (group.start + group.count) * 6));
+      fanFloats += group.count * 6;
+      grow(group.bounds[0], group.bounds[1]);
+      grow(group.bounds[2], group.bounds[3]);
+    });
+    if (!segsOut.length && !fanFloats) continue;
+    const fans = new Float32Array(fanFloats);
+    let off = 0;
+    for (const chunk of fanChunks) { fans.set(chunk, off); off += chunk.length; }
+    out.push({polarity: 1, segs: new Float32Array(segsOut), fans, bounds});
+    any = true;
+  }
+  return any ? out : null;
+}
+
+/* ------------------------------------------------------------------ */
+/* netmap SVG → per-layer Uint16 net-id grids                          */
+/* ------------------------------------------------------------------ */
+
+// The netmap encodes a label raster as run-length rects:
+//   M x y H x2 V y2 H x Z  (repeated) — axis-aligned, absolute commands.
+// `shift` right-shifts coordinates (downsample by 2^shift) for mobile.
+function parseNetmap(text, {shift = 0} = {}) {
+  const vbMatch = text.match(/viewBox="([\d.\s-]+)"/);
+  if (!vbMatch) throw new Error('netmap: no viewBox');
+  const vb = vbMatch[1].trim().split(/\s+/).map(Number);
+  const fullW = Math.round(vb[2]), fullH = Math.round(vb[3]);
+  const w = fullW >> shift, h = fullH >> shift;
+
+  const layers = new Map();
+  const stats = {paths: 0, rects: 0, oddPaths: 0, maxNet: 0};
+
+  // Iterate <g data-layer="..."> sections.
+  const groupRe = /<g\s+data-layer="([^"]+)"\s*>/g;
+  let gm;
+  const groupStarts = [];
+  while ((gm = groupRe.exec(text)) !== null) groupStarts.push({name: gm[1], at: gm.index + gm[0].length});
+  for (let gi = 0; gi < groupStarts.length; gi++) {
+    const {name, at} = groupStarts[gi];
+    const end = gi + 1 < groupStarts.length
+      ? text.lastIndexOf('</g>', groupStarts[gi + 1].at)
+      : text.lastIndexOf('</g>');
+    const section = text.slice(at, end);
+    let grid = layers.get(name);
+    if (!grid) { grid = new Uint16Array(w * h); layers.set(name, grid); }
+
+    const pathRe = /<path\b[^>]*data-net-id="(\d+)"[^>]*\sd="([^"]*)"/g;
+    let pm;
+    while ((pm = pathRe.exec(section)) !== null) {
+      const id = Number(pm[1]);
+      if (id > 65535) throw new Error('net id exceeds u16');
+      if (id > stats.maxNet) stats.maxNet = id;
+      stats.paths++;
+      const d = pm[2];
+      // Tight scanner for the M x y H a V b H c Z pattern.
+      let i = 0;
+      const n = d.length;
+      const readNum = () => {
+        while (i < n && (d[i] === ' ' || d[i] === ',')) i++;
+        let s = i;
+        while (i < n && (d.charCodeAt(i) === 46 || d.charCodeAt(i) === 45 ||
+               (d.charCodeAt(i) >= 48 && d.charCodeAt(i) <= 57))) i++;
+        return parseFloat(d.slice(s, i));
+      };
+      let ok = true;
+      while (i < n && ok) {
+        while (i < n && (d[i] === ' ' || d[i] === ',')) i++;
+        if (i >= n) break;
+        if (d[i] !== 'M') { ok = false; break; }
+        i++;
+        const x = readNum(), y = readNum();
+        if (i >= n || d[i] !== 'H') { ok = false; break; }
+        i++;
+        const x2 = readNum();
+        if (i >= n || d[i] !== 'V') { ok = false; break; }
+        i++;
+        const y2 = readNum();
+        if (i >= n || d[i] !== 'H') { ok = false; break; }
+        i++;
+        readNum(); // back to x
+        if (i >= n || d[i] !== 'Z') { ok = false; break; }
+        i++;
+        // Fill rect [x..x2) × [y..y2)
+        const gx0 = Math.min(w - 1, Math.max(0, Math.round(x) >> shift));
+        const gy0 = Math.min(h - 1, Math.max(0, Math.round(y) >> shift));
+        const gx1 = Math.min(w, Math.max(gx0 + 1, Math.round(x2) >> shift));
+        const gy1 = Math.min(h, Math.max(gy0 + 1, Math.round(y2) >> shift));
+        for (let yy = gy0; yy < gy1; yy++) {
+          grid.fill(id, yy * w + gx0, yy * w + gx1);
+        }
+        stats.rects++;
+      }
+      if (!ok) stats.oddPaths++;
+    }
+  }
+  return {width: w, height: h, fullWidth: fullW, fullHeight: fullH, shift, layers, stats};
+}
+
+// Nearest non-zero label within maxR cells (Euclidean) of (gx, gy), or 0.
+// Scans expanding Chebyshev rings, stopping once no closer hit is possible.
+function nearestLabel(grid, w, h, gx, gy, maxR) {
+  gx = Math.min(w - 1, Math.max(0, gx));
+  gy = Math.min(h - 1, Math.max(0, gy));
+  const at = (x, y) => (x >= 0 && y >= 0 && x < w && y < h) ? grid[y * w + x] : 0;
+  const centre = at(gx, gy);
+  if (centre) return centre;
+  let best = 0;
+  let bestD2 = Infinity;
+  for (let r = 1; r <= maxR; r++) {
+    if (r * r > bestD2) break;
+    for (let i = -r; i <= r; i++) {
+      const ring = [[gx + i, gy - r], [gx + i, gy + r], [gx - r, gy + i], [gx + r, gy + i]];
+      for (const [x, y] of ring) {
+        const v = at(x, y);
+        if (!v) continue;
+        const d2 = (x - gx) * (x - gx) + (y - gy) * (y - gy);
+        if (d2 < bestD2) { bestD2 = d2; best = v; }
+      }
+    }
+  }
+  return best;
+}
+
+if (typeof module !== 'undefined') {
+  module.exports = {tokenizePath, pathToPolylines, parseGerbvLayer, invertRuns, parseNetmap, flattenArc, nearestLabel, attributeRunNets, buildNetGeometry};
+}
+
+/* ================================================================== */
+/* Browser viewer                                                      */
+/* ================================================================== */
+if (typeof window !== 'undefined' && typeof document !== 'undefined') (function viewer() {
+
 const IS_MOBILE = (navigator.maxTouchPoints || 0) > 1 &&
   /iPhone|iPad|iPod|Android|Mobile|Macintosh/i.test(navigator.userAgent);
-const MOBILE_PREVIEW_ONLY = IS_MOBILE;
 
-const PREVIEW_BASE_SCALE = 0.50;
-const PREVIEW_MAX_PIXELS = IS_MOBILE ? 2_000_000 : 8_000_000;
-const LOCAL_PREVIEW_COVERAGE = 2.75;
-const LOCAL_PREVIEW_RESOLUTION_HEADROOM = 2.45;
-const LOCAL_PREVIEW_DPR_MAX = IS_MOBILE ? 2 : 3;
-const LOCAL_PREVIEW_MAX_DIMENSION = IS_MOBILE ? 4096 : 8192;
-const LOCAL_PREVIEW_MAX_PIXELS = IS_MOBILE ? 4_000_000 : 16_000_000;
+const PANEL_SCALE_MIN = 0.02;
+const PANEL_SCALE_MAX = 16;
+const ZOOM_MIN = 1;
+const ZOOM_MAX = 128;
+const GRID_GAP = 10;          // css px between layer windows
+const DPR_CAP = IS_MOBILE ? 2 : 3;
+const NETMAP_SHIFT = IS_MOBILE ? 1 : 0;
+// Soldermask opacity over covered copper: traces under the mask show at
+// (1 - MASK_ALPHA) visibility, tinted by the mask colour. 0.70 → 30%.
+const MASK_ALPHA = 0.70;
 
-// Full-board fallback previews (used when zoomed out or before the local
-// crop is ready) scale with the display's pixel density so they don't look
-// soft on HiDPI screens, within a per-layer pixel budget.
-function fullPreviewScale() {
-  const dpr = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
-  const budget = Math.sqrt(PREVIEW_MAX_PIXELS / Math.max(1, boardW * boardH));
-  return Math.max(0.25, Math.min(1, PREVIEW_BASE_SCALE * dpr, budget));
-}
-const PREVIEW_CSS_VARIABLES = [
-  '--substrate',
-  '--outer-copper',
-  '--inner-copper',
-  '--soldermask',
-  '--silk',
-  '--drill',
-];
+const viewport = document.getElementById('viewport');
+const canvas = document.getElementById('glcanvas');
+const tilesRoot = document.getElementById('tiles');
+const statusEl = document.getElementById('status');
 
+let meta = null;
+let boardW = 0, boardH = 0;
+let layerData = new Map();     // name -> {runs, gl:{runs:[{polarity, segVao, segCount, fanVbo, fanCount, bounds}]}}
+let netGrids = null;           // parseNetmap result (CPU grids for picking)
+let netAttribution = new Map(); // layer -> attributeRunNets result
+let hlGeometry = new Map();     // layer -> GL runs for the selected net
+let tiles = [];                // {name, el, labelEl, col, row}
+let colours = {};
+
+let panelScale = 1;
+let panelX = 0, panelY = 0;    // css offset of the grid origin in the viewport
 let contentZoom = 1;
-let contentPanX = 0;
-let contentPanY = 0;
+let panX = 0, panY = 0;        // board(view-space) coords at each tile's top-left
 let flipped = false;
 let silkOn = true;
-
-let isPanning = false;
-let isPanelPanning = false;
-let panMoved = false;
-let panStartX = 0;
-let panStartY = 0;
-let panOrigX = 0;
-let panOrigY = 0;
-let panelPanOrigX = 0;
-let panelPanOrigY = 0;
-let pendingPickNet = null;
-let pendingPickLayer = null;
+let currentNet = 0;
+let dpr = 1;
 
 function fail(message) {
-  errorEl.textContent = message;
+  const el = document.getElementById('fatal');
+  el.textContent = message;
+  el.style.display = 'block';
   throw new Error(message);
 }
 
-async function fetchText(path, what) {
-  const response = await fetch(path);
-  if (!response.ok) fail(`${what} missing: ${path}`);
-  return response.text();
-}
+function setStatus(text) { statusEl.textContent = text; }
 
-async function fetchOptionalText(path) {
-  const response = await fetch(path);
-  if (response.status === 404) return null;
-  if (!response.ok) fail(`Unable to load optional SVG layer: ${path}`);
-  return response.text();
-}
-
-function parseSvg(text, path) {
-  const doc = new DOMParser().parseFromString(text, 'image/svg+xml');
-  if (doc.querySelector('parsererror')) fail(`SVG cannot be parsed: ${path}`);
-  const root = doc.documentElement;
-  if (!root || root.tagName.toLowerCase() !== 'svg') fail(`SVG cannot be parsed: ${path}`);
-  return root;
-}
-
-function svgViewBox(svg, fallbackW, fallbackH) {
-  const raw = svg.getAttribute('viewBox');
-  if (raw) {
-    const values = raw.trim().split(/[\s,]+/).map(Number);
-    if (values.length === 4 && values.every(Number.isFinite) && values[2] > 0 && values[3] > 0) return values;
+const colourCache = new Map();
+function cssColour(name) {
+  let cached = colourCache.get(name);
+  if (cached) return cached;
+  const raw = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  // #rgb / #rrggbb / rgba(r,g,b,a) → [r,g,b,a] floats
+  let r = 0, g = 0, b = 0, a = 1;
+  let m;
+  if ((m = raw.match(/^#([0-9a-f]{3})$/i))) {
+    r = parseInt(m[1][0], 16) * 17 / 255; g = parseInt(m[1][1], 16) * 17 / 255; b = parseInt(m[1][2], 16) * 17 / 255;
+  } else if ((m = raw.match(/^#([0-9a-f]{6})$/i))) {
+    r = parseInt(m[1].slice(0, 2), 16) / 255; g = parseInt(m[1].slice(2, 4), 16) / 255; b = parseInt(m[1].slice(4, 6), 16) / 255;
+  } else if ((m = raw.match(/^rgba?\(([^)]*)\)$/))) {
+    const parts = m[1].split(',').map(s => parseFloat(s));
+    r = parts[0] / 255; g = parts[1] / 255; b = parts[2] / 255;
+    if (parts.length > 3) a = parts[3];
   }
-  return [0, 0, fallbackW, fallbackH];
+  cached = [r, g, b, a];
+  colourCache.set(name, cached);
+  return cached;
 }
 
-function checkSvgSize(svg, path, width, height) {
-  const vb = svgViewBox(svg, width, height);
-  if (Math.abs(vb[2] - width) > .01 || Math.abs(vb[3] - height) > .01) {
-    fail(`SVG dimensions do not match metadata for ${path}: ${vb[2]}x${vb[3]}, expected ${width}x${height}`);
+const sideOf = name => /^B[_-]/i.test(name) ? 'B' : 'F';
+const outerLayers = () => meta.outer_layers || ['F_Cu', 'B_Cu'];
+const isOuter = name => outerLayers().includes(name);
+const firstExisting = names => (names || []).find(n => layerData.has(n)) || null;
+
+/* ------------------------- WebGL engine -------------------------- */
+let gl = null;
+const G = {};                  // programs, buffers, fbo
+
+const CAPSULE_VS = `#version 300 es
+layout(location=0) in vec2 a_corner;   // (0|1, -1|1)
+layout(location=1) in vec2 a_p1;
+layout(location=2) in vec2 a_p2;
+layout(location=3) in float a_hw;
+uniform vec2 u_a;   // board→clip scale
+uniform vec2 u_b;   // board→clip offset
+uniform float u_aa; // board units per device px
+flat out vec2 v_p1;
+flat out vec2 v_p2;
+flat out float v_hw;
+out vec2 v_pos;
+void main() {
+  vec2 d = a_p2 - a_p1;
+  float len = length(d);
+  vec2 dir = len > 0.0 ? d / len : vec2(1.0, 0.0);
+  vec2 nrm = vec2(-dir.y, dir.x);
+  float ext = a_hw + u_aa;
+  vec2 pos = mix(a_p1, a_p2, a_corner.x)
+           + dir * (a_corner.x * 2.0 - 1.0) * ext
+           + nrm * a_corner.y * ext;
+  v_pos = pos; v_p1 = a_p1; v_p2 = a_p2; v_hw = a_hw;
+  gl_Position = vec4(pos * u_a + u_b, 0.0, 1.0);
+}`;
+
+const CAPSULE_FS = `#version 300 es
+precision highp float;
+flat in vec2 v_p1;
+flat in vec2 v_p2;
+flat in float v_hw;
+in vec2 v_pos;
+uniform float u_aa;
+uniform float u_negate;  // 0: emit alpha (MAX-add); 1: emit 1-alpha (MIN-erase)
+out vec4 o;
+void main() {
+  vec2 d = v_p2 - v_p1;
+  float l2 = dot(d, d);
+  float t = l2 > 0.0 ? clamp(dot(v_pos - v_p1, d) / l2, 0.0, 1.0) : 0.0;
+  float dist = length(v_pos - (v_p1 + t * d));
+  float a = clamp((v_hw - dist) / max(u_aa, 1e-6) + 0.5, 0.0, 1.0);
+  float c = mix(a, 1.0 - a, u_negate);
+  o = vec4(c, c, c, c);
+}`;
+
+const FLAT_VS = `#version 300 es
+layout(location=0) in vec2 a_pos;   // board coords
+uniform vec2 u_a;
+uniform vec2 u_b;
+void main() { gl_Position = vec4(a_pos * u_a + u_b, 0.0, 1.0); }`;
+
+const FLAT_FS = `#version 300 es
+precision highp float;
+uniform float u_val;
+out vec4 o;
+void main() { o = vec4(u_val, u_val, u_val, u_val); }`;
+
+const QUAD_VS = `#version 300 es
+layout(location=0) in vec2 a_uv;    // 0..1 over the tile
+uniform vec4 u_rect;                // clip-space x0,y0(top),x1,y1(bottom)
+out vec2 v_uv;
+void main() {
+  v_uv = a_uv;
+  gl_Position = vec4(mix(u_rect.x, u_rect.z, a_uv.x), mix(u_rect.y, u_rect.w, a_uv.y), 0.0, 1.0);
+}`;
+
+const SOLID_FS = `#version 300 es
+precision highp float;
+uniform vec4 u_colour;              // premultiplied
+in vec2 v_uv;
+out vec4 o;
+void main() { o = u_colour; }`;
+
+const TINT_FS = `#version 300 es
+precision highp float;
+uniform sampler2D u_cov;
+uniform vec2 u_covScale;            // tile size / scratch size
+uniform vec4 u_colour;              // premultiplied (includes overall alpha)
+uniform float u_invert;
+in vec2 v_uv;
+out vec4 o;
+void main() {
+  float c = texture(u_cov, v_uv * u_covScale).r;
+  c = mix(c, 1.0 - c, u_invert);
+  o = u_colour * c;
+}`;
+
+
+function compile(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    fail('Shader compile error:\n' + gl.getShaderInfoLog(s));
+  }
+  return s;
+}
+
+function program(vs, fs) {
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, vs));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+    fail('Program link error:\n' + gl.getProgramInfoLog(p));
+  }
+  const uniforms = {};
+  const n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+  for (let i = 0; i < n; i++) {
+    const info = gl.getActiveUniform(p, i);
+    uniforms[info.name] = gl.getUniformLocation(p, info.name);
+  }
+  return {p, u: uniforms};
+}
+
+function initGL() {
+  gl = canvas.getContext('webgl2', {antialias: true, alpha: false, stencil: false,
+                                    premultipliedAlpha: true, powerPreference: 'high-performance'});
+  if (!gl) fail('WebGL2 is not available in this browser. The classic SVG viewer (index.html) still works.');
+
+  G.capsule = program(CAPSULE_VS, CAPSULE_FS);
+  G.flat = program(FLAT_VS, FLAT_FS);
+  G.solid = program(QUAD_VS, SOLID_FS);
+  G.tint = program(QUAD_VS, TINT_FS);
+
+  // Unit corner quad for capsules: (x∈{0,1}, y∈{-1,1}) as a triangle strip.
+  G.cornerVbo = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, G.cornerVbo);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, -1, 0, 1, 1, -1, 1, 1]), gl.STATIC_DRAW);
+
+  // Unit uv quad for tile-space passes.
+  G.uvVbo = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, G.uvVbo);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, 0, 0, 1, 1, 0, 1, 1]), gl.STATIC_DRAW);
+
+  // Scratch coverage target (R8 + stencil), reallocated on resize.
+  G.scratchTex = null;
+  G.scratchRb = null;
+  G.scratchFbo = null;
+  G.scratchW = 0;
+  G.scratchH = 0;
+
+  // Reusable VBO for per-run cover quads.
+  G.coverVbo = gl.createBuffer();
+}
+
+function ensureScratch(w, h) {
+  if (G.scratchW >= w && G.scratchH >= h) return;
+  const W = Math.max(w, G.scratchW, 256);
+  const H = Math.max(h, G.scratchH, 256);
+  if (G.scratchTex) { gl.deleteTexture(G.scratchTex); gl.deleteRenderbuffer(G.scratchRb); gl.deleteFramebuffer(G.scratchFbo); }
+  G.scratchTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, G.scratchTex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.R8, W, H);
+  G.scratchRb = gl.createRenderbuffer();
+  gl.bindRenderbuffer(gl.RENDERBUFFER, G.scratchRb);
+  gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH24_STENCIL8, W, H);
+  G.scratchFbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, G.scratchFbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, G.scratchTex, 0);
+  gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_STENCIL_ATTACHMENT, gl.RENDERBUFFER, G.scratchRb);
+  if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) fail('Scratch FBO incomplete');
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  G.scratchW = W;
+  G.scratchH = H;
+}
+
+function buildGlRun(run) {
+  const entry = {polarity: run.polarity, bounds: run.bounds,
+                 segVao: null, segVbo: null, segCount: 0, fanVbo: null, fanCount: 0};
+  if (run.segs.length) {
+    const vbo = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+    gl.bufferData(gl.ARRAY_BUFFER, run.segs, gl.STATIC_DRAW);
+    const vao = gl.createVertexArray();
+    gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, G.cornerVbo);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 20, 0);
+    gl.vertexAttribDivisor(1, 1);
+    gl.enableVertexAttribArray(2);
+    gl.vertexAttribPointer(2, 2, gl.FLOAT, false, 20, 8);
+    gl.vertexAttribDivisor(2, 1);
+    gl.enableVertexAttribArray(3);
+    gl.vertexAttribPointer(3, 1, gl.FLOAT, false, 20, 16);
+    gl.vertexAttribDivisor(3, 1);
+    gl.bindVertexArray(null);
+    entry.segVao = vao;
+    entry.segVbo = vbo;
+    entry.segCount = run.segs.length / 5;
+  }
+  if (run.fans.length) {
+    const vbo = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+    gl.bufferData(gl.ARRAY_BUFFER, run.fans, gl.STATIC_DRAW);
+    entry.fanVbo = vbo;
+    entry.fanCount = run.fans.length / 2;   // vertices
+  }
+  return entry;
+}
+
+function deleteGlRuns(glRuns) {
+  for (const run of glRuns || []) {
+    if (run.segVao) gl.deleteVertexArray(run.segVao);
+    if (run.segVbo) gl.deleteBuffer(run.segVbo);
+    if (run.fanVbo) gl.deleteBuffer(run.fanVbo);
   }
 }
 
-function namespaceIds(root, suffix) {
-  const mapping = new Map();
-  if (root.hasAttribute('id')) mapping.set(root.getAttribute('id'), `${root.getAttribute('id')}--${suffix}`);
-  for (const element of root.querySelectorAll('[id]')) {
-    const oldId = element.getAttribute('id');
-    mapping.set(oldId, `${oldId}--${suffix}`);
-  }
-  if (!mapping.size) return;
-
-  const all = [root, ...root.querySelectorAll('*')];
-  for (const element of all) {
-    const id = element.getAttribute('id');
-    if (id && mapping.has(id)) element.setAttribute('id', mapping.get(id));
-    for (const attr of [...element.attributes]) {
-      let value = attr.value;
-      for (const [oldId, newId] of mapping) {
-        value = value.replaceAll(`url(#${oldId})`, `url(#${newId})`);
-        if ((attr.name === 'href' || attr.name === 'xlink:href') && value === `#${oldId}`) value = `#${newId}`;
-      }
-      if (value !== attr.value) element.setAttribute(attr.name, value);
-    }
-  }
+function uploadLayerBuffers(name, parsed) {
+  layerData.get(name).gl = parsed.runs.map(buildGlRun);
 }
 
-function invertGerberMask(root) {
-  const mask = root.querySelector('mask');
-  if (!mask) return;
-  for (const element of mask.querySelectorAll('*')) {
-    for (const attr of ['fill', 'stroke']) {
-      const value = (element.getAttribute(attr) || '').trim().toUpperCase();
-      if (value === '#010101') element.setAttribute(attr, '#FEFEFE');
-      else if (value === '#FEFEFE') element.setAttribute(attr, '#010101');
-    }
-  }
-}
+/* ------------------------- layout -------------------------------- */
 
-function layerCorrectionInvert(name) {
-  return Boolean((meta.corrections || {})[name]?.invert);
-}
-
-function cloneLayer(name, instance, colour, {invert=false, className=''} = {}) {
-  const source = layerSources.get(name);
-  if (!source) return null;
-  const clone = source.cloneNode(true);
-  namespaceIds(clone, instance);
-  if (invert || layerCorrectionInvert(name)) invertGerberMask(clone);
-  clone.setAttribute('x', '0');
-  clone.setAttribute('y', '0');
-  clone.setAttribute('width', String(boardW));
-  clone.setAttribute('height', String(boardH));
-  clone.setAttribute('preserveAspectRatio', 'none');
-  clone.style.color = colour;
-  if (className) clone.classList.add(...className.split(/\s+/).filter(Boolean));
-  return clone;
-}
-
-function appendLayer(parent, name, instance, colour, options={}) {
-  const svg = cloneLayer(name, instance, colour, options);
-  if (svg) parent.appendChild(svg);
-  return svg;
-}
-
-function sideOf(name) { return /^B[_-]/i.test(name) ? 'B' : 'F'; }
-function outerLayers() { return meta.outer_layers || ['F_Cu', 'B_Cu']; }
-function isOuter(name) { return outerLayers().includes(name); }
-function frontLayerName() {
-  const layers = meta.layers || [];
-  return layers.find(name => isOuter(name) && sideOf(name) === 'F') || layers[0];
-}
-function backLayerName() {
-  const layers = meta.layers || [];
-  return layers.find(name => isOuter(name) && sideOf(name) === 'B') || layers[layers.length - 1];
-}
-function firstExisting(names) { return names.find(name => loadedLayers.has(name)) || null; }
-
-function createVisualSvg(layerName, tileIndex) {
-  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  svg.setAttribute('viewBox', `0 0 ${boardW} ${boardH}`);
-  svg.setAttribute('preserveAspectRatio', 'none');
-  svg.setAttribute('aria-hidden', 'true');
-
-  const background = document.createElementNS(svg.namespaceURI, 'rect');
-  background.setAttribute('x', '0');
-  background.setAttribute('y', '0');
-  background.setAttribute('width', String(boardW));
-  background.setAttribute('height', String(boardH));
-  background.setAttribute('fill', isOuter(layerName) ? 'var(--substrate)' : '#050505');
-  svg.appendChild(background);
-
-  appendLayer(svg, layerName, `tile${tileIndex}-copper`, isOuter(layerName) ? 'var(--outer-copper)' : 'var(--inner-copper)');
-
-  const sameSide = sideOf(layerName);
-  const maskName = isOuter(layerName)
-    ? firstExisting((meta.mask_layers || []).filter(name => sideOf(name) === sameSide))
-    : null;
-  if (maskName) {
-    const film = appendLayer(svg, maskName, `tile${tileIndex}-film`, 'var(--soldermask)', {invert:true, className:'mask-layer'});
-    if (film) film.style.opacity = '.94';
-  }
-
-  const silkName = isOuter(layerName)
-    ? firstExisting((meta.silk_layers || []).filter(name => sideOf(name) === sameSide))
-    : null;
-  if (silkName) {
-    const silk = appendLayer(svg, silkName, `tile${tileIndex}-silk`, 'var(--silk)', {className:'silk-layer'});
-    if (silk) {
-      silk.style.opacity = '.92';
-      const defs = document.createElementNS(svg.namespaceURI, 'defs');
-      const keepMask = document.createElementNS(svg.namespaceURI, 'mask');
-      const keepId = `silk-keep-${tileIndex}`;
-      keepMask.setAttribute('id', keepId);
-      keepMask.setAttribute('maskUnits', 'userSpaceOnUse');
-      keepMask.setAttribute('x', '0');
-      keepMask.setAttribute('y', '0');
-      keepMask.setAttribute('width', String(boardW));
-      keepMask.setAttribute('height', String(boardH));
-      const keep = document.createElementNS(svg.namespaceURI, 'rect');
-      keep.setAttribute('width', String(boardW));
-      keep.setAttribute('height', String(boardH));
-      keep.setAttribute('fill', 'white');
-      keepMask.appendChild(keep);
-      if (maskName) appendLayer(keepMask, maskName, `tile${tileIndex}-silk-openings`, 'black');
-      for (const drillName of (meta.drill_layers || [])) {
-        appendLayer(keepMask, drillName, `tile${tileIndex}-silk-drill-${drillName}`, 'black');
-      }
-      defs.appendChild(keepMask);
-      svg.insertBefore(defs, silk);
-      silk.setAttribute('mask', `url(#${keepId})`);
-    }
-  }
-
-  for (const drillName of (meta.drill_layers || [])) {
-    appendLayer(svg, drillName, `tile${tileIndex}-drill-${drillName}`, 'var(--drill)', {className:'drill-layer'});
-  }
-
-  return svg;
-}
-
-function createNetSvg(layerName) {
-  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  svg.setAttribute('viewBox', netViewBox.join(' '));
-  svg.setAttribute('preserveAspectRatio', 'none');
-  svg.setAttribute('data-layer', layerName);
-
-  const group = [...netSource.querySelectorAll('g[data-layer]')]
-    .find(candidate => candidate.dataset.layer === layerName);
-  if (group) svg.appendChild(group.cloneNode(true));
-
-  for (const shape of svg.querySelectorAll('[data-net-id]')) {
-    shape.classList.add('net-shape');
-    shape.dataset.layer = layerName;
-    const id = Number(shape.dataset.netId);
-    if (!Number.isInteger(id) || id < 1 || (meta.n_nets && id > Number(meta.n_nets))) {
-      fail(`Net-map geometry references an invalid net ID: ${shape.dataset.netId}`);
-    }
-    if (!netElements.has(id)) netElements.set(id, []);
-    netElements.get(id).push(shape);
-    if (!layerNetIds.has(layerName)) layerNetIds.set(layerName, new Set());
-    layerNetIds.get(layerName).add(id);
-  }
-  return svg;
-}
-
-function buildPlacements() {
-  placements.clear();
-  const layers = meta.layers || [];
-  const cols = Math.max(1, Math.floor(Number(meta.cols) || 2));
-  const rows = Math.ceil(layers.length / cols);
-  gridW = cols * boardW;
-  gridH = rows * boardH;
-  layers.forEach((name, index) => {
-    const col = index % cols;
-    const row = Math.floor(index / cols);
-    placements.set(name, {x: col * boardW, y: row * boardH, w: boardW, h: boardH, col, row});
+function layoutTiles() {
+  const n = tiles.length;
+  // Near-square grid, biased by viewport and board aspect ratios.
+  const columns = Math.ceil(Math.sqrt(n * (viewport.clientWidth / Math.max(1, viewport.clientHeight)) / (boardW / boardH))) || 1;
+  const cw = Math.max(1, Math.min(n, columns));
+  tiles.forEach((tile, i) => {
+    tile.col = i % cw;
+    tile.row = Math.floor(i / cw);
   });
+  updateTileDom();
 }
 
-function buildTiles() {
-  gridInner.innerHTML = '';
-  netElements.clear();
-  layerNetIds.clear();
-  highlightSvgs.clear();
-  selectedNetElements = [];
-  const layers = meta.layers || [];
-  layers.forEach((name, index) => {
-    const placement = placements.get(name);
-    const tile = document.createElement('div');
-    tile.className = 'tile';
-    tile.dataset.layer = name;
-    tile.style.left = `${placement.x}px`;
-    tile.style.top = `${placement.y}px`;
-    tile.style.width = `${boardW}px`;
-    tile.style.height = `${boardH}px`;
-
-    const visual = document.createElement('div');
-    visual.className = 'tile-board';
-    visual.draggable = false;
-    visual.style.width = `${boardW}px`;
-    visual.style.height = `${boardH}px`;
-    if (!MOBILE_PREVIEW_ONLY) visual.appendChild(createVisualSvg(name, index));
-
-    const preview = document.createElement('canvas');
-    preview.className = 'tile-preview';
-    preview.draggable = false;
-    preview.dataset.layer = name;
-    preview.style.width = `${boardW}px`;
-    preview.style.height = `${boardH}px`;
-
-    const localPreview = document.createElement('div');
-    localPreview.className = 'tile-local-preview';
-    localPreview.draggable = false;
-    localPreview.dataset.layer = name;
-    localPreview.style.width = `${boardW}px`;
-    localPreview.style.height = `${boardH}px`;
-    const localCanvas = document.createElement('canvas');
-    localCanvas.className = 'tile-local-preview-canvas';
-    localCanvas.draggable = false;
-    localPreview.appendChild(localCanvas);
-
-    const net = document.createElement('div');
-    net.className = 'tile-netmap';
-    net.draggable = false;
-    net.dataset.layer = name;
-    net.style.width = `${boardW}px`;
-    net.style.height = `${boardH}px`;
-    net.appendChild(createNetSvg(name));
-
-    const highlight = document.createElement('div');
-    highlight.className = 'tile-net-highlight';
-    highlight.draggable = false;
-    highlight.dataset.layer = name;
-    highlight.style.width = `${boardW}px`;
-    highlight.style.height = `${boardH}px`;
-    const highlightSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    highlightSvg.setAttribute('viewBox', netViewBox.join(' '));
-    highlightSvg.setAttribute('preserveAspectRatio', 'none');
-    highlightSvg.setAttribute('aria-hidden', 'true');
-    highlight.appendChild(highlightSvg);
-    highlightSvgs.set(name, highlightSvg);
-
-    const label = document.createElement('div');
-    label.className = 'tile-label';
-    label.dataset.layer = name;
-    label.textContent = name;
-
-    tile.appendChild(visual);
-    tile.appendChild(preview);
-    tile.appendChild(localPreview);
-    tile.appendChild(net);
-    tile.appendChild(highlight);
-    tile.appendChild(label);
-    gridInner.appendChild(tile);
-  });
-  transformElements = [...gridInner.querySelectorAll('.tile-board,.tile-preview,.tile-local-preview,.tile-netmap,.tile-net-highlight')];
-  tileLabelElements = [...gridInner.querySelectorAll('.tile-label')];
-  tileElements = [...gridInner.querySelectorAll('.tile')];
-  updateTileLabels();
-  applyContentTransformNow();
+function gridDims() {
+  let cols = 0, rows = 0;
+  for (const t of tiles) { cols = Math.max(cols, t.col + 1); rows = Math.max(rows, t.row + 1); }
+  return {cols, rows};
 }
 
-function idlePause() {
-  return new Promise(resolve => {
-    if ('requestIdleCallback' in window) {
-      requestIdleCallback(() => resolve(), {timeout: 200});
-    } else {
-      setTimeout(resolve, 0);
-    }
-  });
-}
-
-function cssVariable(name) {
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-}
-
-function svgAttrEscape(value) {
-  return String(value).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
-}
-
-// Serialize a normalized copy of a layer's SVG once, at load time. The root
-// tag is split just before its closing '>' so per-build attributes
-// (width/height/viewBox/colour) can be injected by cheap string splicing —
-// no per-build DOM clone, tree walk, or re-serialization, and no need to
-// keep the parsed DOM around at all on mobile.
-//
-// Inversion semantics match the DOM path: the mask is inverted when the
-// caller requests it OR the layer carries an invert correction. Since that
-// is an OR, a correction-inverted layer renders identically for both
-// requested polarities, so it only needs the effective=true template.
-function buildLayerTemplates(root, name, usedInverted) {
-  const defaultViewBox = root.getAttribute('viewBox') || null;
-  const correction = layerCorrectionInvert(name);
-  const effectiveFlags = correction ? [true] : (usedInverted ? [false, true] : [false]);
-  for (const effective of effectiveFlags) {
-    const clone = root.cloneNode(true);
-    if (effective) invertGerberMask(clone);
-    clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
-    const baseStyle = clone.getAttribute('style') || '';
-    for (const attr of ['x', 'y', 'width', 'height', 'viewBox', 'preserveAspectRatio', 'style']) {
-      clone.removeAttribute(attr);
-    }
-    // crispEdges is useful for producing binary analysis masks, but it makes
-    // both the browser view and the temporary navigation preview jagged.
-    // Strip local overrides and request normal high-quality rasterisation.
-    for (const element of [clone, ...clone.querySelectorAll('*')]) {
-      element.removeAttribute('shape-rendering');
-      if (element.style) element.style.removeProperty('shape-rendering');
-    }
-    clone.setAttribute('shape-rendering', 'geometricPrecision');
-    const text = new XMLSerializer().serializeToString(clone);
-    const match = text.match(/<svg\b[^>]*>/);
-    if (!match) fail(`Unable to locate the SVG root element in layer ${name}`);
-    // Split just before the tag close; mind self-closing roots ("/>").
-    const cut = match.index + match[0].length - (match[0].endsWith('/>') ? 2 : 1);
-    layerTemplates.set(`${name}\u0000${effective ? 1 : 0}`, {
-      head: text.slice(0, cut),
-      tail: text.slice(cut),
-      defaultViewBox,
-      baseStyle,
-    });
-  }
-}
-
-function previewLayerSvgText(name, colour, invert, width, height, viewBox=null) {
-  const effective = invert || layerCorrectionInvert(name);
-  const template = layerTemplates.get(`${name}\u0000${effective ? 1 : 0}`);
-  if (!template) return null;
-  const box = viewBox ? viewBox.join(' ') : template.defaultViewBox;
-  const style = (template.baseStyle ? template.baseStyle + ';' : '') + 'color:' + colour;
-  let attrs = ` x="0" y="0" width="${width}" height="${height}" preserveAspectRatio="none"`;
-  if (box) attrs += ` viewBox="${svgAttrEscape(box)}"`;
-  attrs += ` style="${svgAttrEscape(style)}"`;
-  return template.head + attrs + template.tail;
-}
-
-async function decodeSvgPreview(text) {
-  const blob = new Blob([text], {type: 'image/svg+xml'});
-  const url = URL.createObjectURL(blob);
-  try {
-    const image = new Image();
-    image.decoding = 'async';
-    await new Promise((resolve, reject) => {
-      image.onload = resolve;
-      image.onerror = () => reject(new Error('Unable to rasterise SVG navigation preview'));
-      image.src = url;
-    });
-    // Force the rasterisation to complete off the main thread now, rather
-    // than synchronously inside the first drawImage() call.
-    if (image.decode) await image.decode().catch(() => {});
-    return image;
-  } finally {
-    URL.revokeObjectURL(url);
-  }
-}
-
-function previewBitmap(name, colour, invert, width, height, {viewBox=null, cache=previewBitmapCache} = {}) {
-  const correctedInvert = invert || layerCorrectionInvert(name);
-  if (!layerTemplates.has(`${name}\u0000${correctedInvert ? 1 : 0}`)) return Promise.resolve(null);
-  const viewKey = viewBox ? viewBox.map(value => Number(value).toFixed(5)).join(',') : 'full';
-  const key = `${name}\u0000${colour}\u0000${correctedInvert ? 1 : 0}\u0000${width}x${height}\u0000${viewKey}`;
-  if (!cache.has(key)) {
-    const text = previewLayerSvgText(name, colour, invert, width, height, viewBox);
-    cache.set(key, decodeSvgPreview(text).catch(error => {
-      cache.delete(key);
-      throw error;
-    }));
-  }
-  return cache.get(key);
-}
-
-// A macrotask yield: unlike awaiting a resolved promise (microtask), this
-// lets queued pointer/wheel events be dispatched, so their handlers can bump
-// the build generations and abort the remaining work.
-function yieldToInput() {
-  return new Promise(resolve => setTimeout(resolve, 0));
-}
-
-async function drawPreviewLayer(ctx, name, colour, {invert=false, viewBox=null, cache=previewBitmapCache, shouldAbort=null} = {}) {
-  const image = await previewBitmap(
-    name,
-    colour,
-    invert,
-    ctx.canvas.width,
-    ctx.canvas.height,
-    {viewBox, cache},
-  );
-  if (!image) return;
-  if (shouldAbort) {
-    await yieldToInput();
-    if (shouldAbort()) return;
-  }
-  ctx.drawImage(image, 0, 0, ctx.canvas.width, ctx.canvas.height);
-}
-
-async function paintTilePreview(canvas, layerName, width, height, {viewBox=null, cache=previewBitmapCache, shouldAbort=null} = {}) {
-  if (canvas.width !== width) canvas.width = width;
-  if (canvas.height !== height) canvas.height = height;
-
-  const ctx = canvas.getContext('2d', {alpha: false});
-  if (!ctx) throw new Error('Unable to create preview canvas context');
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = 'high';
-  ctx.globalAlpha = 1;
-  ctx.globalCompositeOperation = 'source-over';
-  ctx.fillStyle = isOuter(layerName) ? cssVariable('--substrate') : '#050505';
-  ctx.fillRect(0, 0, width, height);
-
-  await drawPreviewLayer(
-    ctx,
-    layerName,
-    isOuter(layerName) ? cssVariable('--outer-copper') : cssVariable('--inner-copper'),
-    {viewBox, cache, shouldAbort},
-  );
-  if (shouldAbort && shouldAbort()) return;
-
-  const sameSide = sideOf(layerName);
-  const maskName = isOuter(layerName)
-    ? firstExisting((meta.mask_layers || []).filter(name => sideOf(name) === sameSide))
-    : null;
-  if (maskName) {
-    ctx.save();
-    ctx.globalAlpha = .94;
-    await drawPreviewLayer(ctx, maskName, cssVariable('--soldermask'), {invert: true, viewBox, cache, shouldAbort});
-    ctx.restore();
-  }
-  if (shouldAbort && shouldAbort()) return;
-
-  const silkName = silkOn && isOuter(layerName)
-    ? firstExisting((meta.silk_layers || []).filter(name => sideOf(name) === sameSide))
-    : null;
-  if (silkName) {
-    const silkCanvas = document.createElement('canvas');
-    silkCanvas.width = width;
-    silkCanvas.height = height;
-    const silkCtx = silkCanvas.getContext('2d');
-    if (!silkCtx) throw new Error('Unable to create silk preview canvas context');
-    silkCtx.imageSmoothingEnabled = true;
-    silkCtx.imageSmoothingQuality = 'high';
-    await drawPreviewLayer(silkCtx, silkName, cssVariable('--silk'), {viewBox, cache, shouldAbort});
-
-    silkCtx.globalCompositeOperation = 'destination-out';
-    if (maskName) await drawPreviewLayer(silkCtx, maskName, '#000', {viewBox, cache, shouldAbort});
-    for (const drillName of (meta.drill_layers || [])) {
-      await drawPreviewLayer(silkCtx, drillName, '#000', {viewBox, cache, shouldAbort});
-    }
-    silkCtx.globalCompositeOperation = 'source-over';
-    if (shouldAbort && shouldAbort()) return;
-
-    ctx.save();
-    ctx.globalAlpha = .92;
-    ctx.drawImage(silkCanvas, 0, 0);
-    ctx.restore();
-    silkCanvas.width = 0;
-    silkCanvas.height = 0;
-  }
-
-  for (const drillName of (meta.drill_layers || [])) {
-    await drawPreviewLayer(ctx, drillName, cssVariable('--drill'), {viewBox, cache, shouldAbort});
-  }
-}
-
-async function buildTilePreview(tile, generation) {
-  const canvas = tile.querySelector('.tile-preview');
-  if (!canvas) return;
-  const scale = fullPreviewScale();
-  const width = Math.max(1, Math.round(boardW * scale));
-  const height = Math.max(1, Math.round(boardH * scale));
-  await paintTilePreview(canvas, tile.dataset.layer, width, height,
-    {shouldAbort: () => generation !== previewBuildGeneration});
-  if (generation === previewBuildGeneration) {
-    tile.classList.add('preview-ready');
-    if (MOBILE_PREVIEW_ONLY) updateNavigationPreviewChoice();
-  }
-}
-
-async function buildNavigationPreviews(generation) {
-  for (const tile of gridInner.querySelectorAll('.tile')) {
-    if (generation !== previewBuildGeneration) return;
-    await idlePause();
-    if (generation !== previewBuildGeneration) return;
-    try {
-      await buildTilePreview(tile, generation);
-    } catch (error) {
-      console.warn(`Unable to build navigation preview for ${tile.dataset.layer}:`, error);
-    }
-  }
-  // The decoded SVG rasters are only useful for speeding up identical
-  // rebuilds; on memory-constrained mobile devices, free them instead.
-  if (IS_MOBILE && generation === previewBuildGeneration) previewBitmapCache = new Map();
-}
-
-function schedulePreviewRebuild() {
-  const generation = ++previewBuildGeneration;
-  for (const tile of gridInner.querySelectorAll('.tile')) tile.classList.remove('preview-ready');
-  void buildNavigationPreviews(generation);
-}
-
-
-function currentBoardCrop() {
-  clampContentPan();
+function tileCssRect(tile) {
+  const w = boardW * panelScale, h = boardH * panelScale;
   return {
-    x: contentPanX,
-    y: contentPanY,
-    w: boardW / contentZoom,
-    h: boardH / contentZoom,
+    x: panelX + tile.col * (w + GRID_GAP),
+    y: panelY + tile.row * (h + GRID_GAP),
+    w, h,
   };
 }
 
-function computeLocalPreviewSpec() {
-  const visible = currentBoardCrop();
-  const w = Math.min(boardW, visible.w * LOCAL_PREVIEW_COVERAGE);
-  const h = Math.min(boardH, visible.h * LOCAL_PREVIEW_COVERAGE);
-  const centreX = visible.x + visible.w / 2;
-  const centreY = visible.y + visible.h / 2;
-  const x = clamp(centreX - w / 2, 0, Math.max(0, boardW - w));
-  const y = clamp(centreY - h / 2, 0, Math.max(0, boardH - h));
-
-  const dpr = Math.min(LOCAL_PREVIEW_DPR_MAX, Math.max(1, window.devicePixelRatio || 1));
-  const requestedScale = panelScale * contentZoom * dpr * LOCAL_PREVIEW_RESOLUTION_HEADROOM;
-  let pixelWidth = Math.max(1, Math.round(w * requestedScale));
-  let pixelHeight = Math.max(1, Math.round(h * requestedScale));
-  let reduction = Math.min(
-    1,
-    LOCAL_PREVIEW_MAX_DIMENSION / pixelWidth,
-    LOCAL_PREVIEW_MAX_DIMENSION / pixelHeight,
-    Math.sqrt(LOCAL_PREVIEW_MAX_PIXELS / Math.max(1, pixelWidth * pixelHeight)),
-  );
-  if (!Number.isFinite(reduction) || reduction <= 0) reduction = 1;
-  pixelWidth = Math.max(1, Math.floor(pixelWidth * reduction));
-  pixelHeight = Math.max(1, Math.floor(pixelHeight * reduction));
-
-  return {
-    x, y, w, h,
-    pixelWidth,
-    pixelHeight,
-    pixelScale: Math.min(pixelWidth / w, pixelHeight / h),
-  };
-}
-
-function localPreviewCoversCurrentView() {
-  const state = localPreviewState;
-  if (!state) return false;
-  const visible = currentBoardCrop();
-  const epsilon = 1e-4;
-  if (visible.x < state.x - epsilon || visible.y < state.y - epsilon ||
-      visible.x + visible.w > state.x + state.w + epsilon ||
-      visible.y + visible.h > state.y + state.h + epsilon) return false;
-
-  const dpr = Math.min(LOCAL_PREVIEW_DPR_MAX, Math.max(1, window.devicePixelRatio || 1));
-  const requiredPixelScale = panelScale * contentZoom * dpr;
-  return requiredPixelScale <= state.pixelScale * 1.08;
-}
-
-function clearNavigationPreviewChoice() {
-  for (const tile of tileElements) {
-    tile.classList.remove('preview-local-active', 'preview-full-active');
+function updateTileDom() {
+  for (const tile of tiles) {
+    const r = tileCssRect(tile);
+    tile.el.style.transform = `translate(${r.x}px, ${r.y}px)`;
+    tile.el.style.width = `${r.w}px`;
+    tile.el.style.height = `${r.h}px`;
   }
-}
-
-function updateNavigationPreviewChoice() {
-  const useLocal = localPreviewCoversCurrentView();
-  for (const tile of tileElements) {
-    tile.classList.remove('preview-local-active', 'preview-full-active');
-    if (useLocal && tile.classList.contains('local-preview-ready')) {
-      tile.classList.add('preview-local-active');
-    } else if (tile.classList.contains('preview-ready')) {
-      tile.classList.add('preview-full-active');
-    }
-  }
-}
-
-function cancelLocalPreviewBuild() {
-  localPreviewBuildGeneration += 1;
-  if (localPreviewBuildTimer) {
-    clearTimeout(localPreviewBuildTimer);
-    localPreviewBuildTimer = 0;
-  }
-}
-
-async function buildLocalNavigationPreviews(spec, generation) {
-  const rendered = [];
-  localPreviewBitmapCache = new Map();
-  for (const tile of tileElements) {
-    if (generation !== localPreviewBuildGeneration) return;
-    await idlePause();
-    if (generation !== localPreviewBuildGeneration) return;
-    const canvas = document.createElement('canvas');
-    try {
-      await paintTilePreview(
-        canvas,
-        tile.dataset.layer,
-        spec.pixelWidth,
-        spec.pixelHeight,
-        {
-          viewBox: [spec.x, spec.y, spec.w, spec.h],
-          cache: localPreviewBitmapCache,
-          shouldAbort: () => generation !== localPreviewBuildGeneration,
-        },
-      );
-      if (generation !== localPreviewBuildGeneration) return;
-      rendered.push([tile, canvas]);
-    } catch (error) {
-      console.warn(`Unable to build local navigation preview for ${tile.dataset.layer}:`, error);
-      return;
-    }
-  }
-
-  if (generation !== localPreviewBuildGeneration ||
-      document.body.classList.contains('navigating') ||
-      document.body.classList.contains('navigation-settling')) return;
-
-  for (const [tile, sourceCanvas] of rendered) {
-    if (generation !== localPreviewBuildGeneration) return;
-    const target = tile.querySelector('.tile-local-preview-canvas');
-    if (!target) continue;
-    target.width = sourceCanvas.width;
-    target.height = sourceCanvas.height;
-    target.style.left = `${spec.x}px`;
-    target.style.top = `${spec.y}px`;
-    target.style.width = `${spec.w}px`;
-    target.style.height = `${spec.h}px`;
-    const ctx = target.getContext('2d', {alpha: false});
-    if (!ctx) continue;
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = 'high';
-    ctx.clearRect(0, 0, target.width, target.height);
-    ctx.drawImage(sourceCanvas, 0, 0);
-    // Explicitly release the scratch canvas: iOS Safari accounts canvas
-    // memory aggressively and GC alone reclaims it too late.
-    sourceCanvas.width = 0;
-    sourceCanvas.height = 0;
-    tile.classList.add('local-preview-ready');
-  }
-  localPreviewState = spec;
-  if (MOBILE_PREVIEW_ONLY) updateNavigationPreviewChoice();
-  if (IS_MOBILE) localPreviewBitmapCache = new Map();
-}
-
-function scheduleLocalPreviewRebuild(delay=90) {
-  cancelLocalPreviewBuild();
-  const generation = localPreviewBuildGeneration;
-  localPreviewBuildTimer = window.setTimeout(() => {
-    localPreviewBuildTimer = 0;
-    if (generation !== localPreviewBuildGeneration ||
-        document.body.classList.contains('navigating') ||
-        document.body.classList.contains('navigation-settling')) return;
-    const spec = computeLocalPreviewSpec();
-    void buildLocalNavigationPreviews(spec, generation);
-  }, delay);
-}
-
-function invalidateLocalPreview() {
-  cancelLocalPreviewBuild();
-  localPreviewState = null;
-  for (const tile of tileElements) {
-    tile.classList.remove('local-preview-ready', 'preview-local-active');
-  }
-}
-
-function clamp(value, low, high) { return Math.max(low, Math.min(high, value)); }
-
-function clampContentPan() {
-  const cropW = boardW / contentZoom;
-  const cropH = boardH / contentZoom;
-  contentPanX = clamp(contentPanX, 0, Math.max(0, boardW - cropW));
-  contentPanY = clamp(contentPanY, 0, Math.max(0, boardH - cropH));
-}
-
-function contentMatrix() {
-  clampContentPan();
-  if (!flipped) {
-    return `matrix(${contentZoom},0,0,${contentZoom},${-contentPanX * contentZoom},${-contentPanY * contentZoom})`;
-  }
-  const cropW = boardW / contentZoom;
-  return `matrix(${-contentZoom},0,0,${contentZoom},${(contentPanX + cropW) * contentZoom},${-contentPanY * contentZoom})`;
-}
-
-function applyContentTransformNow() {
-  const matrix = contentMatrix();
-  for (const element of transformElements) element.style.transform = matrix;
-  if (document.body.classList.contains('navigating') ||
-      document.body.classList.contains('navigation-settling')) {
-    updateNavigationPreviewChoice();
-  }
-}
-
-function scheduleContentTransform() {
-  if (contentTransformFrame) return;
-  contentTransformFrame = requestAnimationFrame(() => {
-    contentTransformFrame = 0;
-    applyContentTransformNow();
-  });
-}
-
-function updateTileLabels() {
-  const inverse = 1 / Math.max(.001, panelScale);
-  for (const label of tileLabelElements) {
-    label.classList.toggle('flipped', flipped);
-    label.textContent = label.dataset.layer + (flipped ? ' ⟲ (back view)' : '');
-    label.style.left = `${6 * inverse}px`;
-    label.style.top = `${6 * inverse}px`;
-    label.style.transform = `scale(${inverse})`;
-  }
+  updateReadout();
 }
 
 function fittedPanelScale() {
-  if (!gridW || !gridH) return 1;
-  const padding = 16;
-  const vw = Math.max(1, viewport.clientWidth - 2 * padding);
-  const vh = Math.max(1, viewport.clientHeight - 2 * padding);
-  // Small boards (few source pixels) are allowed to scale up past 100% so
-  // they still fill the window; the SVG artwork stays crisp when upscaled.
-  const value = clamp(Math.min(vw / gridW, vh / gridH), PANEL_SCALE_MIN, PANEL_SCALE_MAX);
-  return Number.isFinite(value) && value > 0 ? value : 1;
-}
-
-function updatePanelScaleReadout() {
-  const fit = fittedPanelScale();
-  const relative = fit > 0 ? panelScale / fit : 1;
-  panelScaleReadout.textContent = `Window size: ${(relative * 100).toFixed(0)}% of fit (${(panelScale * 100).toFixed(1)}% source scale)`;
-}
-
-function updateScrollArea(preserveView=true) {
-  if (!gridW || !gridH) return;
-  const oldOriginX = scrollOriginX;
-  const oldOriginY = scrollOriginY;
-  const oldScrollLeft = viewport.scrollLeft;
-  const oldScrollTop = viewport.scrollTop;
-
-  const minX = Math.min(0, panelX) - SCROLL_PAD;
-  const minY = Math.min(0, panelY) - SCROLL_PAD;
-  const maxX = Math.max(viewport.clientWidth, panelX + gridW * panelScale) + SCROLL_PAD;
-  const maxY = Math.max(viewport.clientHeight, panelY + gridH * panelScale) + SCROLL_PAD;
-  scrollOriginX = minX;
-  scrollOriginY = minY;
-
-  world.style.width = `${Math.max(viewport.clientWidth, Math.ceil(maxX - minX))}px`;
-  world.style.height = `${Math.max(viewport.clientHeight, Math.ceil(maxY - minY))}px`;
-  gridStage.style.left = `${panelX - scrollOriginX}px`;
-  gridStage.style.top = `${panelY - scrollOriginY}px`;
-  gridStage.style.width = `${gridW * panelScale}px`;
-  gridStage.style.height = `${gridH * panelScale}px`;
-  gridInner.style.width = `${gridW}px`;
-  gridInner.style.height = `${gridH}px`;
-  gridInner.style.transform = `scale(${panelScale})`;
-
-  if (preserveView) {
-    viewport.scrollLeft = Math.max(0, oldScrollLeft + oldOriginX - scrollOriginX);
-    viewport.scrollTop = Math.max(0, oldScrollTop + oldOriginY - scrollOriginY);
-  }
-  updateTileLabels();
-}
-
-function scheduleScrollArea() {
-  if (scrollAreaFrame) return;
-  scrollAreaFrame = requestAnimationFrame(() => {
-    scrollAreaFrame = 0;
-    updateScrollArea(true);
-  });
-}
-
-function centerPanelGrid() {
-  panelX = Math.round((viewport.clientWidth - gridW * panelScale) / 2);
-  panelY = Math.round((viewport.clientHeight - gridH * panelScale) / 2);
-}
-
-function rememberViewportSize() {
-  lastViewportW = Math.max(1, viewport.clientWidth);
-  lastViewportH = Math.max(1, viewport.clientHeight);
-}
-
-function fitPanelWindows() {
-  panelScale = fittedPanelScale();
-  centerPanelGrid();
-  rememberViewportSize();
-  updateScrollArea(false);
-  viewport.scrollLeft = Math.max(0, -scrollOriginX);
-  viewport.scrollTop = Math.max(0, -scrollOriginY);
-  updatePanelScaleReadout();
-  scheduleLocalPreviewRebuild();
+  const {cols, rows} = gridDims();
+  const pad = 16;
+  const vw = Math.max(1, viewport.clientWidth - 2 * pad);
+  const vh = Math.max(1, viewport.clientHeight - 2 * pad);
+  const sx = (vw - (cols - 1) * GRID_GAP) / (cols * boardW);
+  const sy = (vh - (rows - 1) * GRID_GAP) / (rows * boardH);
+  const s = Math.min(sx, sy);
+  return Math.min(PANEL_SCALE_MAX, Math.max(PANEL_SCALE_MIN, Number.isFinite(s) && s > 0 ? s : 1));
 }
 
 function fitToScreen() {
-  fitPanelWindows();
   contentZoom = 1;
-  contentPanX = 0;
-  contentPanY = 0;
-  scheduleContentTransform();
-  scheduleLocalPreviewRebuild();
+  panX = 0; panY = 0;
+  panelScale = fittedPanelScale();
+  const {cols, rows} = gridDims();
+  const gw = cols * boardW * panelScale + (cols - 1) * GRID_GAP;
+  const gh = rows * boardH * panelScale + (rows - 1) * GRID_GAP;
+  panelX = (viewport.clientWidth - gw) / 2;
+  panelY = (viewport.clientHeight - gh) / 2;
+  clampContentPan();
+  updateTileDom();
+  requestRender();
 }
 
-function setPanelScaleAt(clientX, clientY, newScale) {
-  const rect = viewport.getBoundingClientRect();
-  const anchorX = clientX - rect.left + viewport.scrollLeft + scrollOriginX;
-  const anchorY = clientY - rect.top + viewport.scrollTop + scrollOriginY;
-  const gridPointX = (anchorX - panelX) / Math.max(.001, panelScale);
-  const gridPointY = (anchorY - panelY) / Math.max(.001, panelScale);
-  panelScale = clamp(newScale, PANEL_SCALE_MIN, PANEL_SCALE_MAX);
-  panelX = anchorX - gridPointX * panelScale;
-  panelY = anchorY - gridPointY * panelScale;
-  updateScrollArea(true);
-  updatePanelScaleReadout();
-  if (document.body.classList.contains('navigating') ||
-      document.body.classList.contains('navigation-settling')) updateNavigationPreviewChoice();
-  else scheduleLocalPreviewRebuild();
+function clampContentPan() {
+  const winW = boardW / contentZoom;
+  const winH = boardH / contentZoom;
+  panX = winW >= boardW ? (boardW - winW) / 2 : Math.min(boardW - winW, Math.max(0, panX));
+  panY = winH >= boardH ? (boardH - winH) / 2 : Math.min(boardH - winH, Math.max(0, panY));
 }
 
-function setPanelScaleAroundCentre(newScale) {
-  const rect = viewport.getBoundingClientRect();
-  setPanelScaleAt(rect.left + viewport.clientWidth / 2, rect.top + viewport.clientHeight / 2, newScale);
+function scaleCss() { return panelScale * contentZoom; }
+
+function updateReadout() {
+  const pct = Math.round(100 * panelScale / fittedPanelScale());
+  document.getElementById('panel-scale-readout').textContent =
+    `Windows at ${pct}% of fit · content zoom ${contentZoom.toFixed(2)}×`;
 }
 
 function tileAtClient(clientX, clientY) {
-  const rect = viewport.getBoundingClientRect();
-  const worldX = clientX - rect.left + viewport.scrollLeft + scrollOriginX;
-  const worldY = clientY - rect.top + viewport.scrollTop + scrollOriginY;
-  const gx = (worldX - panelX) / Math.max(.001, panelScale);
-  const gy = (worldY - panelY) / Math.max(.001, panelScale);
-  for (const [name, placement] of placements) {
-    if (gx >= placement.x && gx < placement.x + placement.w && gy >= placement.y && gy < placement.y + placement.h) {
-      return {name, placement, nx: (gx - placement.x) / placement.w, ny: (gy - placement.y) / placement.h};
-    }
+  const vb = viewport.getBoundingClientRect();
+  const x = clientX - vb.left, y = clientY - vb.top;
+  for (const tile of tiles) {
+    const r = tileCssRect(tile);
+    if (x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h) return {tile, local: [x - r.x, y - r.y]};
   }
   return null;
 }
 
-function boardPointAtClient(clientX, clientY) {
-  const tile = tileAtClient(clientX, clientY);
-  if (!tile) return null;
-  const cropW = boardW / contentZoom;
-  const cropH = boardH / contentZoom;
-  const x = contentPanX + (flipped ? 1 - tile.nx : tile.nx) * cropW;
-  const y = contentPanY + tile.ny * cropH;
-  return {...tile, x, y};
+// View-space board point (flip already folded) at a client position.
+function viewPointAtClient(clientX, clientY) {
+  const vb = viewport.getBoundingClientRect();
+  const hit = tileAtClient(clientX, clientY);
+  const local = hit ? hit.local
+    : [clientX - vb.left - tileCssRect(tiles[0]).x, clientY - vb.top - tileCssRect(tiles[0]).y];
+  return [panX + local[0] / scaleCss(), panY + local[1] / scaleCss()];
 }
 
-function setZoomAt(clientX, clientY, newZoom) {
-  const point = boardPointAtClient(clientX, clientY);
-  const oldCropW = boardW / contentZoom;
-  const oldCropH = boardH / contentZoom;
-  const nx = point ? point.nx : .5;
-  const ny = point ? point.ny : .5;
-  const boardX = point ? point.x : contentPanX + oldCropW / 2;
-  const boardY = point ? point.y : contentPanY + oldCropH / 2;
-
-  contentZoom = clamp(newZoom, 1, 64);
-  const newCropW = boardW / contentZoom;
-  const newCropH = boardH / contentZoom;
-  contentPanX = boardX - (flipped ? 1 - nx : nx) * newCropW;
-  contentPanY = boardY - ny * newCropH;
+function setZoomAt(clientX, clientY, zoom) {
+  if (!tiles.length) return;
+  zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, zoom));
+  const before = viewPointAtClient(clientX, clientY);
+  const vb = viewport.getBoundingClientRect();
+  const hit = tileAtClient(clientX, clientY);
+  const local = hit ? hit.local
+    : [clientX - vb.left - tileCssRect(tiles[0]).x, clientY - vb.top - tileCssRect(tiles[0]).y];
+  contentZoom = zoom;
+  panX = before[0] - local[0] / scaleCss();
+  panY = before[1] - local[1] / scaleCss();
   clampContentPan();
-  scheduleContentTransform();
+  requestRender();
+  updateReadout();
 }
 
-function analysisPickText(point) {
-  if (!point) return null;
-  const aw = Number(meta.analysis_width) || boardW;
-  const ah = Number(meta.analysis_height) || boardH;
-  const x = Math.floor(point.x * aw / boardW);
-  const y = Math.floor(point.y * ah / boardH);
-  return {layer: point.name, x, y, spec: `${point.name}:${x},${y}`};
+function setPanelScaleAt(clientX, clientY, scale) {
+  scale = Math.min(PANEL_SCALE_MAX, Math.max(PANEL_SCALE_MIN, scale));
+  const vb = viewport.getBoundingClientRect();
+  const gx = (clientX - vb.left - panelX) / panelScale;
+  const gy = (clientY - vb.top - panelY) / panelScale;
+  panelScale = scale;
+  panelX = clientX - vb.left - gx * panelScale;
+  panelY = clientY - vb.top - gy * panelScale;
+  clampPanelPosition();
+  updateTileDom();
+  requestRender();
 }
 
-function cssEscape(value) {
-  return window.CSS && CSS.escape ? CSS.escape(String(value)) : String(value).replaceAll('"', '\\"');
+/* ------------------------- rendering ----------------------------- */
+
+let renderQueued = false;
+function requestRender() {
+  if (renderQueued) return;
+  renderQueued = true;
+  requestAnimationFrame(() => { renderQueued = false; render(); });
 }
 
-function clearSelectedNetElements() {
-  for (const element of selectedNetElements) element.classList.remove('selected');
-  selectedNetElements = [];
-}
-
-// Clone a netmap shape together with shallow copies of its ancestor groups,
-// preserving any transform/clip attributes on the chain without dragging the
-// rest of the (potentially huge) netmap along.
-function cloneShapeWithAncestors(shape, stopAt) {
-  let clone = shape.cloneNode(true);
-  clone.removeAttribute('id');
-  let node = shape.parentNode;
-  while (node && node !== stopAt && node.nodeType === 1 && node.tagName.toLowerCase() !== 'svg') {
-    const wrapper = node.cloneNode(false);
-    wrapper.removeAttribute('id');
-    wrapper.appendChild(clone);
-    clone = wrapper;
-    node = node.parentNode;
+function resizeCanvas() {
+  dpr = Math.min(DPR_CAP, window.devicePixelRatio || 1);
+  const w = Math.max(1, Math.round(viewport.clientWidth * dpr));
+  const h = Math.max(1, Math.round(viewport.clientHeight * dpr));
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w;
+    canvas.height = h;
   }
-  return clone;
 }
 
-// Mirror the current selection into the per-tile highlight overlays. These
-// hold only the selected net's geometry, so they can stay visible and be
-// transformed live during pan/zoom, unlike the full netmap.
-function updateNetHighlights() {
-  for (const svg of highlightSvgs.values()) {
-    while (svg.firstChild) svg.removeChild(svg.firstChild);
+// Draw GL runs as coverage into the scratch FBO.
+function drawRunsGl(runsGl, tileDevW, tileDevH, ua, ub, aa, {negate = false, clear = true} = {}) {
+  gl.bindFramebuffer(gl.FRAMEBUFFER, G.scratchFbo);
+  gl.viewport(0, 0, tileDevW, tileDevH);
+  gl.disable(gl.SCISSOR_TEST);
+  if (clear) {
+    gl.clearColor(0, 0, 0, 0);
+    gl.clearStencil(0);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
   }
-  if (!currentNet || !netElements.has(currentNet)) return;
-  for (const shape of netElements.get(currentNet)) {
-    const target = highlightSvgs.get(shape.dataset.layer);
-    if (!target) continue;
-    target.appendChild(cloneShapeWithAncestors(shape, shape.ownerSVGElement));
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.ONE, gl.ONE);
+
+  for (const run of runsGl) {
+    const add = (run.polarity === 1) !== !!negate;
+    gl.blendEquation(add ? gl.MAX : gl.MIN);
+    if (run.segCount) {
+      gl.useProgram(G.capsule.p);
+      gl.uniform2f(G.capsule.u.u_a, ua[0], ua[1]);
+      gl.uniform2f(G.capsule.u.u_b, ub[0], ub[1]);
+      gl.uniform1f(G.capsule.u.u_aa, aa);
+      gl.uniform1f(G.capsule.u.u_negate, add ? 0 : 1);
+      gl.bindVertexArray(run.segVao);
+      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, run.segCount);
+      gl.bindVertexArray(null);
+    }
+    if (run.fanCount) {
+      // Stencil parity pass
+      gl.enable(gl.STENCIL_TEST);
+      gl.stencilFunc(gl.ALWAYS, 0, 0xff);
+      gl.stencilOp(gl.KEEP, gl.KEEP, gl.INVERT);
+      gl.colorMask(false, false, false, false);
+      gl.useProgram(G.flat.p);
+      gl.uniform2f(G.flat.u.u_a, ua[0], ua[1]);
+      gl.uniform2f(G.flat.u.u_b, ub[0], ub[1]);
+      gl.bindBuffer(gl.ARRAY_BUFFER, run.fanVbo);
+      gl.enableVertexAttribArray(0);
+      gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+      gl.drawArrays(gl.TRIANGLES, 0, run.fanCount);
+      // Cover pass: write value where parity set, zeroing stencil.
+      gl.colorMask(true, true, true, true);
+      gl.stencilFunc(gl.NOTEQUAL, 0, 0xff);
+      gl.stencilOp(gl.KEEP, gl.KEEP, gl.ZERO);
+      gl.uniform1f(G.flat.u.u_val, add ? 1 : 0);
+      const b = run.bounds;
+      gl.bindBuffer(gl.ARRAY_BUFFER, G.coverVbo);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+        b[0], b[1], b[0], b[3], b[2], b[1], b[2], b[3]]), gl.DYNAMIC_DRAW);
+      gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      gl.disable(gl.STENCIL_TEST);
+    }
+  }
+  gl.blendEquation(gl.FUNC_ADD);
+  // Restore over-compositing: the MIN/MAX coverage passes use (ONE, ONE),
+  // and leaking that into the main-canvas tint passes turns the whole
+  // compositor additive (glowing mask, invisible black drills, saturated
+  // highlight).
+  gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+}
+
+// Draw named layers' runs as coverage into the scratch FBO.
+// negate flips add/erase (knockouts); clear=false accumulates onto the
+// existing scratch contents (silk → then knock out mask + drills).
+function drawCoverage(names, tileDevW, tileDevH, ua, ub, aa, options = {}) {
+  const runsGl = [];
+  for (const name of names) {
+    const data = layerData.get(name);
+    if (data && data.gl) runsGl.push(...data.gl);
+  }
+  drawRunsGl(runsGl, tileDevW, tileDevH, ua, ub, aa, options);
+}
+
+function bindUvQuad(prog, rect) {
+  gl.useProgram(prog.p);
+  gl.uniform4f(prog.u.u_rect, rect[0], rect[1], rect[2], rect[3]);
+  gl.bindBuffer(gl.ARRAY_BUFFER, G.uvVbo);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+}
+
+function render() {
+  if (!gl || !tiles.length) return;
+  resizeCanvas();
+  const cw = canvas.width, ch = canvas.height;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, cw, ch);
+  gl.disable(gl.SCISSOR_TEST);
+  const bg = cssColour('--bg');
+  gl.clearColor(bg[0], bg[1], bg[2], 1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+
+  const s = scaleCss();
+  const devScale = s * dpr;
+  const aa = 1 / devScale;
+
+  for (const tile of tiles) {
+    const r = tileCssRect(tile);
+    if (r.x + r.w < 0 || r.y + r.h < 0 || r.x > viewport.clientWidth || r.y > viewport.clientHeight) continue;
+    const tx = Math.round(r.x * dpr), ty = Math.round(r.y * dpr);
+    const tw = Math.max(1, Math.round(r.w * dpr)), th = Math.max(1, Math.round(r.h * dpr));
+    ensureScratch(tw, th);
+
+    // board(view-space) → clip of a tw×th framebuffer.
+    // dev = (v - pan) * devScale;  v = flipped ? boardW - bx : bx
+    const sx = flipped ? -devScale : devScale;
+    const ox = flipped ? (boardW - panX) * devScale : -panX * devScale;
+    const ua = [2 * sx / tw, 2 * devScale / th];
+    const ub = [2 * ox / tw - 1, 2 * (-panY * devScale) / th - 1];
+
+    // clip rect of the tile on the main canvas (y0 = top edge).
+    const rect = [
+      (tx / cw) * 2 - 1,
+      1 - (ty / ch) * 2,
+      ((tx + tw) / cw) * 2 - 1,
+      1 - ((ty + th) / ch) * 2,
+    ];
+    const covScale = [tw / G.scratchW, th / G.scratchH];
+    const outer = isOuter(tile.name);
+    const side = sideOf(tile.name);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, cw, ch);
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(tx, ch - ty - th, tw, th);
+
+    // substrate
+    bindUvQuad(G.solid, rect);
+    const sub = cssColour(outer ? '--substrate' : '--inner-substrate');
+    gl.uniform4f(G.solid.u.u_colour, sub[0], sub[1], sub[2], 1);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.disable(gl.SCISSOR_TEST);
+
+    const tintPass = (colour, alpha, invert) => {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, cw, ch);
+      gl.enable(gl.SCISSOR_TEST);
+      gl.scissor(tx, ch - ty - th, tw, th);
+      gl.enable(gl.BLEND);
+      gl.blendEquation(gl.FUNC_ADD);
+      gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+      bindUvQuad(G.tint, rect);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, G.scratchTex);
+      gl.uniform1i(G.tint.u.u_cov, 0);
+      gl.uniform2f(G.tint.u.u_covScale, covScale[0], covScale[1]);
+      gl.uniform4f(G.tint.u.u_colour,
+        colour[0] * colour[3] * alpha, colour[1] * colour[3] * alpha,
+        colour[2] * colour[3] * alpha, colour[3] * alpha);
+      gl.uniform1f(G.tint.u.u_invert, invert ? 1 : 0);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      gl.disable(gl.SCISSOR_TEST);
+    };
+
+    // copper
+    drawCoverage([tile.name], tw, th, ua, ub, aa);
+    tintPass(cssColour(outer ? '--outer-copper' : '--inner-copper'), 1, false);
+
+    // soldermask (outer layers): colour where the mask artwork is ABSENT.
+    const maskName = outer ? firstExisting((meta.mask_layers || []).filter(n => sideOf(n) === side)) : null;
+    if (maskName) {
+      drawCoverage([maskName], tw, th, ua, ub, aa);
+      tintPass(cssColour('--soldermask'), MASK_ALPHA, true);
+    }
+
+    // silkscreen with mask + drill knockout
+    const silkName = silkOn && outer ? firstExisting((meta.silk_layers || []).filter(n => sideOf(n) === side)) : null;
+    if (silkName) {
+      drawCoverage([silkName], tw, th, ua, ub, aa);
+      const knockNames = [];
+      if (maskName) knockNames.push(maskName);
+      for (const d of (meta.drill_layers || [])) if (layerData.has(d)) knockNames.push(d);
+      if (knockNames.length) drawCoverage(knockNames, tw, th, ua, ub, aa, {negate: true, clear: false});
+      tintPass(cssColour('--silk'), 0.92, false);
+    }
+
+    // drills
+    const drills = (meta.drill_layers || []).filter(n => layerData.has(n));
+    if (drills.length) {
+      drawCoverage(drills, tw, th, ua, ub, aa);
+      tintPass(cssColour('--drill'), 1, false);
+    }
+
+    // net highlight: the selected net's own vector geometry, drawn through
+    // the same coverage pipeline — pixel-identical to the copper.
+    const hlRuns = currentNet ? hlGeometry.get(tile.name) : null;
+    if (hlRuns) {
+      drawRunsGl(hlRuns, tw, th, ua, ub, aa);
+      tintPass(cssColour('--highlight'), 1, false);
+    }
+  }
+}
+
+/* ------------------------- picking / nets ------------------------ */
+
+function pickNetAt(clientX, clientY, tolerancePx = 8) {
+  if (!netGrids) return null;
+  const hit = tileAtClient(clientX, clientY);
+  if (!hit) return null;
+  const grid = netGrids.layers.get(hit.tile.name);
+  if (!grid) return null;
+  const v = [panX + hit.local[0] / scaleCss(), panY + hit.local[1] / scaleCss()];
+  const bx = flipped ? boardW - v[0] : v[0];
+  const by = v[1];
+  const nmScale = (netGrids.fullWidth / boardW) / (1 << netGrids.shift);
+  const gx = Math.floor(bx * nmScale), gy = Math.floor(by * nmScale);
+  if (gx < 0 || gy < 0 || gx >= netGrids.width || gy >= netGrids.height) return null;
+  // Snap to the nearest trace within the click tolerance (screen px → grid
+  // cells at the current zoom), so near-misses still pick.
+  const maxR = Math.min(96, Math.max(1, Math.round(tolerancePx / scaleCss() * nmScale)));
+  const net = nearestLabel(grid, netGrids.width, netGrids.height, gx, gy, maxR);
+  return {net, layer: hit.tile.name, board: [bx, by]};
+}
+
+function rebuildHighlightGeometry() {
+  for (const runs of hlGeometry.values()) deleteGlRuns(runs);
+  hlGeometry.clear();
+  if (!currentNet || !netGrids) return;
+  for (const [name, attrib] of netAttribution) {
+    const data = layerData.get(name);
+    if (!data) continue;
+    const geom = buildNetGeometry(data.runs, attrib, currentNet);
+    if (geom) hlGeometry.set(name, geom.map(buildGlRun));
   }
 }
 
 function selectNet(netId) {
-  clearSelectedNetElements();
-  currentNet = null;
-  if (!Number.isInteger(netId) || netId <= 0 || !netElements.has(netId)) {
-    updateNetHighlights();
-    updateNetInfo(null, Number.isInteger(netId) && netId > 0 ? `Net ${netId} is not present in the viewer map.` : null);
-    return;
-  }
-  selectedNetElements = netElements.get(netId);
-  for (const element of selectedNetElements) element.classList.add('selected');
-  currentNet = netId;
-  updateNetHighlights();
-  document.getElementById('net-search').value = String(netId);
-  updateNetInfo(netId);
-}
-
-function clearNet() {
-  clearSelectedNetElements();
-  currentNet = null;
-  updateNetHighlights();
-  updateNetInfo(null);
-}
-
-function updateNetInfo(netId, message=null) {
+  currentNet = Number.isInteger(netId) && netId > 0 ? netId : 0;
+  rebuildHighlightGeometry();
   const info = document.getElementById('net-info');
-  const clicked = lastPick
-    ? `<div style="color:var(--muted);font-size:11px">Clicked: <code>${lastPick.spec}</code></div>`
-    : '';
-  if (!netId) {
-    info.innerHTML = clicked + (message
-      ? `<div style="color:#ff9d9d">${message}</div>`
-      : '<em style="color:var(--muted)">Click a net</em>');
-    return;
-  }
-  const layers = [];
-  for (const [layer, ids] of layerNetIds) if (ids.has(netId)) layers.push(layer);
-  info.innerHTML = `<div><strong>Net ${netId}</strong></div>` + clicked +
-    `<div class="layer-list">${layers.length ? layers.map(layer => `<div>${layer}</div>`).join('') : 'No layer geometry'}</div>`;
-}
-
-function applyToggleStates() {
-  document.getElementById('toggle-flip').classList.toggle('active', flipped);
-  document.getElementById('toggle-silk').classList.toggle('active', silkOn);
-  document.getElementById('toggle-silk').textContent = silkOn ? 'Hide silk' : 'Show silk';
-  const collapsed = document.body.classList.contains('sidebar-collapsed');
-  document.getElementById('toggle-sidebar').textContent = collapsed ? 'Show panel' : 'Hide panel';
-  updatePanelScaleReadout();
-}
-
-function setSidebarCollapsed(collapsed) {
-  const oldW = Math.max(1, viewport.clientWidth);
-  const oldH = Math.max(1, viewport.clientHeight);
-  document.body.classList.toggle('sidebar-collapsed', collapsed);
-  try { localStorage.setItem('pcbnets.sidebarCollapsed', collapsed ? '1' : '0'); } catch {}
-  applyToggleStates();
-  requestAnimationFrame(() => handleViewportGeometryChange(oldW, oldH));
-}
-
-function handleViewportGeometryChange(oldW=lastViewportW, oldH=lastViewportH) {
-  const newW = Math.max(1, viewport.clientWidth);
-  const newH = Math.max(1, viewport.clientHeight);
-  if (oldW > 0 && oldH > 0) {
-    panelX += (newW - oldW) / 2;
-    panelY += (newH - oldH) / 2;
+  if (!currentNet) {
+    info.textContent = '';
+  } else if (netGrids) {
+    const layers = [...hlGeometry.keys()];
+    info.textContent = layers.length
+      ? `Net ${currentNet} on: ${layers.join(', ')}`
+      : `Net ${currentNet} is not present in the netmap.`;
+    document.getElementById('net-search').value = String(currentNet);
   } else {
-    centerPanelGrid();
+    info.textContent = 'Netmap still loading…';
   }
-  rememberViewportSize();
-  updateScrollArea(true);
-  updatePanelScaleReadout();
+  requestRender();
 }
 
-function populateSidebar() {
-  const list = document.getElementById('tile-list');
-  list.innerHTML = (meta.layers || []).map(name => {
-    const correction = (meta.corrections || {})[name];
-    let note = '';
-    if (correction) {
-      if (correction.invert) note = ' (inverted)';
-      else if (correction.offset && (correction.offset[0] || correction.offset[1])) note = ` (offset ${correction.offset})`;
-    }
-    return `<div>· ${name}${note}</div>`;
-  }).join('');
-}
-
-function toggleSilk() {
-  silkOn = !silkOn;
-  for (const element of document.querySelectorAll('.silk-layer')) element.classList.toggle('silk-hidden', !silkOn);
-  invalidateLocalPreview();
-  schedulePreviewRebuild();
-  scheduleLocalPreviewRebuild();
-  applyToggleStates();
-}
-
-function toggleFlip() {
-  flipped = !flipped;
-  scheduleContentTransform();
-  updateTileLabels();
-  applyToggleStates();
-}
-
-function isUiTarget(target) {
-  return target && target.closest && target.closest('button,input,select,textarea,a,label');
-}
-
-function showNavigationMode() {
-  cancelLocalPreviewBuild();
-  if (navigationTimer) {
-    clearTimeout(navigationTimer);
-    navigationTimer = 0;
-  }
-  navigationSettleGeneration += 1;
-  for (const tile of tileElements) tile.classList.remove('board-revealed');
-  document.body.classList.remove('navigation-settling');
-  document.body.classList.add('navigating');
-  updateNavigationPreviewChoice();
-}
-
-function settleNavigationMode() {
-  if (pointerNavigating || navigationTimer) return;
-  const generation = ++navigationSettleGeneration;
-  applyContentTransformNow();
-  document.body.classList.remove('navigating');
-  document.body.classList.add('navigation-settling');
-  void revealBoardsProgressively(generation);
-}
-
-function nextFrame() {
-  return new Promise(resolve => requestAnimationFrame(resolve));
-}
-
-// Order tiles so the ones intersecting the viewport get their live SVG back
-// first; offscreen windows can wait.
-function tilesInRevealOrder() {
-  const originX = panelX - scrollOriginX - viewport.scrollLeft;
-  const originY = panelY - scrollOriginY - viewport.scrollTop;
-  const vw = viewport.clientWidth;
-  const vh = viewport.clientHeight;
-  const onscreen = [];
-  const offscreen = [];
-  for (const tile of tileElements) {
-    const placement = placements.get(tile.dataset.layer);
-    if (!placement) { offscreen.push(tile); continue; }
-    const x = originX + placement.x * panelScale;
-    const y = originY + placement.y * panelScale;
-    const w = placement.w * panelScale;
-    const h = placement.h * panelScale;
-    (x < vw && y < vh && x + w > 0 && y + h > 0 ? onscreen : offscreen).push(tile);
-  }
-  return [...onscreen, ...offscreen];
-}
-
-function settleAborted(generation) {
-  return generation !== navigationSettleGeneration || pointerNavigating || navigationTimer;
-}
-
-async function revealBoardsProgressively(generation) {
-  // Unhide one tile's live SVG per frame pair so each expensive raster is a
-  // short, separately-interruptible block. A new pan or wheel gesture bumps
-  // navigationSettleGeneration (via showNavigationMode) and we bail out,
-  // leaving the cheap canvas previews in charge. In mobile light mode there
-  // are no live boards to reveal, so the previews simply stay in charge.
-  if (!MOBILE_PREVIEW_ONLY) {
-    for (const tile of tilesInRevealOrder()) {
-      tile.classList.add('board-revealed');
-      await nextFrame();
-      await nextFrame();
-      if (settleAborted(generation)) return;
-    }
-  }
-  document.body.classList.remove('navigation-settling');
-  for (const tile of tileElements) tile.classList.remove('board-revealed');
-  if (MOBILE_PREVIEW_ONLY) updateNavigationPreviewChoice();
-  else clearNavigationPreviewChoice();
-  scheduleLocalPreviewRebuild();
-}
-
-function beginPointerNavigation() {
-  pointerNavigating = true;
-  showNavigationMode();
-}
-
-function endPointerNavigation() {
-  pointerNavigating = false;
-  settleNavigationMode();
-}
-
-function pulseNavigation(delay=200) {
-  showNavigationMode();
-  navigationTimer = window.setTimeout(() => {
-    navigationTimer = 0;
-    settleNavigationMode();
-  }, delay);
-}
+/* ------------------------- interaction --------------------------- */
 
 const activePointers = new Map();
 let pinchActive = false;
-let pinchLastDist = 0;
-let pinchLastX = 0;
-let pinchLastY = 0;
+let pinchLastDist = 0, pinchLastX = 0, pinchLastY = 0;
+let isPanning = false, isPanelPanning = false, panMoved = false;
+let panStartX = 0, panStartY = 0, panOrigX = 0, panOrigY = 0;
+let panelOrigX = 0, panelOrigY = 0;
 
-function startPinch() {
-  const [a, b] = [...activePointers.values()];
-  pinchActive = true;
-  isPanning = false;
-  isPanelPanning = false;
-  panMoved = true;
-  pendingPickNet = null;
-  pendingPickLayer = null;
-  pinchLastDist = Math.hypot(a.x - b.x, a.y - b.y);
-  pinchLastX = (a.x + b.x) / 2;
-  pinchLastY = (a.y + b.y) / 2;
-  if (!panNavigationStarted) {
-    panNavigationStarted = true;
-    beginPointerNavigation();
-  }
-}
+let spaceHeld = false;
 
-function movePinch() {
-  const [a, b] = [...activePointers.values()];
-  const dist = Math.hypot(a.x - b.x, a.y - b.y);
-  const midX = (a.x + b.x) / 2;
-  const midY = (a.y + b.y) / 2;
-  // Pan by the midpoint movement, mirroring the single-finger drag math…
-  const dx = midX - pinchLastX;
-  const dy = midY - pinchLastY;
-  const speed = Math.max(.001, panelScale * contentZoom);
-  contentPanX += (flipped ? 1 : -1) * dx / speed;
-  contentPanY += -dy / speed;
-  // …then zoom about the midpoint by the finger-distance ratio.
-  if (pinchLastDist > 0 && dist > 0) {
-    setZoomAt(midX, midY, contentZoom * (dist / pinchLastDist));
-  } else {
-    clampContentPan();
-    scheduleContentTransform();
-  }
-  pinchLastDist = dist;
-  pinchLastX = midX;
-  pinchLastY = midY;
+// Keep at least a grabbable corner of the grid inside the viewport so the
+// board can never be flung entirely off-screen.
+function clampPanelPosition() {
+  const {cols, rows} = gridDims();
+  const gw = cols * boardW * panelScale + (cols - 1) * GRID_GAP;
+  const gh = rows * boardH * panelScale + (rows - 1) * GRID_GAP;
+  const KEEP = 48;
+  panelX = Math.min(viewport.clientWidth - KEEP, Math.max(KEEP - gw, panelX));
+  panelY = Math.min(viewport.clientHeight - KEEP, Math.max(KEEP - gh, panelY));
 }
 
 function beginPan(event) {
-  if (isUiTarget(event.target) || ![0,1,2].includes(event.button)) return;
-  // Prevent native SVG/image dragging and text selection from stealing the gesture.
+  if (![0, 1, 2].includes(event.button)) return;
   event.preventDefault();
   activePointers.set(event.pointerId, {x: event.clientX, y: event.clientY});
   viewport.setPointerCapture(event.pointerId);
   if (activePointers.size === 2) {
-    startPinch();
+    const [a, b] = [...activePointers.values()];
+    pinchActive = true;
+    isPanning = false;
+    panMoved = true;
+    pinchLastDist = Math.hypot(a.x - b.x, a.y - b.y);
+    pinchLastX = (a.x + b.x) / 2;
+    pinchLastY = (a.y + b.y) / 2;
     return;
   }
   if (activePointers.size > 2 || pinchActive) return;
   isPanning = true;
-  // Middle/right/Alt-drag moves the window grid, as before — and so does a
-  // plain drag that starts on the empty background outside any layer window.
-  // On touch devices that background drag is the only way to move the grid.
-  isPanelPanning = event.button === 1 || event.button === 2 || event.altKey ||
-    !(event.target.closest && event.target.closest('.tile'));
+  // Grid pan when: middle/right button, Alt or Space held, starting on the
+  // background — or when content zoom is 1, where a content pan is a no-op
+  // anyway (the window already shows the whole board). That last rule means
+  // "windows too big to leave any background" is still draggable, including
+  // on touch.
+  isPanelPanning = event.button === 1 || event.button === 2 || event.altKey || spaceHeld ||
+    contentZoom <= 1.001 || !tileAtClient(event.clientX, event.clientY);
   panMoved = false;
-  panNavigationStarted = false;
   panStartX = event.clientX;
   panStartY = event.clientY;
-  panOrigX = contentPanX;
-  panOrigY = contentPanY;
-  panelPanOrigX = panelX;
-  panelPanOrigY = panelY;
-  const shape = event.target.closest && event.target.closest('[data-net-id]');
-  pendingPickNet = shape ? Number(shape.dataset.netId) : null;
-  pendingPickLayer = shape ? shape.dataset.layer : null;
-  viewport.classList.add('dragging');
+  panOrigX = panX; panOrigY = panY;
+  panelOrigX = panelX; panelOrigY = panelY;
 }
 
 function movePan(event) {
   const tracked = activePointers.get(event.pointerId);
-  if (tracked) {
-    tracked.x = event.clientX;
-    tracked.y = event.clientY;
-  }
+  if (tracked) { tracked.x = event.clientX; tracked.y = event.clientY; }
   if (pinchActive) {
-    if (tracked && activePointers.size >= 2) movePinch();
+    if (!tracked || activePointers.size < 2) return;
+    const [a, b] = [...activePointers.values()];
+    const dist = Math.hypot(a.x - b.x, a.y - b.y);
+    const midX = (a.x + b.x) / 2, midY = (a.y + b.y) / 2;
+    // Pan by the midpoint movement (view space follows the drag on both
+    // axes; flip is folded into the render transform, not the pan).
+    panX -= (midX - pinchLastX) / scaleCss();
+    panY -= (midY - pinchLastY) / scaleCss();
+    if (pinchLastDist > 0 && dist > 0) {
+      setZoomAt(midX, midY, contentZoom * (dist / pinchLastDist));
+    } else {
+      clampContentPan();
+      requestRender();
+    }
+    pinchLastDist = dist;
+    pinchLastX = midX; pinchLastY = midY;
     return;
   }
   if (!isPanning) return;
   const dx = event.clientX - panStartX;
   const dy = event.clientY - panStartY;
-  if (Math.abs(dx) + Math.abs(dy) > 4) {
-    panMoved = true;
-    if (!panNavigationStarted) {
-      panNavigationStarted = true;
-      beginPointerNavigation();
-    }
-  }
-
+  if (Math.abs(dx) + Math.abs(dy) > 4) panMoved = true;
   if (isPanelPanning) {
-    panelX = panelPanOrigX + dx;
-    panelY = panelPanOrigY + dy;
-    scheduleScrollArea();
-    return;
+    panelX = panelOrigX + dx;
+    panelY = panelOrigY + dy;
+    clampPanelPosition();
+    updateTileDom();
+  } else {
+    panX = panOrigX - dx / scaleCss();
+    panY = panOrigY - dy / scaleCss();
+    clampContentPan();
   }
-
-  contentPanX = panOrigX + (flipped ? 1 : -1) * dx / Math.max(.001, panelScale * contentZoom);
-  contentPanY = panOrigY - dy / Math.max(.001, panelScale * contentZoom);
-  clampContentPan();
-  scheduleContentTransform();
+  requestRender();
 }
 
 function endPan(event) {
   activePointers.delete(event.pointerId);
   try { viewport.releasePointerCapture(event.pointerId); } catch {}
-
   if (pinchActive) {
     if (activePointers.size >= 2) {
-      // Still pinching with the remaining fingers; rebase the gesture.
       const [a, b] = [...activePointers.values()];
       pinchLastDist = Math.hypot(a.x - b.x, a.y - b.y);
       pinchLastX = (a.x + b.x) / 2;
@@ -1683,211 +1600,239 @@ function endPan(event) {
     }
     pinchActive = false;
     if (activePointers.size === 1) {
-      // One finger left: hand off to a normal pan without lifting.
       const [rest] = [...activePointers.values()];
       isPanning = true;
-      isPanelPanning = false;
+      isPanelPanning = contentZoom <= 1.001;
       panMoved = true;
-      panStartX = rest.x;
-      panStartY = rest.y;
-      panOrigX = contentPanX;
-      panOrigY = contentPanY;
+      panStartX = rest.x; panStartY = rest.y;
+      panOrigX = panX; panOrigY = panY;
+      panelOrigX = panelX; panelOrigY = panelY;
       return;
     }
-    viewport.classList.remove('dragging');
-    panNavigationStarted = false;
-    endPointerNavigation();
     return;
   }
-
   if (!isPanning) return;
-  const moved = panMoved;
   isPanning = false;
-  isPanelPanning = false;
-  panMoved = false;
-  viewport.classList.remove('dragging');
-  if (panNavigationStarted) endPointerNavigation();
-  panNavigationStarted = false;
-
-  if (event.type === 'pointerup' && event.button === 0 && !moved) {
-    const point = boardPointAtClient(event.clientX, event.clientY);
-    lastPick = analysisPickText(point);
-    if (pendingPickNet) selectNet(pendingPickNet);
-    else clearNet();
+  if (event.type === 'pointerup' && event.button === 0 && !panMoved) {
+    const pick = pickNetAt(event.clientX, event.clientY, event.pointerType === 'touch' ? 16 : 8);
+    if (pick && pick.net) selectNet(pick.net);
+    else selectNet(0);
   }
-  pendingPickNet = null;
-  pendingPickLayer = null;
+}
+
+let wheelFrame = 0, wheelZoomDelta = 0, wheelPanelDelta = 0, wheelClientX = 0, wheelClientY = 0;
+viewport.addEventListener('wheel', event => {
+  event.preventDefault();
+  const unit = event.deltaMode === 1 ? 33 : event.deltaMode === 2 ? 330 : 1;
+  // Alt+wheel scrolls the window grid (Alt is the "grid" modifier, matching
+  // Alt+drag). Trackpad horizontal deltas pan horizontally too.
+  if (event.altKey) {
+    panelX -= event.deltaX * unit;
+    panelY -= event.deltaY * unit;
+    clampPanelPosition();
+    updateTileDom();
+    requestRender();
+    return;
+  }
+  const delta = event.deltaY * unit;
+  wheelClientX = event.clientX;
+  wheelClientY = event.clientY;
+  if (event.shiftKey) wheelPanelDelta += delta; else wheelZoomDelta += delta;
+  if (!wheelFrame) wheelFrame = requestAnimationFrame(() => {
+    wheelFrame = 0;
+    if (wheelPanelDelta) {
+      const f = Math.exp(-wheelPanelDelta * 0.0016);
+      wheelPanelDelta = 0;
+      setPanelScaleAt(wheelClientX, wheelClientY, panelScale * f);
+    }
+    if (wheelZoomDelta) {
+      const f = Math.exp(-wheelZoomDelta * 0.0016);
+      wheelZoomDelta = 0;
+      setZoomAt(wheelClientX, wheelClientY, contentZoom * f);
+    }
+  });
+}, {passive: false});
+
+viewport.addEventListener('pointerdown', beginPan);
+viewport.addEventListener('pointermove', movePan);
+viewport.addEventListener('pointerup', endPan);
+viewport.addEventListener('pointercancel', endPan);
+viewport.addEventListener('contextmenu', event => event.preventDefault());
+for (const type of ['gesturestart', 'gesturechange', 'gestureend']) {
+  document.addEventListener(type, event => event.preventDefault(), {passive: false});
+}
+
+document.addEventListener('keydown', event => {
+  if (event.target.tagName === 'INPUT') return;
+  if (event.key === ' ') { spaceHeld = true; event.preventDefault(); return; }
+  const step = event.shiftKey ? 240 : 60;
+  if (event.key === 'ArrowLeft') { panelX += step; }
+  else if (event.key === 'ArrowRight') { panelX -= step; }
+  else if (event.key === 'ArrowUp') { panelY += step; }
+  else if (event.key === 'ArrowDown') { panelY -= step; }
+  else if (event.key === '+' || event.key === '=') { setPanelScaleAt(viewport.clientWidth / 2, viewport.clientHeight / 2, panelScale * 1.2); return; }
+  else if (event.key === '-') { setPanelScaleAt(viewport.clientWidth / 2, viewport.clientHeight / 2, panelScale / 1.2); return; }
+  else if (event.key === 'h' || event.key === 'H') { toggleSidebar(); return; }
+  else if (event.key === 'f' || event.key === 'F') { fitToScreen(); return; }
+  else if (event.key === 'Escape') { selectNet(0); return; }
+  else return;
+  event.preventDefault();
+  clampPanelPosition();
+  updateTileDom();
+  requestRender();
+});
+document.addEventListener('keyup', event => {
+  if (event.key === ' ') spaceHeld = false;
+});
+window.addEventListener('blur', () => { spaceHeld = false; });
+
+function toggleSidebar() {
+  document.body.classList.toggle('sidebar-collapsed');
+  try { localStorage.setItem('pcbnets.gl.sidebarCollapsed', document.body.classList.contains('sidebar-collapsed') ? '1' : '0'); } catch {}
+}
+
+document.getElementById('btn-fit').addEventListener('click', fitToScreen);
+document.getElementById('btn-flip').addEventListener('click', () => { flipped = !flipped; requestRender(); });
+document.getElementById('btn-silk').addEventListener('click', () => { silkOn = !silkOn; requestRender(); });
+document.getElementById('btn-hide').addEventListener('click', toggleSidebar);
+document.getElementById('sidebar-tab').addEventListener('click', toggleSidebar);
+document.getElementById('panel-zoom-in').addEventListener('click', () => setPanelScaleAt(viewport.clientWidth / 2, viewport.clientHeight / 2, panelScale * 1.25));
+document.getElementById('panel-zoom-out').addEventListener('click', () => setPanelScaleAt(viewport.clientWidth / 2, viewport.clientHeight / 2, panelScale / 1.25));
+document.getElementById('btn-net-go').addEventListener('click', () => selectNet(Number(document.getElementById('net-search').value)));
+document.getElementById('btn-net-clear').addEventListener('click', () => { document.getElementById('net-search').value = ''; selectNet(0); });
+document.getElementById('net-search').addEventListener('keydown', event => {
+  if (event.key === 'Enter') selectNet(Number(event.target.value));
+});
+
+window.addEventListener('resize', () => { updateTileDom(); requestRender(); });
+
+canvas.addEventListener('webglcontextlost', event => {
+  event.preventDefault();
+  setStatus('WebGL context lost — attempting recovery…');
+});
+canvas.addEventListener('webglcontextrestored', () => {
+  initGL();
+  for (const [name, data] of layerData) if (data.runs) uploadLayerBuffers(name, data);
+  hlGeometry.clear();          // stale GL handles from the lost context
+  rebuildHighlightGeometry();  // attribution is CPU data and survives
+  setStatus('Recovered.');
+  requestRender();
+});
+
+/* ------------------------- loading ------------------------------- */
+
+const yieldToInput = () => new Promise(resolve => setTimeout(resolve, 0));
+
+async function fetchText(url, label, optional = false) {
+  try {
+    const response = await fetch(url);
+    if (!response.ok) {
+      if (optional) return null;
+      fail(`Unable to load ${label || url}: HTTP ${response.status}`);
+    }
+    return await response.text();
+  } catch (error) {
+    if (optional) return null;
+    fail(`Unable to load ${label || url}: ${error.message}`);
+  }
 }
 
 async function init() {
   if (IS_MOBILE) document.body.classList.add('mobile-light');
-  // On mobile, start with the controls tucked away (unless the user has
-  // explicitly shown them before) — the board is the point on a phone.
   try {
-    const stored = localStorage.getItem('pcbnets.sidebarCollapsed');
-    if (IS_MOBILE && stored === null) localStorage.setItem('pcbnets.sidebarCollapsed', '1');
+    const stored = localStorage.getItem('pcbnets.gl.sidebarCollapsed');
+    if ((IS_MOBILE && stored === null) || stored === '1') document.body.classList.add('sidebar-collapsed');
   } catch {}
-  // iOS Safari fires proprietary gesture events for two-finger pinches;
-  // prevent them so the page itself never zooms — the viewer handles pinch
-  // through pointer events instead.
-  for (const type of ['gesturestart', 'gesturechange', 'gestureend']) {
-    document.addEventListener(type, event => event.preventDefault(), {passive: false});
-  }
-  meta = JSON.parse(await fetchText('meta.json', 'metadata'));
-  boardW = Number(meta.width || meta.tile_w);
-  boardH = Number(meta.height || meta.tile_h);
-  if (!boardW || !boardH) fail('metadata is missing board dimensions (width/height)');
-  if (!Array.isArray(meta.layers) || !meta.layers.length) fail('metadata lists no copper layers');
 
-  const names = new Set([
-    ...meta.layers,
+  initGL();
+
+  meta = JSON.parse(await fetchText('meta.json', 'metadata'));
+  boardW = meta.width; boardH = meta.height;
+
+  const names = [...new Set([
+    ...(meta.layers || []),
     ...(meta.mask_layers || []),
     ...(meta.silk_layers || []),
     ...(meta.drill_layers || []),
-  ]);
-  const requiredLayers = new Set(meta.layers || []);
-  const netFile = meta.netmap || 'netmap.svg';
-  const netTextPromise = fetchText(netFile, 'netmap.svg');
-  // Load layers one at a time: parse, validate, build the serialized text
-  // templates, then (on mobile) let the parsed DOM and raw text go before
-  // fetching the next layer, so peak memory stays at roughly one layer
-  // instead of every layer at once. Desktop keeps the DOMs for the live
-  // inline board artwork.
-  const maskNames = new Set(meta.mask_layers || []);
+  ])];
+
+  let parseStats = {capsules: 0, tris: 0};
   for (const name of names) {
+    const required = (meta.layers || []).includes(name);
+    setStatus(`Parsing ${name}…`);
     const file = (meta.layer_svgs && meta.layer_svgs[name]) || `${name}.svg`;
-    const text = requiredLayers.has(name)
-      ? await fetchText(file, `SVG layer ${name}`)
-      : await fetchOptionalText(file);
+    const text = await fetchText(file, `layer ${name}`, !required);
     if (text === null) continue;
-    const root = parseSvg(text, file);
-    checkSvgSize(root, file, boardW, boardH);
-    loadedLayers.add(name);
-    buildLayerTemplates(root, name, maskNames.has(name));
-    if (!MOBILE_PREVIEW_ONLY) layerSources.set(name, root);
+    let parsed = parseGerbvLayer(text);
+    if ((meta.corrections || {})[name]?.invert) parsed = invertRuns(parsed);
+    layerData.set(name, parsed);
+    uploadLayerBuffers(name, parsed);
+    for (const r of parsed.runs) { parseStats.capsules += r.segs.length / 5; parseStats.tris += r.fans.length / 6; }
     await yieldToInput();
   }
 
-  netSource = parseSvg(await netTextPromise, netFile);
-  netViewBox = svgViewBox(netSource,
-    Number(meta.netmap_width) || boardW * (Number(meta.netmap_scale) || 1),
-    Number(meta.netmap_height) || boardH * (Number(meta.netmap_scale) || 1));
-
-  buildPlacements();
-  buildTiles();
-  populateSidebar();
-
-  if (document.querySelector('.silk-layer')) document.getElementById('toggle-silk').style.display = 'inline-block';
-  document.getElementById('loading').style.display = 'none';
-  document.getElementById('controls').style.display = 'block';
-  try {
-    if (localStorage.getItem('pcbnets.sidebarCollapsed') === '1') document.body.classList.add('sidebar-collapsed');
-  } catch {}
-  applyToggleStates();
+  // Layer windows (DOM = border + label only; pixels come from the canvas)
+  tilesRoot.innerHTML = '';
+  tiles = (meta.layers || []).filter(n => layerData.has(n)).map(name => {
+    const el = document.createElement('div');
+    el.className = 'tile';
+    const label = document.createElement('div');
+    label.className = 'tile-label';
+    label.textContent = name;
+    el.appendChild(label);
+    tilesRoot.appendChild(el);
+    return {name, el, labelEl: label, col: 0, row: 0};
+  });
+  layoutTiles();
   fitToScreen();
-  schedulePreviewRebuild();
-  scheduleLocalPreviewRebuild(300);
+
+  // Sidebar layer list with correction notes
+  document.getElementById('tile-list').innerHTML = names
+    .filter(n => layerData.has(n))
+    .map(name => {
+      const c = (meta.corrections || {})[name];
+      let note = '';
+      if (c) {
+        if (c.invert) note = ' (inverted)';
+        else if (c.offset && (c.offset[0] || c.offset[1])) note = ` (offset ${c.offset})`;
+      }
+      return `<div>· ${name}${note}</div>`;
+    }).join('');
+
+  setStatus(`Rendering ${Math.round(parseStats.capsules).toLocaleString()} capsules + ` +
+            `${Math.round(parseStats.tris).toLocaleString()} triangles.\nLoading netmap…`);
+  requestRender();
+
+  // Netmap loads after first paint; picking activates when done.
+  const netText = await fetchText(meta.netmap || 'netmap.svg', 'netmap', true);
+  if (netText) {
+    await yieldToInput();
+    const t0 = performance.now();
+    netGrids = parseNetmap(netText, {shift: NETMAP_SHIFT});
+    // Attribute every additive copper primitive to its electrical net, so
+    // highlights render as the net's own vector geometry instead of the
+    // blocky pick grid.
+    const cellsPerUnit = (netGrids.fullWidth / boardW) / (1 << netGrids.shift);
+    for (const name of (meta.layers || [])) {
+      const data = layerData.get(name);
+      const grid = netGrids.layers.get(name);
+      if (!data || !grid) continue;
+      netAttribution.set(name,
+        attributeRunNets(data.runs, grid, netGrids.width, netGrids.height, cellsPerUnit));
+      await yieldToInput();
+    }
+    setStatus(`Rendering ${Math.round(parseStats.capsules).toLocaleString()} capsules + ` +
+              `${Math.round(parseStats.tris).toLocaleString()} triangles.\n` +
+              `Netmap: ${netGrids.stats.paths} nets attributed in ${Math.round(performance.now() - t0)}ms. Click a trace to pick.`);
+  } else {
+    setStatus('No netmap found — picking disabled.');
+  }
+  requestRender();
 }
 
-// Wheel events can arrive much faster than the display refresh (especially
-// from trackpads). Accumulate deltas and apply a single, delta-proportional
-// zoom step per animation frame: one layout read and one transform update
-// per frame instead of per event, and smooth pixel-level trackpad zooming
-// while a classic mouse notch (deltaY ~100) still gives the familiar ~1.17x.
-let wheelFrame = 0;
-let wheelZoomDelta = 0;
-let wheelPanelDelta = 0;
-let wheelClientX = 0;
-let wheelClientY = 0;
+init().catch(error => fail(String(error && error.stack || error)));
 
-function applyWheelFrame() {
-  wheelFrame = 0;
-  pulseNavigation();
-  if (wheelPanelDelta) {
-    const factor = Math.exp(-wheelPanelDelta * 0.0016);
-    wheelPanelDelta = 0;
-    setPanelScaleAt(wheelClientX, wheelClientY, panelScale * factor);
-  }
-  if (wheelZoomDelta) {
-    const factor = Math.exp(-wheelZoomDelta * 0.0016);
-    wheelZoomDelta = 0;
-    setZoomAt(wheelClientX, wheelClientY, contentZoom * factor);
-  }
-  // We are already inside an animation frame; letting scheduleContentTransform
-  // defer to the *next* frame would add a frame of latency to every wheel tick.
-  applyContentTransformNow();
-}
-
-viewport.addEventListener('wheel', event => {
-  event.preventDefault();
-  // Normalise line/page scrolling (Firefox) to approximate pixel deltas.
-  const unit = event.deltaMode === 1 ? 33 : event.deltaMode === 2 ? 330 : 1;
-  const delta = event.deltaY * unit;
-  wheelClientX = event.clientX;
-  wheelClientY = event.clientY;
-  if (event.shiftKey) wheelPanelDelta += delta;
-  else wheelZoomDelta += delta;
-  if (!wheelFrame) wheelFrame = requestAnimationFrame(applyWheelFrame);
-}, {passive:false});
-viewport.addEventListener('dblclick', event => {
-  event.preventDefault();
-  pulseNavigation();
-  setZoomAt(event.clientX, event.clientY, contentZoom < 1.5 ? 2 : 1);
-});
-viewport.addEventListener('pointerdown', beginPan);
-viewport.addEventListener('pointermove', movePan);
-// Inline SVG descendants can otherwise trigger the browser's native drag ghost.
-viewport.addEventListener('dragstart', event => event.preventDefault(), true);
-viewport.addEventListener('selectstart', event => {
-  if (!isUiTarget(event.target)) event.preventDefault();
-}, true);
-viewport.addEventListener('pointerup', endPan);
-viewport.addEventListener('pointercancel', endPan);
-viewport.addEventListener('contextmenu', event => event.preventDefault());
-
-window.addEventListener('resize', () => {
-  if (gridW && gridH) handleViewportGeometryChange();
-});
-window.addEventListener('keydown', event => {
-  const active = document.activeElement;
-  if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) return;
-  if (event.key === 'h' || event.key === 'H') {
-    event.preventDefault();
-    setSidebarCollapsed(!document.body.classList.contains('sidebar-collapsed'));
-  } else if (event.key === '+' || event.key === '=') {
-    event.preventDefault();
-    setPanelScaleAroundCentre(panelScale * 1.18);
-  } else if (event.key === '-' || event.key === '_') {
-    event.preventDefault();
-    setPanelScaleAroundCentre(panelScale / 1.18);
-  } else if (event.key === '0') {
-    event.preventDefault();
-    fitPanelWindows();
-  }
-});
-
-document.getElementById('toggle-fit').addEventListener('click', fitToScreen);
-document.getElementById('toggle-flip').addEventListener('click', toggleFlip);
-document.getElementById('toggle-silk').addEventListener('click', toggleSilk);
-document.getElementById('toggle-sidebar').addEventListener('click', () => setSidebarCollapsed(true));
-document.getElementById('panel-zoom-out').addEventListener('click', () => setPanelScaleAroundCentre(panelScale / 1.18));
-document.getElementById('panel-zoom-in').addEventListener('click', () => setPanelScaleAroundCentre(panelScale * 1.18));
-document.getElementById('panel-zoom-fit').addEventListener('click', fitPanelWindows);
-document.getElementById('net-search').addEventListener('input', event => {
-  const value = parseInt(event.target.value, 10);
-  if (Number.isFinite(value)) selectNet(value);
-  else clearNet();
-});
-sidebarTab.addEventListener('pointerdown', event => event.stopPropagation());
-sidebarTab.addEventListener('click', event => {
-  event.stopPropagation();
-  setSidebarCollapsed(false);
-});
-
-init().catch(error => {
-  document.getElementById('loading').textContent = 'Error: ' + error.message;
-  console.error(error);
-});
+})();
 </script>
 </body>
 </html>
