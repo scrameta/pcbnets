@@ -52,14 +52,17 @@ PTH_RE   = re.compile(r'(?:^|[-_])PTH$', re.IGNORECASE)
 NPTH_RE  = re.compile(r'(?:^|[-_])NPTH$', re.IGNORECASE)
 VIA_RE   = re.compile(r'(?:^|[-_])VIAS?$', re.IGNORECASE)
 
-GERBER_EXTS = {'.gbr', '.gtl', '.gbl', '.gts', '.gbs', '.gto', '.gbo', '.gko', '.gm1',
+GERBER_EXTS = {'.gbr', '.gtl', '.gbl', '.gts', '.gbs', '.gto', '.gbo', '.gko', '.gm1', '.gml',
                '.gtp', '.gbp', '.gpb', '.gpt', '.gpl',
                '.g1', '.g2', '.g3', '.g4', '.g5', '.g6', '.g7', '.g8',
-               '.gp1', '.gp2', '.gp3', '.gp4'}
-DRILL_EXTS  = {'.drl', '.txt', '.xln', '.nc'}
+               '.gp1', '.gp2', '.gp3', '.gp4',
+               # Autodesk EAGLE/CadSoft CAM Processor extensions.
+               '.cmp', '.sol', '.stc', '.sts', '.plc', '.pls', '.crc', '.crs',
+               '.ly2', '.ly3', '.ly4', '.ly5', '.ly6', '.ly7', '.ly8'}
+DRILL_EXTS  = {'.drl', '.txt', '.xln', '.nc', '.drd', '.ncd'}
 
 
-# Altium-style extension → canonical KiCad-style layer name.
+# Tool-specific extension → canonical KiCad-style layer name.
 # Used as a fallback when filename-pattern detection (KiCad style) fails.
 # A few EDA tools (Altium, OrCAD, older EAGLE exports) encode the layer
 # function in the extension rather than the stem.
@@ -74,6 +77,16 @@ EXTENSION_LAYER_MAP = {
     '.gbp': 'B_Paste',
     '.gko': 'Edge_Cuts',
     '.gm1': 'Edge_Cuts',
+    '.gml': 'Edge_Cuts',
+    # EAGLE CAM Processor defaults.
+    '.cmp': 'F_Cu',
+    '.sol': 'B_Cu',
+    '.plc': 'F_Silkscreen',
+    '.pls': 'B_Silkscreen',
+    '.stc': 'F_Mask',
+    '.sts': 'B_Mask',
+    '.crc': 'F_Paste',
+    '.crs': 'B_Paste',
     # Inner layers — numbered: .g1 → In1_Cu, .g2 → In2_Cu, etc.
     # Plane layers (.gp1, .gp2) also map to inner copper numerically.
     # Handled in detect_layers because the number needs to be parsed.
@@ -109,8 +122,8 @@ def detect_layers(directory: pathlib.Path) -> dict[str, str]:
 
     1. KiCad-style filename patterns (``F_Cu``, ``In1_Cu``, etc.) on the
        stem after stripping a leading ``project-`` prefix.
-    2. Altium-style file extensions (``.gtl`` → ``F_Cu``, ``.g1`` →
-       ``In1_Cu``, etc.) as a fallback.
+    2. Tool-specific file extensions (``.gtl``/``.cmp`` → ``F_Cu``,
+       ``.g1``/``.ly2`` → ``In1_Cu``, etc.) as a fallback.
     3. Via-named drill files map to ``via`` for electrical connectivity.
     4. Plain drill files (``.drl`` with no PTH/NPTH/Via suffix) map to
        ``drill`` as a physical-hole mask.  The render step may still fall
@@ -120,12 +133,17 @@ def detect_layers(directory: pathlib.Path) -> dict[str, str]:
     mapping: dict[str, str] = {}
 
     altium_inner_re = re.compile(r'^\.gp?(\d+)$', re.IGNORECASE)
+    eagle_inner_re = re.compile(r'^\.ly(\d+)$', re.IGNORECASE)
 
     for path in sorted(directory.iterdir()):
         if not path.is_file():
             continue
         ext = path.suffix.lower()
-        is_gerber = ext in GERBER_EXTS or altium_inner_re.match(ext)
+        is_gerber = (
+            ext in GERBER_EXTS
+            or altium_inner_re.match(ext)
+            or eagle_inner_re.match(ext)
+        )
         is_drill  = ext in DRILL_EXTS
         if not is_gerber and not is_drill:
             continue
@@ -161,10 +179,16 @@ def detect_layers(directory: pathlib.Path) -> dict[str, str]:
         if matched:
             continue
 
-        # Pass 2: Altium-style extensions.
+        # Pass 2: tool-specific extensions.
         m = altium_inner_re.match(ext)
         if m:
             mapping.setdefault(f'In{int(m.group(1))}_Cu', path.name)
+            continue
+        m = eagle_inner_re.match(ext)
+        if m:
+            # EAGLE .ly2 is physical layer 2, i.e. the first inner copper
+            # layer after top copper; .ly3 is In2_Cu, and so on.
+            mapping.setdefault(f'In{int(m.group(1)) - 1}_Cu', path.name)
             continue
         if ext in EXTENSION_LAYER_MAP:
             mapping.setdefault(EXTENSION_LAYER_MAP[ext], path.name)

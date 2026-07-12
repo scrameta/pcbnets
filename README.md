@@ -145,10 +145,14 @@ Options:
 | `--mapping`  | —       | Path to a layers.json (skips both auto-detect and the file in `<dir>`) |
 | `--force-detect` | off | Re-detect layers and overwrite layers.json (useful after a pcbnets upgrade improved detection) |
 
-Detection handles both KiCad-style filenames (`proj-F_Cu.gbr`,
-`proj-In1_Cu.gbr`) and Altium-style extensions (`.gtl` → F_Cu, `.gbl` →
-B_Cu, `.g1`/`.g2` → In1_Cu/In2_Cu, `.gto`/`.gbo` → silkscreens, etc.).
-If detection picks up nothing, edit `layers.json` by hand — its
+Detection handles KiCad-style filenames (`proj-F_Cu.gbr`,
+`proj-In1_Cu.gbr`), Altium-style extensions (`.gtl` → F_Cu, `.gbl` →
+B_Cu, `.g1`/`.g2` → In1_Cu/In2_Cu, `.gto`/`.gbo` → silkscreens, etc.),
+and EAGLE CAM Processor extensions (`.cmp` → F_Cu, `.sol` → B_Cu,
+`.ly2`/`.ly3` → In1_Cu/In2_Cu, `.plc`/`.pls` → silkscreens,
+`.stc`/`.sts` → solder masks, `.crc`/`.crs` → paste, `.drd`/`.ncd` →
+drills). EAGLE `.dri` and `.gpi` report/info files are ignored because they
+are not renderable board layers. If detection picks up nothing, edit `layers.json` by hand — its
 canonical-name keys (`F_Cu`, `In1_Cu`, etc.) are what the downstream
 pipeline expects.
 

@@ -119,6 +119,38 @@ def test_kicad_naming_wins_over_extension(tmp_path):
     assert m == {'F_Cu': 'proj-F_Cu.gbl'}
 
 
+def test_detect_eagle_style_extensions(tmp_path):
+    """EAGLE CAM Processor filenames encode layer function in extensions."""
+    for f in ['board.cmp', 'board.ly2', 'board.ly3', 'board.sol',
+              'board.plc', 'board.pls', 'board.stc', 'board.sts',
+              'board.crc', 'board.crs', 'board.drd', 'board.ncd',
+              'board.dri', 'board.gpi']:
+        touch(tmp_path / f)
+    m = detect_layers(tmp_path)
+    assert m['F_Cu'] == 'board.cmp'
+    assert m['In1_Cu'] == 'board.ly2'
+    assert m['In2_Cu'] == 'board.ly3'
+    assert m['B_Cu'] == 'board.sol'
+    assert m['F_Silkscreen'] == 'board.plc'
+    assert m['B_Silkscreen'] == 'board.pls'
+    assert m['F_Mask'] == 'board.stc'
+    assert m['B_Mask'] == 'board.sts'
+    assert m['F_Paste'] == 'board.crc'
+    assert m['B_Paste'] == 'board.crs'
+    assert m['drill'] == 'board.drd'
+    # EAGLE .dri/.gpi files are reports/info files, not renderable layers.
+    assert 'board.dri' not in m.values()
+    assert 'board.gpi' not in m.values()
+
+
+def test_detect_eagle_drill_suffixes(tmp_path):
+    touch(tmp_path / 'board-PTH.drd')
+    touch(tmp_path / 'board-NPTH.ncd')
+    m = detect_layers(tmp_path)
+    assert m['PTH'] == 'board-PTH.drd'
+    assert m['NPTH'] == 'board-NPTH.ncd'
+
+
 def test_detect_plain_drl_treated_as_physical_drill(tmp_path):
     """A bare ``project.drl`` maps to the physical drill mask."""
     touch(tmp_path / 'myboard.drl')
